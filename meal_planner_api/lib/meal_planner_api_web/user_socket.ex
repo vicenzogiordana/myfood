@@ -2,6 +2,9 @@ defmodule MealPlannerApiWeb.UserSocket do
   use Phoenix.Socket
 
   channel "ai_chat:*", MealPlannerApiWeb.AIChannel
+  channel "calendar:*", MealPlannerApiWeb.CalendarChannel
+  channel "planning:*", MealPlannerApiWeb.PlanningChannel
+  channel "cooking:*", MealPlannerApiWeb.CookingChannel
 
   @impl true
   def connect(%{"token" => token}, socket, _connect_info) do

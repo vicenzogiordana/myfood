@@ -7,4 +7,5 @@ defmodule MealPlannerApi.AI.Client do
   @type prompt :: String.t()
 
   @callback stream_chat_completion(stream_topic(), prompt(), keyword()) :: :ok | {:error, term()}
+  @callback generate_text(prompt(), keyword()) :: {:ok, String.t()} | {:error, term()}
 end

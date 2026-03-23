@@ -10,6 +10,9 @@ import Config
 config :meal_planner_api,
   generators: [timestamp_type: :utc_datetime]
 
+config :meal_planner_api,
+  ecto_repos: [MealPlannerApi.Repo]
+
 config :meal_planner_api, MealPlannerApi.Auth.Guardian,
   issuer: "meal_planner_api",
   secret_key: "change_this_for_prod_only_guardian_secret"

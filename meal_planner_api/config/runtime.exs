@@ -23,6 +23,19 @@ end
 config :meal_planner_api, MealPlannerApiWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
+ai_client_module =
+  case System.get_env("AI_CLIENT") do
+    "gemini" -> MealPlannerApi.AI.GeminiClient
+    _ -> MealPlannerApi.AI.MockClient
+  end
+
+config :meal_planner_api, :ai_client, ai_client_module
+
+config :meal_planner_api,
+  gemini_model: System.get_env("GEMINI_MODEL", "gemini-2.0-flash"),
+  gemini_base_url: System.get_env("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"),
+  gemini_timeout_ms: String.to_integer(System.get_env("GEMINI_TIMEOUT_MS", "15000"))
+
 if config_env() == :prod do
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you

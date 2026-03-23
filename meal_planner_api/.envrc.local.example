@@ -1,0 +1,4 @@
+# Copiar este archivo a .envrc.local y completar valores reales.
+
+export GEMINI_API_KEY="pega_tu_api_key_aqui"
+# export GEMINI_BASE_URL="https://generativelanguage.googleapis.com"

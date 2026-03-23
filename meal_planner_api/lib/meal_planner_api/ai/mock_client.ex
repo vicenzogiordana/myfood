@@ -62,6 +62,11 @@ defmodule MealPlannerApi.AI.MockClient do
     :ok
   end
 
+  @impl true
+  def generate_text(prompt, opts) when is_binary(prompt) and is_list(opts) do
+    {:ok, build_response_text(prompt, opts)}
+  end
+
   defp build_response_text(prompt, opts) do
     budget = get_in(opts, [:budget, :weekly_limit_cents]) || 45_000
     currency = get_in(opts, [:budget, :currency]) || "ARS"

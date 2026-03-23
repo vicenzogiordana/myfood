@@ -8,6 +8,7 @@ defmodule MealPlannerApi.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      MealPlannerApi.Repo,
       MealPlannerApiWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:meal_planner_api, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: MealPlannerApi.PubSub},

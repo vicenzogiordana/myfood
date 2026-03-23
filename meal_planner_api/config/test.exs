@@ -1,5 +1,13 @@
 import Config
 
+config :meal_planner_api, MealPlannerApi.Repo,
+  username: "postgres",
+  password: "postgres",
+  hostname: "localhost",
+  database: "meal_planner_api_test",
+  pool: Ecto.Adapters.SQL.Sandbox,
+  pool_size: 10
+
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
 config :meal_planner_api, MealPlannerApiWeb.Endpoint,
@@ -16,3 +24,6 @@ config :phoenix, :plug_init_mode, :runtime
 # Sort query params output of verified routes for robust url comparisons
 config :phoenix,
   sort_verified_routes_query_params: true
+
+# Force mock AI client for tests
+config :meal_planner_api, :ai_client, MealPlannerApi.AI.MockClient

@@ -30,6 +30,11 @@ defmodule MealPlannerApi.AI do
     )
   end
 
+  @spec generate_text(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def generate_text(prompt, opts \\ []) when is_binary(prompt) and is_list(opts) do
+    client().generate_text(prompt, opts)
+  end
+
   defp client do
     Application.get_env(:meal_planner_api, :ai_client, MealPlannerApi.AI.MockClient)
   end

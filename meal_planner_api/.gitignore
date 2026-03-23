@@ -25,3 +25,6 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 meal_planner_api-*.tar
 
+# Local environment files (keep secrets out of git).
+.envrc.local
+

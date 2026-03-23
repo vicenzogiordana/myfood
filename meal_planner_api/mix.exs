@@ -20,7 +20,7 @@ defmodule MealPlannerApi.MixProject do
   def application do
     [
       mod: {MealPlannerApi.Application, []},
-      extra_applications: [:logger, :runtime_tools]
+      extra_applications: [:logger, :runtime_tools, :inets, :ssl]
     ]
   end
 
@@ -44,6 +44,8 @@ defmodule MealPlannerApi.MixProject do
       {:telemetry_poller, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:guardian, "~> 2.4"},
+      {:ecto_sql, "~> 3.12"},
+      {:postgrex, ">= 0.0.0"},
       {:cors_plug, "~> 3.0"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"}

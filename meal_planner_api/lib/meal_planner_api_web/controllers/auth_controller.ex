@@ -3,10 +3,16 @@ defmodule MealPlannerApiWeb.AuthController do
 
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.Auth.Guardian
+  alias MealPlannerApi.Persistence.Identity
+  alias MealPlannerApi.Revenuecat
   alias MealPlannerApi.Subscriptions
 
   def create(conn, params) do
     with {:ok, %{user: user, account: account}} <- Accounts.issue_mock_identity(params),
+         {:ok, ids} <- Identity.ensure_persistent_identity(user),
+         resolved_tier <- Revenuecat.resolve_tier(ids.account_id, user.subscription_tier),
+         user <- %{user | subscription_tier: resolved_tier},
+         account <- %{account | subscription_tier: resolved_tier},
          {:ok, token, _claims} <-
            Guardian.encode_and_sign(user, Accounts.claims_for(user, account),
              token_type: "access"
