@@ -3,6 +3,7 @@ defmodule MealPlannerApi.Planning do
   Planning context containing meal planning use-cases.
   """
 
+  alias Ecto.Multi
   import Ecto.Query, warn: false
 
   alias MealPlannerApi.Budgets
@@ -11,6 +12,7 @@ defmodule MealPlannerApi.Planning do
   alias MealPlannerApi.Persistence.Catalog.Recipe
   alias MealPlannerApi.Persistence.Catalog.RecipeDailyCost
   alias MealPlannerApi.Persistence.Identity
+  alias MealPlannerApi.Persistence.Planning.ScheduledMeal
   alias MealPlannerApi.Persistence.Planning, as: PlanningPersistence
   alias MealPlannerApi.Repo
   alias MealPlannerApi.Subscriptions
@@ -18,85 +20,87 @@ defmodule MealPlannerApi.Planning do
   @days ~w(monday tuesday wednesday thursday friday saturday sunday)
   @planning_slots [:breakfast, :lunch, :dinner]
 
-  @spec weekly_plan_for(map(), map()) :: WeeklyPlan.t()
+  @spec weekly_plan_for(map(), map()) :: {:ok, WeeklyPlan.t()} | {:error, atom()}
   def weekly_plan_for(user, params \\ %{}) when is_map(user) and is_map(params) do
     account_type = Map.get(user, :account_type, :individual)
     tier = Map.get(user, :subscription_tier, :free)
 
-    kcal_target = parse_int(Map.get(params, "kcal_target"), 2100)
-    budget = Budgets.resolve_for(user, params)
-    inventory = Inventory.available_for(user, params)
-    max_days = Subscriptions.max_planning_days(tier)
-    selected_days = Enum.take(@days, max_days)
-    identity = resolve_identity(user)
+    with {:ok, max_days} <- resolve_max_planning_days(user),
+         {:ok, selected_days} <- resolve_selected_days(params, max_days) do
+      kcal_target = parse_int(Map.get(params, "kcal_target"), 2100)
+      budget = Budgets.resolve_for(user, params)
+      inventory = Inventory.available_for(user, params)
+      identity = resolve_identity(user)
 
-    candidates_by_slot =
-      build_candidates_by_slot(identity, inventory, kcal_target, account_type)
+      candidates_by_slot =
+        build_candidates_by_slot(identity, inventory, kcal_target, account_type)
 
-    optimization_payload =
-      build_optimization_payload(
-        selected_days,
-        kcal_target,
-        budget.weekly_limit_cents,
-        account_type,
-        tier,
-        candidates_by_slot,
-        inventory
-      )
+      optimization_payload =
+        build_optimization_payload(
+          selected_days,
+          kcal_target,
+          budget.weekly_limit_cents,
+          account_type,
+          tier,
+          candidates_by_slot,
+          inventory
+        )
 
-    day_plans =
-      build_day_plans_from_optimizer(
-        selected_days,
-        optimization_payload,
-        candidates_by_slot,
-        account_type,
-        kcal_target,
-        inventory
-      )
+      day_plans =
+        build_day_plans_from_optimizer(
+          selected_days,
+          optimization_payload,
+          candidates_by_slot,
+          account_type,
+          kcal_target,
+          inventory
+        )
 
-    estimated_cost_cents =
-      day_plans
-      |> Enum.flat_map(& &1.meals)
-      |> Enum.reduce(0, fn meal, acc -> acc + meal.estimated_cost_cents end)
+      estimated_cost_cents =
+        day_plans
+        |> Enum.flat_map(& &1.meals)
+        |> Enum.reduce(0, fn meal, acc -> acc + meal.estimated_cost_cents end)
 
-    budget_ok? = Budgets.within_limit?(budget, estimated_cost_cents)
+      budget_ok? = Budgets.within_limit?(budget, estimated_cost_cents)
 
-    notes =
-      if account_type == :group do
-        [
-          "Group mode: meals include shareable portions",
-          "Shopping list is optimized for bulk prep"
-        ]
-      else
-        ["Individual mode: portions and macros are single-user tuned"]
-      end
+      notes =
+        if account_type == :group do
+          [
+            "Group mode: meals include shareable portions",
+            "Shopping list is optimized for bulk prep"
+          ]
+        else
+          ["Individual mode: portions and macros are single-user tuned"]
+        end
 
-    notes =
-      notes ++
-        [
-          "Budget mode: estimated #{estimated_cost_cents} #{budget.currency} cents / limit #{budget.weekly_limit_cents}",
-          "Inventory priority ingredients: #{Enum.join(Inventory.names(inventory), ", ")}",
-          "Subscription tier #{tier}: max #{max_days} planning days"
-        ]
+      notes =
+        notes ++
+          [
+            "Budget mode: estimated #{estimated_cost_cents} #{budget.currency} cents / limit #{budget.weekly_limit_cents}",
+            "Inventory priority ingredients: #{Enum.join(Inventory.names(inventory), ", ")}",
+            "Account plan limit: max #{max_days} planning days"
+          ]
 
-    notes =
-      if budget_ok? do
-        notes
-      else
-        ["Budget exceeded: reduce premium ingredients or increase budget."] ++ notes
-      end
+      notes =
+        if budget_ok? do
+          notes
+        else
+          ["Budget exceeded: reduce premium ingredients or increase budget."] ++ notes
+        end
 
-    %WeeklyPlan{
-      account_type: account_type,
-      subscription_tier: tier,
-      days: day_plans,
-      notes: notes,
-      budget: Budgets.serialize(budget),
-      budget_within_limit: budget_ok?,
-      estimated_total_cost_cents: estimated_cost_cents,
-      inventory_items: Inventory.names(inventory),
-      max_planning_days: max_days
-    }
+      {:ok,
+       %WeeklyPlan{
+         account_type: account_type,
+         subscription_tier: tier,
+         days: day_plans,
+         notes: notes,
+         budget: Budgets.serialize(budget),
+         budget_within_limit: budget_ok?,
+         estimated_total_cost_cents: estimated_cost_cents,
+         inventory_items: Inventory.names(inventory),
+         max_planning_days: max_days
+       }}
+    end
   end
 
   @spec serialize_plan(WeeklyPlan.t()) :: map()
@@ -112,6 +116,27 @@ defmodule MealPlannerApi.Planning do
       inventory_items: plan.inventory_items,
       max_planning_days: plan.max_planning_days
     }
+  end
+
+  @spec confirm_plan(map(), map()) ::
+          {:ok, %{scheduled_meals_count: non_neg_integer(), scheduled_meals: [map()]}}
+          | {:error, atom() | Ecto.Changeset.t()}
+  def confirm_plan(user, payload) when is_map(user) and is_map(payload) do
+    with {:ok, %{account_id: account_id}} <- fetch_confirm_identity(user),
+         {:ok, meals} <- parse_confirm_meals(payload),
+         :ok <- ensure_no_duplicate_slots(meals),
+         {:ok, recipes_by_id} <- fetch_allowed_recipes(account_id, meals),
+         :ok <- ensure_recipe_slot_compatibility(meals, recipes_by_id),
+         {:ok, scheduled_meals} <- persist_confirmed_meals(account_id, meals) do
+      {:ok,
+       %{
+         scheduled_meals_count: length(scheduled_meals),
+         scheduled_meals: Enum.map(scheduled_meals, &serialize_scheduled_meal/1)
+       }}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_payload}
+    end
   end
 
   defp build_day_plans_from_optimizer(
@@ -432,6 +457,157 @@ defmodule MealPlannerApi.Planning do
     }
   end
 
+  defp fetch_confirm_identity(user) do
+    case Identity.ensure_persistent_identity(user) do
+      {:ok, ids} ->
+        {:ok, ids}
+
+      {:error, _} ->
+        account_id = Map.get(user, :account_id)
+
+        if is_binary(account_id) and match?({:ok, _}, Ecto.UUID.cast(account_id)) do
+          {:ok, %{account_id: account_id, user_id: Map.get(user, :id)}}
+        else
+          {:error, :invalid_payload}
+        end
+    end
+  end
+
+  defp parse_confirm_meals(%{"meals" => meals}) when is_list(meals) do
+    parsed =
+      Enum.reduce_while(meals, {:ok, []}, fn meal, {:ok, acc} ->
+        case parse_confirm_meal(meal) do
+          {:ok, parsed_meal} -> {:cont, {:ok, [parsed_meal | acc]}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+
+    case parsed do
+      {:ok, []} -> {:error, :invalid_meals}
+      {:ok, rows} -> {:ok, Enum.reverse(rows)}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp parse_confirm_meals(_), do: {:error, :invalid_payload}
+
+  defp parse_confirm_meal(%{"date" => raw_date, "slot" => raw_slot, "recipe_id" => recipe_id})
+       when is_binary(recipe_id) do
+    with {:ok, date} <- Date.from_iso8601(raw_date),
+         {:ok, slot} <- parse_confirm_slot(raw_slot),
+         {:ok, _} <- Ecto.UUID.cast(recipe_id) do
+      {:ok, %{date: date, slot: slot, recipe_id: recipe_id}}
+    else
+      {:error, _} -> {:error, :invalid_meals}
+      _ -> {:error, :invalid_meals}
+    end
+  end
+
+  defp parse_confirm_meal(_), do: {:error, :invalid_meals}
+
+  defp parse_confirm_slot("breakfast"), do: {:ok, :breakfast}
+  defp parse_confirm_slot("lunch"), do: {:ok, :lunch}
+  defp parse_confirm_slot("snack"), do: {:ok, :snack}
+  defp parse_confirm_slot("dinner"), do: {:ok, :dinner}
+
+  defp parse_confirm_slot(slot)
+       when is_atom(slot) and slot in [:breakfast, :lunch, :snack, :dinner], do: {:ok, slot}
+
+  defp parse_confirm_slot(_), do: {:error, :invalid_slot}
+
+  defp ensure_no_duplicate_slots(meals) do
+    keys = Enum.map(meals, fn meal -> {meal.date, meal.slot} end)
+
+    if length(keys) == MapSet.size(MapSet.new(keys)),
+      do: :ok,
+      else: {:error, :duplicate_meal_slot}
+  end
+
+  defp fetch_allowed_recipes(account_id, meals) do
+    recipe_ids = meals |> Enum.map(& &1.recipe_id) |> Enum.uniq()
+
+    recipes =
+      from(r in Recipe,
+        where: r.id in ^recipe_ids,
+        where: is_nil(r.account_id) or r.account_id == ^account_id
+      )
+      |> Repo.all()
+
+    recipes_by_id = Map.new(recipes, fn recipe -> {recipe.id, recipe} end)
+
+    if map_size(recipes_by_id) == length(recipe_ids),
+      do: {:ok, recipes_by_id},
+      else: {:error, :recipe_not_found}
+  end
+
+  defp ensure_recipe_slot_compatibility(meals, recipes_by_id) do
+    if Enum.all?(meals, fn meal ->
+         slot_supported?(Map.get(recipes_by_id, meal.recipe_id), meal.slot)
+       end) do
+      :ok
+    else
+      {:error, :recipe_slot_mismatch}
+    end
+  end
+
+  defp slot_supported?(%Recipe{suitable_for_slots: slots}, slot) when is_list(slots),
+    do: slot in slots
+
+  defp slot_supported?(_, _), do: false
+
+  defp persist_confirmed_meals(account_id, meals) do
+    transaction =
+      Enum.with_index(meals)
+      |> Enum.reduce(Multi.new(), fn {meal, index}, multi ->
+        key = {:scheduled_meal, index}
+
+        Multi.run(multi, key, fn repo, _changes ->
+          attrs = %{
+            account_id: account_id,
+            date: meal.date,
+            slot: meal.slot,
+            recipe_id: meal.recipe_id,
+            is_cooked: false,
+            ai_generation_id: nil
+          }
+
+          changeset = ScheduledMeal.changeset(%ScheduledMeal{}, attrs)
+
+          repo.insert(changeset,
+            on_conflict: [
+              set: [recipe_id: meal.recipe_id, is_cooked: false, updated_at: DateTime.utc_now()]
+            ],
+            conflict_target: [:account_id, :date, :slot],
+            returning: true
+          )
+        end)
+      end)
+
+    case Repo.transaction(transaction) do
+      {:ok, result_map} ->
+        scheduled_meals =
+          result_map
+          |> Map.values()
+          |> Enum.filter(fn value -> match?(%ScheduledMeal{}, value) end)
+          |> Enum.sort_by(fn meal -> {meal.date, meal.slot} end)
+
+        {:ok, scheduled_meals}
+
+      {:error, _step, reason, _changes} ->
+        {:error, reason}
+    end
+  end
+
+  defp serialize_scheduled_meal(meal) do
+    %{
+      id: meal.id,
+      date: Date.to_iso8601(meal.date),
+      slot: Atom.to_string(meal.slot),
+      recipe_id: meal.recipe_id,
+      is_cooked: meal.is_cooked
+    }
+  end
+
   defp decimal_to_float(nil), do: 0.0
   defp decimal_to_float(%Decimal{} = value), do: Decimal.to_float(value)
   defp decimal_to_float(value) when is_number(value), do: value * 1.0
@@ -447,6 +623,28 @@ defmodule MealPlannerApi.Planning do
     case Identity.ensure_persistent_identity(user) do
       {:ok, ids} -> ids
       _ -> %{account_id: Map.get(user, :account_id), user_id: Map.get(user, :id)}
+    end
+  end
+
+  defp resolve_max_planning_days(user) do
+    case Map.get(user, :account_id) do
+      account_id when is_binary(account_id) -> Subscriptions.max_planning_days(account_id)
+      _ -> {:error, :account_not_found}
+    end
+  end
+
+  defp resolve_selected_days(params, max_days) do
+    requested_days = parse_int(Map.get(params, "days"), max_days)
+
+    cond do
+      requested_days <= 0 ->
+        {:error, :invalid_days}
+
+      requested_days > max_days ->
+        {:error, :exceeds_max_planning_days}
+
+      true ->
+        {:ok, Enum.take(@days, requested_days)}
     end
   end
 

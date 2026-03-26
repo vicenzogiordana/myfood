@@ -3,16 +3,15 @@ defmodule MealPlannerApi.PlanningChat do
   Orchestrates planning chat generation and proposal confirmation flow.
   """
 
-  alias MealPlannerApi.Persistence.Catalog
+  alias MealPlannerApi.Planning, as: PlanningEngine
   alias MealPlannerApi.Persistence.Identity
-  alias MealPlannerApi.Persistence.Planning
-
-  @slots [:lunch, :dinner]
+  alias MealPlannerApi.Persistence.Planning, as: PlanningPersistence
 
   @spec quick_favorites(map(), non_neg_integer()) :: {:ok, [map()]} | {:error, term()}
   def quick_favorites(current_user, limit \\ 10) do
     with {:ok, ids} <- Identity.ensure_persistent_identity(current_user) do
-      {:ok, Planning.list_favorite_recipes_for_user(ids.account_id, ids.user_id, limit)}
+      {:ok,
+       PlanningPersistence.list_favorite_recipes_for_user(ids.account_id, ids.user_id, limit)}
     end
   end
 
@@ -21,11 +20,14 @@ defmodule MealPlannerApi.PlanningChat do
     with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
          {:ok, parsed} <- parse_payload(payload),
          {:ok, run} <- create_run(ids, parsed, current_user),
-         proposal_json <- build_proposal(ids.account_id, parsed),
+         {:ok, proposal_json} <- build_proposal_from_engine(current_user, parsed),
          {:ok, proposal} <-
-           Planning.create_proposal(%{generation_run_id: run.id, proposal_json: proposal_json}),
+           PlanningPersistence.create_proposal(%{
+             generation_run_id: run.id,
+             proposal_json: proposal_json
+           }),
          {:ok, _updated_run} <-
-           Planning.update_generation_run(run, %{
+           PlanningPersistence.update_generation_run(run, %{
              status: :completed,
              completed_at: DateTime.utc_now()
            }) do
@@ -42,10 +44,18 @@ defmodule MealPlannerApi.PlanningChat do
     end
   end
 
+  @spec regenerate_menu(map(), map(), map()) :: {:ok, map()} | {:error, term()}
+  def regenerate_menu(current_user, base_payload, constraint_updates)
+      when is_map(base_payload) and is_map(constraint_updates) do
+    merged_payload = merge_constraint_updates(base_payload, constraint_updates)
+    generate_menu(current_user, merged_payload)
+  end
+
   @spec confirm_proposal(map(), binary()) :: {:ok, map()} | {:error, term()}
   def confirm_proposal(current_user, proposal_id) when is_binary(proposal_id) do
     with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
-         {:ok, result} <- Planning.confirm_proposal(ids.account_id, ids.user_id, proposal_id) do
+         {:ok, result} <-
+           PlanningPersistence.confirm_proposal(ids.account_id, ids.user_id, proposal_id) do
       {:ok, result}
     end
   end
@@ -53,13 +63,14 @@ defmodule MealPlannerApi.PlanningChat do
   @spec reject_proposal(map(), binary()) :: {:ok, map()} | {:error, term()}
   def reject_proposal(current_user, proposal_id) when is_binary(proposal_id) do
     with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
-         {:ok, result} <- Planning.reject_proposal(ids.account_id, ids.user_id, proposal_id) do
+         {:ok, result} <-
+           PlanningPersistence.reject_proposal(ids.account_id, ids.user_id, proposal_id) do
       {:ok, result}
     end
   end
 
   defp create_run(ids, parsed, current_user) do
-    Planning.create_generation_run(%{
+    PlanningPersistence.create_generation_run(%{
       account_id: ids.account_id,
       user_id: ids.user_id,
       status: :processing,
@@ -70,68 +81,31 @@ defmodule MealPlannerApi.PlanningChat do
         date_to: Date.to_iso8601(parsed.date_to),
         content_type: parsed.content_type,
         requested_recipe_ids: parsed.requested_recipe_ids,
+        planning_params: parsed.planning_params,
         external_user_id: Map.get(current_user, :id),
         external_account_id: Map.get(current_user, :account_id)
       }
     })
   end
 
-  defp build_proposal(account_id, parsed) do
-    favorites_by_slot =
-      parsed.requested_recipe_ids
-      |> Planning.recipes_for_ids(account_id)
-      |> Enum.group_by(& &1.slot)
-
-    slot_pool =
-      Enum.reduce(@slots, %{}, fn slot, acc ->
-        pool =
-          case Map.get(favorites_by_slot, slot, []) do
-            [] ->
-              Catalog.recipes_for_slot(account_id, slot)
-              |> Enum.map(&recipe_ref(&1, slot))
-
-            favorites ->
-              favorites
-          end
-
-        Map.put(acc, slot, if(pool == [], do: [fallback_recipe(slot)], else: pool))
-      end)
-
-    meals =
-      parsed.date_from
-      |> Date.range(parsed.date_to)
-      |> Enum.to_list()
-      |> Enum.flat_map(fn date ->
-        Enum.map(@slots, fn slot ->
-          recipe = pick_recipe(Map.fetch!(slot_pool, slot), date, slot)
-
-          %{
-            date: Date.to_iso8601(date),
-            slot: Atom.to_string(slot),
-            recipe_id: recipe.id,
-            recipe_name: recipe.name,
-            servings: 2,
-            notes: "Generado por pipeline (optimización + refinamiento)",
-            source: recipe.source
-          }
-        end)
-      end)
-
-    %{
-      summary:
-        "Propuesta para #{Date.to_iso8601(parsed.date_from)} a #{Date.to_iso8601(parsed.date_to)}",
-      date_from: Date.to_iso8601(parsed.date_from),
-      date_to: Date.to_iso8601(parsed.date_to),
-      user_message: parsed.message,
-      scheduled_meals: meals,
-      shopping_hints: shopping_hints(meals),
-      pipeline: %{
-        stage_1_data_gathering: "done",
-        stage_2_math_optimization: "simulated",
-        stage_3_llm_refinement: "simulated",
-        stage_4_structured_output: "done"
-      }
-    }
+  defp build_proposal_from_engine(current_user, parsed) do
+    with {:ok, weekly_plan} <-
+           PlanningEngine.weekly_plan_for(current_user, parsed.planning_params),
+         serialized_plan = PlanningEngine.serialize_plan(weekly_plan),
+         {:ok, scheduled_meals} <-
+           scheduled_meals_from_weekly_plan(serialized_plan, parsed.date_from, parsed.date_to) do
+      {:ok,
+       %{
+         summary:
+           "Propuesta para #{Date.to_iso8601(parsed.date_from)} a #{Date.to_iso8601(parsed.date_to)}",
+         date_from: Date.to_iso8601(parsed.date_from),
+         date_to: Date.to_iso8601(parsed.date_to),
+         user_message: parsed.message,
+         scheduled_meals: scheduled_meals,
+         weekly_plan: serialized_plan,
+         shopping_hints: shopping_hints(scheduled_meals)
+       }}
+    end
   end
 
   defp parse_payload(payload) do
@@ -143,6 +117,7 @@ defmodule MealPlannerApi.PlanningChat do
          message: normalize_message(Map.get(payload, "message")),
          content_type: normalize_content_type(Map.get(payload, "content_type")),
          requested_recipe_ids: normalize_recipe_ids(Map.get(payload, "requested_recipe_ids", [])),
+         planning_params: extract_planning_params(payload),
          date_from: date_from,
          date_to: date_to
        }}
@@ -172,19 +147,85 @@ defmodule MealPlannerApi.PlanningChat do
 
   defp normalize_recipe_ids(_), do: []
 
-  defp recipe_ref(recipe, slot) do
-    %{id: recipe.id, name: recipe.name, slot: slot, source: "favorite"}
+  defp extract_planning_params(payload) do
+    ["kcal_target", "weekly_budget_cents", "currency", "days"]
+    |> Enum.reduce(%{}, fn key, acc ->
+      case Map.get(payload, key) do
+        nil -> acc
+        "" -> acc
+        value -> Map.put(acc, key, value)
+      end
+    end)
   end
 
-  defp fallback_recipe(slot) do
-    %{id: nil, name: "Sugerencia sin receta guardada", slot: slot, source: "fallback"}
+  defp merge_constraint_updates(base_payload, constraint_updates) do
+    base_constraints =
+      base_payload
+      |> Map.get("constraints", %{})
+      |> normalize_constraint_map()
+
+    merged_constraints = Map.merge(base_constraints, normalize_constraint_map(constraint_updates))
+
+    base_payload
+    |> Map.merge(merged_constraints)
+    |> Map.put("constraints", merged_constraints)
   end
 
-  defp pick_recipe(pool, date, slot) do
-    day_index = Date.day_of_year(date)
-    slot_offset = if(slot == :lunch, do: 0, else: 1)
-    index = rem(day_index + slot_offset, length(pool))
-    Enum.at(pool, index)
+  defp normalize_constraint_map(updates) when is_map(updates) do
+    ["kcal_target", "weekly_budget_cents", "currency", "days"]
+    |> Enum.reduce(%{}, fn key, acc ->
+      case Map.get(updates, key) do
+        nil -> acc
+        "" -> acc
+        value -> Map.put(acc, key, value)
+      end
+    end)
+  end
+
+  defp scheduled_meals_from_weekly_plan(serialized_plan, date_from, date_to) do
+    days = Map.get(serialized_plan, :days, [])
+    dates = Enum.to_list(Date.range(date_from, date_to))
+
+    if days == [] do
+      {:error, :empty_generated_plan}
+    else
+      meals =
+        dates
+        |> Enum.with_index()
+        |> Enum.flat_map(fn {date, index} ->
+          day_plan = Enum.at(days, rem(index, length(days)), %{})
+          day_meals = Map.get(day_plan, :meals, [])
+
+          day_meals
+          |> Enum.map(fn meal ->
+            slot = Map.get(meal, :slot)
+            recipe_id = Map.get(meal, :recipe_id)
+
+            cond do
+              not is_atom(slot) ->
+                nil
+
+              not is_binary(recipe_id) ->
+                nil
+
+              true ->
+                %{
+                  date: Date.to_iso8601(date),
+                  slot: Atom.to_string(slot),
+                  recipe_id: recipe_id,
+                  recipe_name: Map.get(meal, :label)
+                }
+            end
+          end)
+          |> Enum.reject(&is_nil/1)
+        end)
+
+      if meals == [] do
+        {:error, :empty_generated_plan}
+      else
+        {:ok, meals}
+      end
+    end
   end
 
   defp shopping_hints(meals) do

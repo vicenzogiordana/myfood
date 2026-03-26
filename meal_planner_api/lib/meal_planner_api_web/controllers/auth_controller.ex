@@ -17,12 +17,17 @@ defmodule MealPlannerApiWeb.AuthController do
            Guardian.encode_and_sign(user, Accounts.claims_for(user, account),
              token_type: "access"
            ) do
+      subscription =
+        account.id
+        |> Subscriptions.policy_for_account()
+        |> Map.put(:tier, Atom.to_string(resolved_tier))
+
       json(conn, %{
         access_token: token,
         token_type: "Bearer",
         user: Accounts.serialize_user(user),
         account: Accounts.serialize_account(account),
-        subscription: Subscriptions.policy_for(user.subscription_tier),
+        subscription: subscription,
         websocket: %{
           path: "/socket/websocket",
           params: %{token: token}

@@ -10,6 +10,10 @@ defmodule MealPlannerApi.Persistence.Accounts.Account do
     field(:account_type, Ecto.Enum, values: [:individual, :group])
     field(:default_budget_cents, :integer, default: 0)
 
+    belongs_to(:subscription_plan, MealPlannerApi.Subscriptions.Plan,
+      foreign_key: :subscription_plan_id
+    )
+
     belongs_to(:preferred_supermarket, MealPlannerApi.Persistence.Shopping.Supermarket,
       foreign_key: :preferred_supermarket_id
     )
@@ -42,9 +46,16 @@ defmodule MealPlannerApi.Persistence.Accounts.Account do
 
   def changeset(account, attrs) do
     account
-    |> cast(attrs, [:name, :account_type, :default_budget_cents, :preferred_supermarket_id])
+    |> cast(attrs, [
+      :name,
+      :account_type,
+      :default_budget_cents,
+      :preferred_supermarket_id,
+      :subscription_plan_id
+    ])
     |> validate_required([:name, :account_type, :default_budget_cents])
     |> validate_number(:default_budget_cents, greater_than_or_equal_to: 0)
     |> foreign_key_constraint(:preferred_supermarket_id)
+    |> foreign_key_constraint(:subscription_plan_id)
   end
 end

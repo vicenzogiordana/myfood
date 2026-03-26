@@ -42,6 +42,39 @@ defmodule MealPlannerApiWeb.PlanningChannel do
     end
   end
 
+  def handle_in("swap_constraints", payload, socket) do
+    user = socket.assigns.current_user
+    request_id = Map.get(payload, "request_id", build_request_id())
+    base_payload = Map.get(payload, "base_payload", %{})
+    constraints = Map.get(payload, "constraints", %{})
+
+    broadcast!(socket, "generation_started", %{
+      request_id: request_id,
+      reason: "constraint_update"
+    })
+
+    case PlanningChat.regenerate_menu(user, base_payload, constraints) do
+      {:ok, result} ->
+        event = %{
+          request_id: request_id,
+          run_id: result.run.id,
+          proposal_id: result.proposal.id,
+          date_from: Date.to_iso8601(result.date_from),
+          date_to: Date.to_iso8601(result.date_to),
+          proposal: result.proposal_json,
+          applied_constraints: constraints
+        }
+
+        broadcast!(socket, "proposal_ready", event)
+        {:reply, {:ok, event}, socket}
+
+      {:error, reason} ->
+        error_payload = %{request_id: request_id, reason: serialize_reason(reason)}
+        broadcast!(socket, "generation_error", error_payload)
+        {:reply, {:error, error_payload}, socket}
+    end
+  end
+
   def handle_in("confirm_proposal", %{"proposal_id" => proposal_id}, socket) do
     user = socket.assigns.current_user
 

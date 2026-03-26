@@ -3,6 +3,7 @@ defmodule MealPlannerApi.ShoppingCheckout do
   Orchestrates shopping list interactions and checkout to inventory.
   """
 
+  alias MealPlannerApi.Inventory, as: DomainInventory
   alias MealPlannerApi.Persistence.Identity
   alias MealPlannerApi.Persistence.Inventory
   alias MealPlannerApi.Persistence.Planning
@@ -15,7 +16,7 @@ defmodule MealPlannerApi.ShoppingCheckout do
     with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
          {:ok, from_date, to_date} <- parse_date_range(params),
          :ok <- prune_past_unpurchased(ids.account_id),
-         {:ok, _created} <- sync_from_planning(ids.account_id, from_date, to_date) do
+         {:ok, _created} <- sync_from_planning(ids.account_id, current_user, from_date, to_date) do
       items = Shopping.list_pending_items_with_context(ids.account_id, from_date, to_date)
       categories = parse_categories(params)
       optimize_prices = parse_bool(Map.get(params, "optimize_prices"))
@@ -241,47 +242,64 @@ defmodule MealPlannerApi.ShoppingCheckout do
     :ok
   end
 
-  defp sync_from_planning(account_id, from_date, to_date) do
-    meals =
-      Planning.list_uncooked_scheduled_meals_with_recipe_ingredients(
-        account_id,
-        from_date,
-        to_date
-      )
+  defp sync_from_planning(account_id, current_user, from_date, to_date) do
+    existing_open_items = Shopping.list_pending_items(account_id, from_date, to_date)
 
-    created =
-      Enum.reduce(meals, 0, fn meal, acc ->
-        recipe_ingredients = (meal.recipe && meal.recipe.recipe_ingredients) || []
+    if existing_open_items != [] do
+      {:ok, 0}
+    else
+      available_pool =
+        current_user
+        |> DomainInventory.available_for(%{})
+        |> build_available_pool()
 
-        Enum.reduce(recipe_ingredients, acc, fn ri, local_acc ->
-          existing =
-            Shopping.find_item_by_account_meal_ingredient(
-              account_id,
-              meal.id,
-              ri.ingredient_id,
-              ri.unit
-            )
+      meals =
+        Planning.list_uncooked_scheduled_meals_with_recipe_ingredients(
+          account_id,
+          from_date,
+          to_date
+        )
 
-          if existing do
-            local_acc
-          else
-            {:ok, _item} =
-              Shopping.create_shopping_item(%{
-                account_id: account_id,
-                scheduled_meal_id: meal.id,
-                planned_date: meal.date,
-                ingredient_id: ri.ingredient_id,
-                quantity_milli: ri.quantity_milli,
-                unit: ri.unit,
-                status: :pending
-              })
+      {created, _remaining_pool} =
+        Enum.reduce(meals, {0, available_pool}, fn meal, {acc, pool} ->
+          recipe_ingredients = (meal.recipe && meal.recipe.recipe_ingredients) || []
 
-            local_acc + 1
-          end
+          Enum.reduce(recipe_ingredients, {acc, pool}, fn ri, {local_acc, local_pool} ->
+            key = {ri.ingredient_id, ri.unit}
+            available = Map.get(local_pool, key, 0)
+            needed = ri.quantity_milli
+            consumed = min(available, needed)
+            missing = needed - consumed
+            updated_pool = Map.put(local_pool, key, max(available - consumed, 0))
+
+            if missing > 0 do
+              {:ok, _item} =
+                Shopping.create_shopping_item(%{
+                  account_id: account_id,
+                  scheduled_meal_id: meal.id,
+                  planned_date: meal.date,
+                  ingredient_id: ri.ingredient_id,
+                  quantity_milli: missing,
+                  unit: ri.unit,
+                  status: :pending
+                })
+
+              {local_acc + 1, updated_pool}
+            else
+              {local_acc, updated_pool}
+            end
+          end)
         end)
-      end)
 
-    {:ok, created}
+      {:ok, created}
+    end
+  end
+
+  defp build_available_pool(items) when is_list(items) do
+    Enum.reduce(items, %{}, fn item, acc ->
+      key = {item.ingredient_id, item.unit}
+      Map.update(acc, key, item.quantity_milli, &(&1 + item.quantity_milli))
+    end)
   end
 
   defp maybe_attach_price_options(grouped_items, false), do: grouped_items

@@ -1,41 +1,94 @@
 defmodule MealPlannerApi.Subscriptions do
   @moduledoc """
-  Mock subscription policies for freemium constraints.
+  Subscription plans backed by PostgreSQL.
   """
 
-  @type tier :: :free | :premium
+  import Ecto.Query, warn: false
 
-  @spec normalize_tier(term()) :: tier()
+  alias MealPlannerApi.Repo
+  alias MealPlannerApi.Persistence.Accounts.Account
+  alias MealPlannerApi.Subscriptions.Plan
+
+  @default_individual_plan "individual"
+  @default_group_plan "family_4"
+
+  @spec normalize_tier(term()) :: :free | :premium
   def normalize_tier("premium"), do: :premium
   def normalize_tier(:premium), do: :premium
   def normalize_tier(_), do: :free
 
-  @spec policy_for(tier()) :: map()
-  def policy_for(:premium) do
-    %{
-      tier: :premium,
-      max_planning_days: 7,
-      cooking_assistant: :unlimited,
-      advanced_price_comparison: true,
-      monthly_price_usd: 3
-    }
+  @spec get_plan_by_name(binary()) :: {:ok, Plan.t()} | {:error, :plan_not_found}
+  def get_plan_by_name(name) when is_binary(name) do
+    case Repo.get_by(Plan, name: name) do
+      %Plan{} = plan -> {:ok, plan}
+      nil -> {:error, :plan_not_found}
+    end
   end
 
-  def policy_for(:free) do
-    %{
-      tier: :free,
-      max_planning_days: 3,
-      cooking_assistant: :limited,
-      advanced_price_comparison: false,
-      monthly_price_usd: 0
-    }
+  @spec get_plan_for_account(binary()) ::
+          {:ok, Plan.t()} | {:error, :account_not_found | :plan_not_found}
+  def get_plan_for_account(account_id) when is_binary(account_id) do
+    query =
+      from(a in Account,
+        where: a.id == ^account_id,
+        preload: [:subscription_plan],
+        limit: 1
+      )
+
+    case Repo.one(query) do
+      nil ->
+        {:error, :account_not_found}
+
+      %Account{subscription_plan: %Plan{} = plan} ->
+        {:ok, plan}
+
+      %Account{account_type: account_type} ->
+        get_plan_by_name(default_plan_name_for_account_type(account_type))
+    end
   end
 
-  @spec max_planning_days(tier()) :: pos_integer()
-  def max_planning_days(tier) do
-    tier
-    |> normalize_tier()
-    |> policy_for()
-    |> Map.fetch!(:max_planning_days)
+  @spec policy_for_account(binary()) :: map()
+  def policy_for_account(account_id) when is_binary(account_id) do
+    case get_plan_for_account(account_id) do
+      {:ok, plan} -> serialize_policy(plan)
+      {:error, reason} -> %{error: Atom.to_string(reason)}
+    end
+  end
+
+  @spec policy_for(map() | binary()) :: map()
+  def policy_for(%{account_id: account_id}) when is_binary(account_id),
+    do: policy_for_account(account_id)
+
+  def policy_for(account_id) when is_binary(account_id), do: policy_for_account(account_id)
+  def policy_for(_), do: %{error: "account_not_found"}
+
+  @spec max_planning_days(binary()) ::
+          {:ok, pos_integer()} | {:error, :account_not_found | :plan_not_found}
+  def max_planning_days(account_id) when is_binary(account_id) do
+    with {:ok, plan} <- get_plan_for_account(account_id) do
+      {:ok, plan.max_planning_days}
+    end
+  end
+
+  @spec default_plan_name_for_account_type(atom() | binary()) :: binary()
+  def default_plan_name_for_account_type(:group), do: @default_group_plan
+  def default_plan_name_for_account_type("group"), do: @default_group_plan
+  def default_plan_name_for_account_type(_), do: @default_individual_plan
+
+  @spec ensure_default_plan_id(atom() | binary()) ::
+          {:ok, Ecto.UUID.t()} | {:error, :plan_not_found}
+  def ensure_default_plan_id(account_type) do
+    with {:ok, plan} <- get_plan_by_name(default_plan_name_for_account_type(account_type)) do
+      {:ok, plan.id}
+    end
+  end
+
+  defp serialize_policy(%Plan{} = plan) do
+    %{
+      name: plan.name,
+      max_users: plan.max_users,
+      max_planning_days: plan.max_planning_days,
+      revenuecat_entitlement_id: plan.revenuecat_entitlement_id
+    }
   end
 end

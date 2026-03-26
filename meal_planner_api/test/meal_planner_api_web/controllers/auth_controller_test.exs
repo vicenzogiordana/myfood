@@ -28,7 +28,12 @@ defmodule MealPlannerApiWeb.AuthControllerTest do
   end
 
   test "authenticated me endpoint returns user and claims", %{conn: conn} do
-    token = issue_token(conn, %{"user_id" => "u_me", "subscription_tier" => "free"})
+    token =
+      issue_token(conn, %{
+        "user_id" => "u_me",
+        "account_id" => "acct_me",
+        "subscription_tier" => "free"
+      })
 
     conn =
       conn
@@ -43,7 +48,13 @@ defmodule MealPlannerApiWeb.AuthControllerTest do
   end
 
   test "authenticated me endpoint rejects token when user no longer exists", %{conn: conn} do
-    token = issue_token(conn, %{"user_id" => "u_me_deleted", "subscription_tier" => "free"})
+    token =
+      issue_token(conn, %{
+        "user_id" => "u_me_deleted",
+        "account_id" => "acct_me_deleted",
+        "subscription_tier" => "free"
+      })
+
     {:ok, claims} = Guardian.decode_and_verify(token)
 
     persisted_user_id = claims["sub"]
@@ -57,6 +68,17 @@ defmodule MealPlannerApiWeb.AuthControllerTest do
 
     body = json_response(conn, 401)
     assert body["error"] == "unauthorized"
+  end
+
+  test "token endpoint fails when identity fields are missing", %{conn: conn} do
+    conn =
+      post(conn, "/api/auth/token", %{
+        "user_id" => "u_missing_account",
+        "subscription_tier" => "free"
+      })
+
+    body = json_response(conn, 422)
+    assert body["error"] == "unable_to_issue_token"
   end
 
   defp issue_token(conn, params) do

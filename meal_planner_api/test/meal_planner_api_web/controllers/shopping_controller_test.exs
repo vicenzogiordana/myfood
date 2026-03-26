@@ -202,6 +202,86 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
     assert Enum.all?(shopping_items, &(&1.status == :checked_out))
   end
 
+  test "shopping list creates only the missing quantity after subtracting available inventory", %{
+    conn: conn
+  } do
+    token = issue_token(conn, %{"user_id" => "u_shop_delta", "account_id" => "acct_shop_delta"})
+    start_date = Date.add(Date.utc_today(), 1)
+    end_date = Date.add(start_date, 2)
+
+    {:ok, %{account_id: account_id, user_id: user_id}} =
+      Identity.ensure_persistent_identity(%{
+        id: "u_shop_delta",
+        account_id: "acct_shop_delta",
+        account_type: :group
+      })
+
+    {:ok, ingredient} =
+      Catalog.upsert_ingredient_by_name(%{
+        name: "Carne Delta Shopping",
+        category: :carnes,
+        calories_per_100: 250,
+        protein_g_per_100: Decimal.new("26.0"),
+        carbs_g_per_100: Decimal.new("0.0"),
+        fat_g_per_100: Decimal.new("15.0")
+      })
+
+    {:ok, recipe} =
+      Catalog.create_recipe(%{
+        account_id: account_id,
+        created_by_user_id: user_id,
+        name: "Bife delta",
+        source: :user_created,
+        servings: 1,
+        suitable_for_slots: [:lunch]
+      })
+
+    {:ok, _ri} =
+      Catalog.add_recipe_ingredient(%{
+        recipe_id: recipe.id,
+        ingredient_id: ingredient.id,
+        quantity_milli: 400,
+        unit: :g
+      })
+
+    {:ok, _meal} =
+      Planning.schedule_meal(%{
+        account_id: account_id,
+        date: start_date,
+        slot: :lunch,
+        recipe_id: recipe.id,
+        is_cooked: false
+      })
+
+    {:ok, _inventory_item} =
+      Inventory.apply_delta_and_log(%{
+        account_id: account_id,
+        ingredient_id: ingredient.id,
+        unit: :g,
+        source_kind: :planned,
+        delta: 500,
+        source_user_id: user_id,
+        trigger_type: :purchase,
+        operation: :add
+      })
+
+    list_conn =
+      build_conn()
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> get("/api/shopping-list", %{
+        "start_date" => Date.to_iso8601(start_date),
+        "end_date" => Date.to_iso8601(end_date)
+      })
+
+    body = json_response(list_conn, 200)
+    items = body["data"]["items"]
+
+    assert length(items) == 1
+    grouped = hd(items)
+    assert grouped["ingredient_id"] == ingredient.id
+    assert grouped["total_quantity_milli"] == 300
+  end
+
   test "past unpurchased rows are auto-pruned", %{conn: conn} do
     token = issue_token(conn, %{"user_id" => "u_prune", "account_id" => "acct_prune"})
 

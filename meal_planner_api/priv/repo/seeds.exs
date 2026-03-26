@@ -1,12 +1,33 @@
 alias MealPlannerApi.Persistence.Accounts
 alias MealPlannerApi.Persistence.Catalog
 alias MealPlannerApi.Persistence.Planning
+alias MealPlannerApi.Repo
+alias MealPlannerApi.Subscriptions.Plan
+
+plans = [
+  %{name: "individual", max_users: 1, max_planning_days: 7, revenuecat_entitlement_id: nil},
+  %{name: "family_4", max_users: 4, max_planning_days: 7, revenuecat_entitlement_id: nil},
+  %{name: "family_6", max_users: 6, max_planning_days: 7, revenuecat_entitlement_id: nil}
+]
+
+Enum.each(plans, fn attrs ->
+  %Plan{}
+  |> Plan.changeset(attrs)
+  |> Repo.insert(
+    on_conflict:
+      {:replace, [:max_users, :max_planning_days, :revenuecat_entitlement_id, :updated_at]},
+    conflict_target: [:name]
+  )
+end)
+
+family_4_plan = Repo.get_by!(Plan, name: "family_4")
 
 {:ok, account} =
   Accounts.create_account(%{
     name: "Familia Demo",
     account_type: :group,
-    default_budget_cents: 95_000
+    default_budget_cents: 95_000,
+    subscription_plan_id: family_4_plan.id
   })
 
 {:ok, owner} =

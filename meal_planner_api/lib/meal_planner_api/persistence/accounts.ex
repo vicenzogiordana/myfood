@@ -4,6 +4,7 @@ defmodule MealPlannerApi.Persistence.Accounts do
   import Ecto.Query, warn: false
 
   alias MealPlannerApi.Repo
+  alias MealPlannerApi.Subscriptions
 
   alias MealPlannerApi.Persistence.Accounts.{
     Account,
@@ -16,7 +17,14 @@ defmodule MealPlannerApi.Persistence.Accounts do
     UserExcludedIngredient
   }
 
-  def create_account(attrs), do: %Account{} |> Account.changeset(attrs) |> Repo.insert()
+  def create_account(attrs) do
+    attrs =
+      attrs
+      |> ensure_map()
+      |> maybe_put_default_subscription_plan_id()
+
+    %Account{} |> Account.changeset(attrs) |> Repo.insert()
+  end
 
   def get_account(id), do: Repo.get(Account, id)
 
@@ -115,4 +123,19 @@ defmodule MealPlannerApi.Persistence.Accounts do
     |> RevenuecatSubscriptionSnapshot.changeset(attrs)
     |> Repo.insert()
   end
+
+  defp maybe_put_default_subscription_plan_id(attrs) do
+    if Map.has_key?(attrs, :subscription_plan_id) do
+      attrs
+    else
+      account_type = Map.get(attrs, :account_type, :individual)
+
+      case Subscriptions.ensure_default_plan_id(account_type) do
+        {:ok, plan_id} -> Map.put(attrs, :subscription_plan_id, plan_id)
+        {:error, _} -> attrs
+      end
+    end
+  end
+
+  defp ensure_map(attrs) when is_map(attrs), do: attrs
 end

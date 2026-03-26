@@ -34,6 +34,7 @@ defmodule MealPlannerApiWeb.ConnCase do
 
   setup tags do
     :ok = Sandbox.checkout(MealPlannerApi.Repo)
+    :ok = MealPlannerApi.SubscriptionPlanFixtures.ensure_plans!()
 
     unless tags[:async] do
       Sandbox.mode(MealPlannerApi.Repo, {:shared, self()})

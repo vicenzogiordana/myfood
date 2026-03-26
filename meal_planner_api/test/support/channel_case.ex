@@ -14,6 +14,7 @@ defmodule MealPlannerApiWeb.ChannelCase do
 
   setup tags do
     :ok = Ecto.Adapters.SQL.Sandbox.checkout(MealPlannerApi.Repo)
+    :ok = MealPlannerApi.SubscriptionPlanFixtures.ensure_plans!()
 
     unless tags[:async] do
       Ecto.Adapters.SQL.Sandbox.mode(MealPlannerApi.Repo, {:shared, self()})

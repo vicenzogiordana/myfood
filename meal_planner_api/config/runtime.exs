@@ -23,13 +23,21 @@ end
 config :meal_planner_api, MealPlannerApiWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
-ai_client_module =
-  case System.get_env("AI_CLIENT") do
-    "gemini" -> MealPlannerApi.AI.GeminiClient
-    _ -> MealPlannerApi.AI.MockClient
-  end
+if config_env() != :test do
+  ai_client_module =
+    case System.get_env("AI_CLIENT", "gemini") do
+      "gemini" ->
+        MealPlannerApi.AI.GeminiClient
 
-config :meal_planner_api, :ai_client, ai_client_module
+      "mock" ->
+        raise "AI_CLIENT=mock is forbidden outside test environment"
+
+      other ->
+        raise "Unsupported AI_CLIENT=#{other}. Supported value: gemini"
+    end
+
+  config :meal_planner_api, :ai_client, ai_client_module
+end
 
 config :meal_planner_api,
   gemini_model: System.get_env("GEMINI_MODEL", "gemini-2.0-flash"),

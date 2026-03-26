@@ -4,23 +4,25 @@ defmodule MealPlannerApi.Accounts do
   """
 
   alias MealPlannerApi.Repo
+  alias MealPlannerApi.Subscriptions
   alias MealPlannerApi.Accounts.Account
   alias MealPlannerApi.Persistence.Accounts.Account, as: PersistenceAccount
   alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
 
   @spec find_or_create_identity(map()) ::
-          {:ok, %{user: PersistenceUser.t(), account: PersistenceAccount.t()}} | {:error, atom()}
+          {:ok, %{user: PersistenceUser.t(), account: PersistenceAccount.t()}}
+          | {:error, :missing_identity | :unable_to_issue_identity}
   def find_or_create_identity(params) when is_map(params) do
-    user_id = Map.get(params, "user_id", "user_1")
-    account_id = Map.get(params, "account_id", "acct_#{user_id}")
-    type = normalize_account_type(Map.get(params, "account_type", "individual"))
-
-    with {:ok, db_account_id} <- stable_uuid("account:" <> account_id),
+    with {:ok, user_id} <- fetch_required_identity(params, "user_id"),
+         {:ok, account_id} <- fetch_required_identity(params, "account_id"),
+         type <- normalize_account_type(Map.get(params, "account_type", "individual")),
+         {:ok, db_account_id} <- stable_uuid("account:" <> account_id),
          {:ok, db_user_id} <- stable_uuid("user:" <> user_id),
          {:ok, account} <- upsert_account(db_account_id, type, params),
          {:ok, user} <- upsert_user(db_user_id, db_account_id, params) do
       {:ok, %{user: user, account: account}}
     else
+      {:error, :missing_identity} -> {:error, :missing_identity}
       _ -> {:error, :unable_to_issue_identity}
     end
   end
@@ -88,23 +90,33 @@ defmodule MealPlannerApi.Accounts do
   defp normalize_account_type(:group), do: :group
   defp normalize_account_type(_), do: :individual
 
+  defp fetch_required_identity(params, key) do
+    case Map.get(params, key) do
+      value when is_binary(value) and value != "" -> {:ok, value}
+      _ -> {:error, :missing_identity}
+    end
+  end
+
   defp upsert_account(db_account_id, type, params) do
-    attrs = %{
-      name: Map.get(params, "name", "MyFood User"),
-      account_type: type,
-      default_budget_cents: 0
-    }
+    with {:ok, subscription_plan_id} <- Subscriptions.ensure_default_plan_id(type) do
+      attrs = %{
+        name: Map.get(params, "name", "MyFood User"),
+        account_type: type,
+        default_budget_cents: 0,
+        subscription_plan_id: subscription_plan_id
+      }
 
-    case Repo.get(PersistenceAccount, db_account_id) do
-      nil ->
-        %PersistenceAccount{id: db_account_id}
-        |> PersistenceAccount.changeset(attrs)
-        |> Repo.insert()
+      case Repo.get(PersistenceAccount, db_account_id) do
+        nil ->
+          %PersistenceAccount{id: db_account_id}
+          |> PersistenceAccount.changeset(attrs)
+          |> Repo.insert()
 
-      account ->
-        account
-        |> PersistenceAccount.changeset(attrs)
-        |> Repo.update()
+        account ->
+          account
+          |> PersistenceAccount.changeset(attrs)
+          |> Repo.update()
+      end
     end
   end
 

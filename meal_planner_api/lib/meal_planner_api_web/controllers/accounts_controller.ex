@@ -20,7 +20,7 @@ defmodule MealPlannerApiWeb.AccountsController do
 
     budget = Budgets.resolve_for(user, params)
     inventory = Inventory.available_for(user, params)
-    subscription = Subscriptions.policy_for(user.subscription_tier)
+    subscription = Subscriptions.policy_for_account(user.account_id)
 
     json(conn, %{
       account_id: user.account_id,

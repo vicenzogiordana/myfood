@@ -23,6 +23,7 @@ defmodule MealPlannerApiWeb.Router do
     get "/account/context", AccountsController, :context
     get "/calendar", CalendarController, :index
     get "/planning/weekly", PlanningController, :weekly
+    post "/planning/confirm", PlanningController, :confirm
     get "/planning/favorites", PlanningChatController, :favorites
     post "/planning/chat", PlanningChatController, :create
     post "/planning/proposals/:proposal_id/confirm", PlanningChatController, :confirm

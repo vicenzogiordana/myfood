@@ -18,7 +18,17 @@ defmodule MealPlannerApiWeb.PlanningChatControllerTest do
         account_type: :group
       })
 
-    {:ok, recipe} =
+    {:ok, breakfast_recipe} =
+      Catalog.create_recipe(%{
+        account_id: account_id,
+        created_by_user_id: user_id,
+        name: "Avena chat",
+        source: :user_created,
+        servings: 2,
+        suitable_for_slots: [:breakfast]
+      })
+
+    {:ok, lunch_recipe} =
       Catalog.create_recipe(%{
         account_id: account_id,
         created_by_user_id: user_id,
@@ -28,6 +38,16 @@ defmodule MealPlannerApiWeb.PlanningChatControllerTest do
         suitable_for_slots: [:lunch]
       })
 
+    {:ok, dinner_recipe} =
+      Catalog.create_recipe(%{
+        account_id: account_id,
+        created_by_user_id: user_id,
+        name: "Sopa chat",
+        source: :user_created,
+        servings: 2,
+        suitable_for_slots: [:dinner]
+      })
+
     conn =
       conn
       |> put_req_header("authorization", "Bearer " <> token)
@@ -35,7 +55,9 @@ defmodule MealPlannerApiWeb.PlanningChatControllerTest do
         "message" => "Necesito menu para la semana",
         "date_from" => "2026-03-23",
         "date_to" => "2026-03-24",
-        "requested_recipe_ids" => [recipe.id]
+        "requested_recipe_ids" => [breakfast_recipe.id, lunch_recipe.id, dinner_recipe.id],
+        "kcal_target" => 2200,
+        "weekly_budget_cents" => 90_000
       })
 
     body = json_response(conn, 200)
@@ -43,7 +65,9 @@ defmodule MealPlannerApiWeb.PlanningChatControllerTest do
     proposal_id = body["data"]["proposal_id"]
 
     assert is_binary(proposal_id)
-    assert length(body["data"]["proposal"]["scheduled_meals"]) == 4
+    assert length(body["data"]["proposal"]["scheduled_meals"]) == 6
+    assert is_map(body["data"]["proposal"]["weekly_plan"])
+    assert length(body["data"]["proposal"]["weekly_plan"]["days"]) >= 2
 
     conn =
       build_conn()
@@ -53,14 +77,14 @@ defmodule MealPlannerApiWeb.PlanningChatControllerTest do
     confirm_body = json_response(conn, 200)
 
     assert confirm_body["data"]["status"] == "confirmed"
-    assert confirm_body["data"]["scheduled_meals_count"] == 4
+    assert confirm_body["data"]["scheduled_meals_count"] == 6
 
     assert Repo.aggregate(
              from(m in ScheduledMeal, where: m.account_id == ^account_id),
              :count,
              :id
            ) ==
-             4
+             6
   end
 
   test "favorites endpoint returns user starred recipes", %{conn: conn} do
