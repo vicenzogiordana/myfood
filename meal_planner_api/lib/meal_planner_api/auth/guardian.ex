@@ -5,7 +5,8 @@ defmodule MealPlannerApi.Auth.Guardian do
 
   use Guardian, otp_app: :meal_planner_api
 
-  alias MealPlannerApi.Accounts.User
+  alias MealPlannerApi.Repo
+  alias MealPlannerApi.Persistence.Accounts.User
 
   @impl true
   def subject_for_token(%User{id: id}, _claims), do: {:ok, id}
@@ -13,19 +14,23 @@ defmodule MealPlannerApi.Auth.Guardian do
   def subject_for_token(_, _claims), do: {:error, :invalid_resource}
 
   @impl true
-  def resource_from_claims(%{"sub" => id} = claims) do
-    user =
-      %User{
-        id: id,
-        account_id: Map.get(claims, "account_id", "acct_#{id}"),
-        email: Map.get(claims, "email", "user@myfood.local"),
-        name: Map.get(claims, "name", "MyFood User"),
-        account_type: normalize_account_type(Map.get(claims, "account_type", "individual")),
-        subscription_tier:
-          normalize_subscription_tier(Map.get(claims, "subscription_tier", "free"))
-      }
+  def resource_from_claims(%{"sub" => id} = claims) when is_binary(id) do
+    case Repo.get(User, id) do
+      %User{} = user ->
+        {:ok,
+         user
+         |> Map.put(
+           :account_type,
+           normalize_account_type(Map.get(claims, "account_type", "individual"))
+         )
+         |> Map.put(
+           :subscription_tier,
+           normalize_subscription_tier(Map.get(claims, "subscription_tier", "free"))
+         )}
 
-    {:ok, user}
+      nil ->
+        {:error, :resource_not_found}
+    end
   end
 
   def resource_from_claims(_claims), do: {:error, :invalid_claims}

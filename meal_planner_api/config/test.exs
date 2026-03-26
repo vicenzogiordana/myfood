@@ -27,3 +27,6 @@ config :phoenix,
 
 # Force mock AI client for tests
 config :meal_planner_api, :ai_client, MealPlannerApi.AI.MockClient
+
+# Force mock optimizer client for deterministic planning tests
+config :meal_planner_api, :planning_optimizer_client, MealPlannerApi.Planning.MockOptimizerClient

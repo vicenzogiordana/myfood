@@ -2,6 +2,8 @@ defmodule MealPlannerApiWeb.AuthControllerTest do
   use MealPlannerApiWeb.ConnCase, async: true
 
   alias MealPlannerApi.Auth.Guardian
+  alias MealPlannerApi.Repo
+  alias MealPlannerApi.Persistence.Accounts.User
 
   test "issues token with account and subscription claims", %{conn: conn} do
     conn =
@@ -20,7 +22,7 @@ defmodule MealPlannerApiWeb.AuthControllerTest do
     assert body["subscription"]["max_planning_days"] == 7
 
     {:ok, claims} = Guardian.decode_and_verify(body["access_token"])
-    assert claims["account_id"] == "acct_auth"
+    assert claims["account_id"] == body["account"]["id"]
     assert claims["account_type"] == "group"
     assert claims["subscription_tier"] == "premium"
   end
@@ -35,9 +37,26 @@ defmodule MealPlannerApiWeb.AuthControllerTest do
 
     body = json_response(conn, 200)
 
-    assert body["user"]["id"] == "u_me"
+    assert body["user"]["id"] == body["claims"]["sub"]
     assert body["user"]["subscription_tier"] == "free"
     assert body["claims"]["subscription_tier"] == "free"
+  end
+
+  test "authenticated me endpoint rejects token when user no longer exists", %{conn: conn} do
+    token = issue_token(conn, %{"user_id" => "u_me_deleted", "subscription_tier" => "free"})
+    {:ok, claims} = Guardian.decode_and_verify(token)
+
+    persisted_user_id = claims["sub"]
+    persisted_user = Repo.get!(User, persisted_user_id)
+    Repo.delete!(persisted_user)
+
+    conn =
+      conn
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> get("/api/me")
+
+    body = json_response(conn, 401)
+    assert body["error"] == "unauthorized"
   end
 
   defp issue_token(conn, params) do

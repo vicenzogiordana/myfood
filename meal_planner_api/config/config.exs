@@ -20,6 +20,9 @@ config :meal_planner_api, MealPlannerApi.Auth.Guardian,
 config :meal_planner_api,
   ai_client: MealPlannerApi.AI.MockClient
 
+config :meal_planner_api,
+  planning_optimizer_client: MealPlannerApi.Planning.PythonOptimizerClient
+
 # Configure the endpoint
 config :meal_planner_api, MealPlannerApiWeb.Endpoint,
   url: [host: "localhost"],

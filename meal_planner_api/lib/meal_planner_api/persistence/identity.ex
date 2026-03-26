@@ -13,15 +13,32 @@ defmodule MealPlannerApi.Persistence.Identity do
           | {:error, Ecto.Changeset.t() | :invalid_identity}
   def ensure_persistent_identity(%{id: external_user_id, account_id: external_account_id} = user)
       when is_binary(external_user_id) and is_binary(external_account_id) do
-    with {:ok, account_id} <- stable_uuid("account:" <> external_account_id),
-         {:ok, user_id} <- stable_uuid("user:" <> external_user_id),
-         {:ok, _account} <- ensure_account(account_id, user),
-         {:ok, _user} <- ensure_user(user_id, account_id, user) do
-      {:ok, %{account_id: account_id, user_id: user_id}}
+    case fetch_existing_identity(external_user_id, external_account_id) do
+      {:ok, ids} ->
+        {:ok, ids}
+
+      :not_found ->
+        with {:ok, account_id} <- stable_uuid("account:" <> external_account_id),
+             {:ok, user_id} <- stable_uuid("user:" <> external_user_id),
+             {:ok, _account} <- ensure_account(account_id, user),
+             {:ok, _user} <- ensure_user(user_id, account_id, user) do
+          {:ok, %{account_id: account_id, user_id: user_id}}
+        end
     end
   end
 
   def ensure_persistent_identity(_), do: {:error, :invalid_identity}
+
+  defp fetch_existing_identity(user_id, account_id) do
+    with {:ok, _} <- Ecto.UUID.cast(user_id),
+         {:ok, _} <- Ecto.UUID.cast(account_id),
+         %Account{} <- Repo.get(Account, account_id),
+         %User{account_id: ^account_id} <- Repo.get(User, user_id) do
+      {:ok, %{account_id: account_id, user_id: user_id}}
+    else
+      _ -> :not_found
+    end
+  end
 
   defp ensure_account(account_id, user) do
     attrs = %{

@@ -4,7 +4,6 @@ defmodule MealPlannerApiWeb.CookingChannelTest do
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Catalog
-  alias MealPlannerApi.Persistence.Identity
   alias MealPlannerApi.Persistence.Planning
   alias MealPlannerApiWeb.UserSocket
 
@@ -12,12 +11,8 @@ defmodule MealPlannerApiWeb.CookingChannelTest do
   test "ask_assistant streams contextual chunks" do
     {:ok, user, account, token} = issue_identity_and_token("u_cook_chan", "acct_cook_chan")
 
-    {:ok, %{account_id: account_id, user_id: user_id}} =
-      Identity.ensure_persistent_identity(%{
-        id: user.id,
-        account_id: account.id,
-        account_type: :group
-      })
+    account_id = account.id
+    user_id = user.id
 
     {:ok, ingredient} =
       Catalog.upsert_ingredient_by_name(%{
@@ -92,7 +87,7 @@ defmodule MealPlannerApiWeb.CookingChannelTest do
 
   defp issue_identity_and_token(user_id, account_id) do
     with {:ok, %{user: user, account: account}} <-
-           Accounts.issue_mock_identity(%{"user_id" => user_id, "account_id" => account_id}),
+           Accounts.find_or_create_identity(%{"user_id" => user_id, "account_id" => account_id}),
          {:ok, token, _claims} <-
            Guardian.encode_and_sign(user, Accounts.claims_for(user, account),
              token_type: "access"

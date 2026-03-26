@@ -9,6 +9,9 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
 
   test "shopping list supports grouping, assignment, cart marking and checkout", %{conn: conn} do
     token = issue_token(conn, %{"user_id" => "u_shop", "account_id" => "acct_shop"})
+    start_date = Date.utc_today()
+    end_date = Date.add(start_date, 6)
+    second_meal_date = Date.add(start_date, 3)
 
     {:ok, %{account_id: account_id, user_id: user_id}} =
       Identity.ensure_persistent_identity(%{
@@ -56,7 +59,7 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
     {:ok, meal_1} =
       Planning.schedule_meal(%{
         account_id: account_id,
-        date: ~D[2026-03-24],
+        date: start_date,
         slot: :lunch,
         recipe_id: recipe.id,
         is_cooked: false
@@ -65,7 +68,7 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
     {:ok, meal_2} =
       Planning.schedule_meal(%{
         account_id: account_id,
-        date: ~D[2026-03-27],
+        date: second_meal_date,
         slot: :lunch,
         recipe_id: recipe.id,
         is_cooked: false
@@ -76,7 +79,7 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       Shopping.create_shopping_item(%{
         account_id: account_id,
         scheduled_meal_id: meal_1.id,
-        planned_date: ~D[2026-03-24],
+        planned_date: start_date,
         ingredient_id: ingredient.id,
         quantity_milli: 500,
         unit: :g,
@@ -88,7 +91,7 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       Shopping.create_shopping_item(%{
         account_id: account_id,
         scheduled_meal_id: meal_2.id,
-        planned_date: ~D[2026-03-27],
+        planned_date: second_meal_date,
         ingredient_id: ingredient.id,
         quantity_milli: 400,
         unit: :g,
@@ -134,8 +137,8 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       build_conn()
       |> put_req_header("authorization", "Bearer " <> token)
       |> get("/api/shopping-list", %{
-        "start_date" => "2026-03-24",
-        "end_date" => "2026-03-30",
+        "start_date" => Date.to_iso8601(start_date),
+        "end_date" => Date.to_iso8601(end_date),
         "optimize_prices" => "true"
       })
 
@@ -155,8 +158,8 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       |> post("/api/shopping-items/mark-cart", %{
         "ingredient_id" => ingredient.id,
         "in_cart" => true,
-        "start_date" => "2026-03-24",
-        "end_date" => "2026-03-30"
+        "start_date" => Date.to_iso8601(start_date),
+        "end_date" => Date.to_iso8601(end_date)
       })
 
     mark_body = json_response(mark_conn, 200)
@@ -169,8 +172,8 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       |> post("/api/shopping-items/assign-supermarket", %{
         "ingredient_id" => ingredient.id,
         "supermarket_id" => supermarket_a.id,
-        "start_date" => "2026-03-24",
-        "end_date" => "2026-03-30"
+        "start_date" => Date.to_iso8601(start_date),
+        "end_date" => Date.to_iso8601(end_date)
       })
 
     assign_body = json_response(assign_conn, 200)
@@ -182,8 +185,8 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       |> put_req_header("authorization", "Bearer " <> token)
       |> post("/api/checkout/confirm", %{
         "checkout_type" => "physical",
-        "start_date" => "2026-03-24",
-        "end_date" => "2026-03-30"
+        "start_date" => Date.to_iso8601(start_date),
+        "end_date" => Date.to_iso8601(end_date)
       })
 
     checkout_body = json_response(checkout_conn, 200)
@@ -271,6 +274,9 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
 
   test "online checkout waits for delivery before inventory mutation", %{conn: conn} do
     token = issue_token(conn, %{"user_id" => "u_online", "account_id" => "acct_online"})
+    start_date = Date.utc_today()
+    end_date = Date.add(start_date, 6)
+    planned_date = Date.add(start_date, 1)
 
     {:ok, %{account_id: account_id, user_id: user_id}} =
       Identity.ensure_persistent_identity(%{
@@ -310,7 +316,7 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
     {:ok, meal} =
       Planning.schedule_meal(%{
         account_id: account_id,
-        date: ~D[2026-03-25],
+        date: planned_date,
         slot: :dinner,
         recipe_id: recipe.id,
         is_cooked: false
@@ -320,7 +326,7 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       Shopping.create_shopping_item(%{
         account_id: account_id,
         scheduled_meal_id: meal.id,
-        planned_date: ~D[2026-03-25],
+        planned_date: planned_date,
         ingredient_id: ingredient.id,
         quantity_milli: 300,
         unit: :g,
@@ -333,8 +339,8 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       |> put_req_header("authorization", "Bearer " <> token)
       |> post("/api/checkout/confirm", %{
         "checkout_type" => "online",
-        "start_date" => "2026-03-24",
-        "end_date" => "2026-03-30"
+        "start_date" => Date.to_iso8601(start_date),
+        "end_date" => Date.to_iso8601(end_date)
       })
 
     checkout_body = json_response(checkout_conn, 200)

@@ -6,12 +6,12 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
   alias MealPlannerApiWeb.UserSocket
 
   test "generate_menu emits proposal_ready and confirm_proposal emits proposal_confirmed" do
-    {:ok, token} = issue_token("u_chan", "acct_chan")
+    {:ok, token, account} = issue_token("u_chan", "acct_chan")
 
     {:ok, socket} = connect(UserSocket, %{"token" => token})
 
     {:ok, _reply, socket} =
-      subscribe_and_join(socket, MealPlannerApiWeb.PlanningChannel, "planning:acct_chan")
+      subscribe_and_join(socket, MealPlannerApiWeb.PlanningChannel, "planning:#{account.id}")
 
     ref =
       push(socket, "generate_menu", %{
@@ -37,12 +37,12 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
 
   defp issue_token(user_id, account_id) do
     with {:ok, %{user: user, account: account}} <-
-           Accounts.issue_mock_identity(%{"user_id" => user_id, "account_id" => account_id}),
+           Accounts.find_or_create_identity(%{"user_id" => user_id, "account_id" => account_id}),
          {:ok, token, _claims} <-
            Guardian.encode_and_sign(user, Accounts.claims_for(user, account),
              token_type: "access"
            ) do
-      {:ok, token}
+      {:ok, token, account}
     end
   end
 end

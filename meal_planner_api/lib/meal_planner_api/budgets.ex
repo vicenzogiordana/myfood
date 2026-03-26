@@ -1,14 +1,17 @@
 defmodule MealPlannerApi.Budgets do
   @moduledoc """
-  Budget context with mock account constraints.
+  Budget context with account-based constraints.
   """
 
-  alias MealPlannerApi.Accounts.User
+  alias MealPlannerApi.Repo
   alias MealPlannerApi.Budgets.Budget
+  alias MealPlannerApi.Persistence.Accounts.Account
 
-  @spec resolve_for(User.t(), map()) :: Budget.t()
-  def resolve_for(%User{account_id: account_id, subscription_tier: tier}, params \\ %{}) do
-    default_limit = if tier == :premium, do: 85_000, else: 45_000
+  @spec resolve_for(map(), map()) :: Budget.t()
+  def resolve_for(user, params \\ %{}) when is_map(user) do
+    account_id = Map.get(user, :account_id)
+    tier = Map.get(user, :subscription_tier, :free)
+    default_limit = resolve_default_limit(account_id, tier)
 
     %Budget{
       account_id: account_id,
@@ -43,4 +46,23 @@ defmodule MealPlannerApi.Budgets do
   end
 
   defp parse_int(_, fallback), do: fallback
+
+  defp resolve_default_limit(account_id, tier) when is_binary(account_id) do
+    case Ecto.UUID.cast(account_id) do
+      {:ok, _} ->
+        case Repo.get(Account, account_id) do
+          %Account{default_budget_cents: cents} when is_integer(cents) and cents >= 0 -> cents
+          _ -> tier_default_limit(tier)
+        end
+
+      :error ->
+        tier_default_limit(tier)
+    end
+  end
+
+  defp resolve_default_limit(_account_id, tier), do: tier_default_limit(tier)
+
+  defp tier_default_limit(:premium), do: 85_000
+  defp tier_default_limit("premium"), do: 85_000
+  defp tier_default_limit(_), do: 45_000
 end

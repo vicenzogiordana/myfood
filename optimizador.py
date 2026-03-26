@@ -1,128 +1,185 @@
-import psycopg2
+#!/usr/bin/env python3
+import json
+import sys
+
 from ortools.linear_solver import pywraplp
-import random
 
-# =====================================================================
-# 1. CONFIGURACIÓN
-# =====================================================================
-# ¡Acordate de poner tu contraseña real acá igual que en el otro script!
-DB_URL = "postgresql://postgres.jwikygmivcovsrrdbvwn:TU_CONTRASEÑA@aws-1-sa-east-1.pooler.supabase.com:5432/postgres?sslmode=require"
 
-try:
-    conn = psycopg2.connect(DB_URL)
-    cursor = conn.cursor()
-    print("✅ Conectado a la base de datos para optimizar.")
-except Exception as e:
-    print(f"❌ Error conectando a la BD: {e}")
-    exit()
+def _error(reason, details=None):
+    payload = {"error": reason}
+    if details is not None:
+        payload["details"] = details
+    print(json.dumps(payload, ensure_ascii=True))
 
-# =====================================================================
-# 2. SIMULADOR DE PRECIOS DEL SUPERMERCADO
-# =====================================================================
-def inyectar_precios_falsos():
-    cursor.execute("SELECT COUNT(*) FROM precios_supermercado")
-    if cursor.fetchone()[0] == 0:
-        print("🛒 La tabla de precios está vacía. Inyectando precios simulados (x KG/Litro)...")
-        cursor.execute("SELECT id_ingrediente FROM ingredientes")
-        ingredientes = cursor.fetchall()
-        
-        for (id_ing,) in ingredientes:
-            # Precios aleatorios lógicos: Carne/Queso más caro, Verduras más baratas
-            if 'carne' in id_ing or 'pollo' in id_ing or 'queso' in id_ing:
-                precio = random.randint(6000, 9000)
-            elif 'cebolla' in id_ing or 'papa' in id_ing or 'arroz' in id_ing:
-                precio = random.randint(1000, 2000)
-            else:
-                precio = random.randint(2500, 5000)
-                
-            cursor.execute("""
-                INSERT INTO precios_supermercado (id_ingrediente, supermercado, precio_por_unidad, unidad_medida_precio)
-                VALUES (%s, 'SuperMock', %s, 'kg')
-                ON CONFLICT DO NOTHING
-            """, (id_ing, precio))
-        conn.commit()
-        print("✅ Precios inyectados.")
 
-# =====================================================================
-# 3. EL CEREBRO MATEMÁTICO (OR-Tools)
-# =====================================================================
-def calcular_menu_optimo(dias=7, presupuesto_maximo=15000):
-    # 1. Traemos las recetas y calculamos su costo real cruzando datos con SQL
-    # Como los precios están por KG (1000g), dividimos la cantidad por 1000
-    query = """
-        SELECT 
-            r.id_receta, 
-            r.nombre, 
-            SUM(ri.cantidad * (p.precio_por_unidad / 1000.0)) AS costo_total
-        FROM recetas r
-        JOIN receta_ingrediente ri ON r.id_receta = ri.id_receta
-        JOIN precios_supermercado p ON ri.id_ingrediente = p.id_ingrediente
-        GROUP BY r.id_receta, r.nombre
-    """
-    cursor.execute(query)
-    recetas_db = cursor.fetchall()
-    
-    if len(recetas_db) < dias:
-        print(f"⚠️ No hay suficientes recetas en la BD. Tenés {len(recetas_db)} y pediste {dias} días.")
+def _read_payload():
+    raw = sys.stdin.read()
+    if not raw or raw.strip() == "":
+        return None, "empty_stdin"
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, "invalid_json"
+
+    if not isinstance(payload, dict):
+        return None, "invalid_payload"
+
+    return payload, None
+
+
+def _validate_payload(payload):
+    days = payload.get("days")
+    slots = payload.get("slots")
+    constraints = payload.get("constraints")
+    candidates_by_slot = payload.get("candidates_by_slot")
+
+    if not isinstance(days, list) or not all(isinstance(day, str) and day for day in days):
+        return "invalid_days"
+
+    if not isinstance(slots, list) or not all(isinstance(slot, str) and slot for slot in slots):
+        return "invalid_slots"
+
+    if not isinstance(constraints, dict):
+        return "invalid_constraints"
+
+    if not isinstance(candidates_by_slot, dict):
+        return "invalid_candidates"
+
+    budget = constraints.get("weekly_budget_cents")
+    if not isinstance(budget, (int, float)):
+        return "invalid_budget"
+
+    macro_bounds = constraints.get("macro_bounds")
+    if not isinstance(macro_bounds, dict):
+        return "invalid_macro_bounds"
+
+    for key in ["protein_g", "carbs_g", "fat_g"]:
+        bounds = macro_bounds.get(key)
+        if not isinstance(bounds, dict):
+            return "invalid_macro_bounds"
+        min_val = bounds.get("min")
+        max_val = bounds.get("max")
+        if not isinstance(min_val, (int, float)) or not isinstance(max_val, (int, float)):
+            return "invalid_macro_bounds"
+        if min_val > max_val:
+            return "invalid_macro_bounds"
+
+    for slot in slots:
+        candidates = candidates_by_slot.get(slot)
+        if not isinstance(candidates, list) or len(candidates) == 0:
+            return "missing_slot_candidates"
+
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                return "invalid_candidate"
+            if "recipe_id" not in candidate:
+                return "invalid_candidate"
+
+    return None
+
+
+def _candidate_num(candidate, key):
+    value = candidate.get(key)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 0.0
+
+
+def _solve(payload):
+    days = payload["days"]
+    slots = payload["slots"]
+    constraints = payload["constraints"]
+    candidates_by_slot = payload["candidates_by_slot"]
+
+    solver = pywraplp.Solver.CreateSolver("SCIP")
+    if solver is None:
+        return None, "solver_unavailable"
+
+    x = {}
+    objective_terms = []
+
+    for day in days:
+        for slot in slots:
+            candidates = candidates_by_slot[slot]
+            slot_vars = []
+
+            for index, candidate in enumerate(candidates):
+                var = solver.BoolVar(f"x_{day}_{slot}_{index}")
+                x[(day, slot, index)] = var
+                slot_vars.append(var)
+                objective_terms.append(var * _candidate_num(candidate, "estimated_cost_cents"))
+
+            solver.Add(solver.Sum(slot_vars) == 1)
+
+    macro_bounds = constraints["macro_bounds"]
+    macro_fields = {
+        "protein_g": "protein_g_per_serving",
+        "carbs_g": "carbs_g_per_serving",
+        "fat_g": "fat_g_per_serving",
+    }
+
+    for day in days:
+        for macro_key, candidate_key in macro_fields.items():
+            terms = []
+            for slot in slots:
+                candidates = candidates_by_slot[slot]
+                for index, candidate in enumerate(candidates):
+                    terms.append(x[(day, slot, index)] * _candidate_num(candidate, candidate_key))
+
+            min_val = float(macro_bounds[macro_key]["min"])
+            max_val = float(macro_bounds[macro_key]["max"])
+            solver.Add(solver.Sum(terms) >= min_val)
+            solver.Add(solver.Sum(terms) <= max_val)
+
+    budget_terms = []
+    for day in days:
+        for slot in slots:
+            candidates = candidates_by_slot[slot]
+            for index, candidate in enumerate(candidates):
+                budget_terms.append(x[(day, slot, index)] * _candidate_num(candidate, "estimated_cost_cents"))
+
+    solver.Add(solver.Sum(budget_terms) <= float(constraints["weekly_budget_cents"]))
+    solver.Minimize(solver.Sum(objective_terms))
+
+    status = solver.Solve()
+    if status != pywraplp.Solver.OPTIMAL:
+        return None, "no_optimal_solution"
+
+    meals = []
+    for day in days:
+        for slot in slots:
+            candidates = candidates_by_slot[slot]
+            chosen_recipe_id = None
+
+            for index, candidate in enumerate(candidates):
+                if x[(day, slot, index)].solution_value() > 0.5:
+                    chosen_recipe_id = candidate.get("recipe_id")
+                    break
+
+            meals.append({"day": day, "slot": slot, "recipe_id": chosen_recipe_id})
+
+    return {"meals": meals}, None
+
+
+def main():
+    payload, error = _read_payload()
+    if error is not None:
+        _error(error)
         return
 
-    # 2. Creamos el solver de Google
-    solver = pywraplp.Solver.CreateSolver('SCIP')
-    
-    # 3. Variables de decisión (0 o 1 para cada receta)
-    x = {}
-    costos = {}
-    nombres = {}
-    
-    for (id_receta, nombre, costo) in recetas_db:
-        # Convertimos el costo a float por si viene como Decimal de la BD
-        costo = float(costo)
-        x[id_receta] = solver.BoolVar(nombre)
-        costos[id_receta] = costo
-        nombres[id_receta] = nombre
+    validation_error = _validate_payload(payload)
+    if validation_error is not None:
+        _error(validation_error)
+        return
 
-    # 4. RESTRICCIONES
-    # A. Tienen que ser exactamente 7 comidas (dias)
-    solver.Add(sum(x[id_receta] for id_receta in x) == dias)
-    
-    # B. El costo total de las recetas elegidas no puede superar el presupuesto
-    solver.Add(sum(x[id_receta] * costos[id_receta] for id_receta in x) <= presupuesto_maximo)
+    result, solve_error = _solve(payload)
+    if solve_error is not None:
+        _error(solve_error)
+        return
 
-    # 5. FUNCIÓN OBJETIVO
-    # Le decimos que busque la combinación que gaste la MENOR cantidad de plata posible
-    solver.Minimize(sum(x[id_receta] * costos[id_receta] for id_receta in x))
+    print(json.dumps(result, ensure_ascii=True))
 
-    # 6. RESOLVER
-    print(f"\n🧠 OR-Tools analizando {len(recetas_db)} recetas...")
-    print(f"Buscando {dias} comidas por menos de ${presupuesto_maximo}...\n")
-    
-    status = solver.Solve()
-
-    # 7. RESULTADOS
-    if status == pywraplp.Solver.OPTIMAL:
-        print("🎉 ¡MENÚ ÓPTIMO ENCONTRADO!")
-        print("="*40)
-        costo_final = 0
-        dia_num = 1
-        
-        for id_receta in x:
-            if x[id_receta].solution_value() == 1.0:
-                costo_plato = costos[id_receta]
-                print(f"Día {dia_num}: {nombres[id_receta]} (${costo_plato:.2f})")
-                costo_final += costo_plato
-                dia_num += 1
-                
-        print("="*40)
-        print(f"💰 Costo total de las 7 cenas: ${costo_final:.2f}")
-        print(f"Sobró del presupuesto: ${presupuesto_maximo - costo_final:.2f}")
-    else:
-        print("❌ El algoritmo no pudo encontrar una solución.")
-        print("Probablemente el presupuesto es demasiado bajo para 7 días con los precios actuales.")
 
 if __name__ == "__main__":
-    inyectar_precios_falsos()
-    # Podés jugar cambiando los 15000 por 5000 o 30000 para ver cómo reacciona la matemática
-    calcular_menu_optimo(dias=7, presupuesto_maximo=15000)
-    
-    cursor.close()
-    conn.close()
+    main()
