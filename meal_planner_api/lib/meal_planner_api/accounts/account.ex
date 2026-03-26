@@ -1,6 +1,8 @@
 defmodule MealPlannerApi.Accounts.Account do
   @moduledoc """
-  In-memory account aggregate.
+  Account-shaped DTO used by account-domain helpers.
+
+  Persistent account records live in `MealPlannerApi.Persistence.Accounts.Account`.
   """
 
   @type account_type :: :individual | :group

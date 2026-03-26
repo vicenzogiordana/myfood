@@ -12,10 +12,26 @@ defmodule MealPlannerApi.AccountsTest do
   end
 
   test "individual account only allows one linked user" do
-    account = %Account{id: "acct_1", type: :individual, owner_id: "u1", linked_user_ids: []}
+    external_user_id = Ecto.UUID.generate()
+    external_account_id = Ecto.UUID.generate()
 
-    assert {:ok, updated} = Accounts.link_user(account, "u2")
-    assert {:error, :individual_limit_reached} = Accounts.link_user(updated, "u3")
+    {:ok, %{user: user, account: account}} =
+      Accounts.find_or_create_identity(%{
+        "user_id" => external_user_id,
+        "account_id" => external_account_id,
+        "account_type" => "individual",
+        "subscription_tier" => "free"
+      })
+
+    account = %Account{
+      id: account.id,
+      type: :individual,
+      owner_id: user.id,
+      linked_user_ids: []
+    }
+
+    assert {:ok, updated} = Accounts.link_user(account, Ecto.UUID.generate())
+    assert {:error, :individual_limit_reached} = Accounts.link_user(updated, Ecto.UUID.generate())
   end
 
   test "claims include subscription tier" do

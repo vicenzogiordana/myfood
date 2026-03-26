@@ -1,6 +1,6 @@
 defmodule MealPlannerApi.Budgets.Budget do
   @moduledoc """
-  In-memory account budget object.
+  Budget value object used by planning and account context responses.
   """
 
   @enforce_keys [:account_id, :weekly_limit_cents, :currency]

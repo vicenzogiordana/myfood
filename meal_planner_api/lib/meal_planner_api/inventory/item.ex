@@ -1,6 +1,8 @@
 defmodule MealPlannerApi.Inventory.Item do
   @moduledoc """
-  In-memory inventory ingredient model.
+  Lightweight inventory item DTO used by context-level helpers.
+
+  Persistent inventory rows live in `MealPlannerApi.Persistence.Inventory.InventoryItem`.
   """
 
   @enforce_keys [:name]

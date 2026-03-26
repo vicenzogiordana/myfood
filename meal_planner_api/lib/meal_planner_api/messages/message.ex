@@ -1,6 +1,6 @@
 defmodule MealPlannerApi.Messages.Message do
   @moduledoc """
-  In-memory chat message representation.
+  Chat message DTO used for parsing and transporting conversation history.
   """
 
   @enforce_keys [:role, :content]

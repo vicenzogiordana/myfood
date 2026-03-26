@@ -1,6 +1,8 @@
 defmodule MealPlannerApi.Accounts.User do
   @moduledoc """
-  In-memory user model used until persistence is introduced.
+  User-shaped DTO used by auth and context boundaries.
+
+  Persistent user records live in `MealPlannerApi.Persistence.Accounts.User`.
   """
 
   @type account_type :: :individual | :group

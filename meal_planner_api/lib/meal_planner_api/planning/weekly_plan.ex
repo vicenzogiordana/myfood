@@ -1,6 +1,6 @@
 defmodule MealPlannerApi.Planning.WeeklyPlan do
   @moduledoc """
-  In-memory weekly meal plan representation.
+  Weekly planning view model produced by the planning engine and serialized for API responses.
   """
 
   @enforce_keys [:account_type, :subscription_tier, :days]
