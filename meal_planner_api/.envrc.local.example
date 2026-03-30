@@ -10,7 +10,7 @@ export GEMINI_API_KEY="pega_tu_api_key_aqui"
 
 # AI
 # export AI_CLIENT="gemini"
-# export GEMINI_MODEL="gemini-2.0-flash"
+# export GEMINI_MODEL="gemini-2.5-flash-lite"
 # export GEMINI_TIMEOUT_MS="15000"
 
 # Social Auth: Google

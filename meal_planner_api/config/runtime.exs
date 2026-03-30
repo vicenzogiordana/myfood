@@ -40,7 +40,7 @@ if config_env() != :test do
 end
 
 config :meal_planner_api,
-  gemini_model: System.get_env("GEMINI_MODEL", "gemini-2.0-flash"),
+  gemini_model: System.get_env("GEMINI_MODEL", "gemini-2.5-flash-lite"),
   gemini_base_url: System.get_env("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"),
   gemini_timeout_ms: String.to_integer(System.get_env("GEMINI_TIMEOUT_MS", "15000"))
 

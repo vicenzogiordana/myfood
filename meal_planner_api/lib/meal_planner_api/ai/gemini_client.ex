@@ -7,7 +7,7 @@ defmodule MealPlannerApi.AI.GeminiClient do
 
   alias MealPlannerApiWeb.Endpoint
 
-  @default_model "gemini-2.0-flash"
+  @default_model "gemini-2.5-flash-lite"
   @default_base_url "https://generativelanguage.googleapis.com"
 
   @impl true
@@ -81,9 +81,15 @@ defmodule MealPlannerApi.AI.GeminiClient do
         _ -> nil
       end
 
+    max_output_tokens =
+      case Keyword.get(opts, :max_output_tokens, 2048) do
+        n when is_integer(n) and n > 0 -> n
+        _ -> 2048
+      end
+
     payload = %{
       contents: [%{role: "user", parts: [%{text: prompt}]}],
-      generationConfig: %{temperature: 0.4, maxOutputTokens: 300}
+      generationConfig: %{temperature: 0.4, maxOutputTokens: max_output_tokens}
     }
 
     payload =
