@@ -23,6 +23,16 @@ config :meal_planner_api,
 config :meal_planner_api,
   planning_optimizer_client: MealPlannerApi.Planning.PythonOptimizerClient
 
+config :meal_planner_api,
+  social_verifier: MealPlannerApi.Auth.SocialVerifier,
+  google_oauth_client_ids: [],
+  apple_oauth_client_ids: [],
+  facebook_app_id: nil,
+  facebook_app_secret: nil,
+  google_tokeninfo_url: "https://oauth2.googleapis.com/tokeninfo",
+  apple_jwks_url: "https://appleid.apple.com/auth/keys",
+  facebook_graph_url: "https://graph.facebook.com"
+
 # Configure the endpoint
 config :meal_planner_api, MealPlannerApiWeb.Endpoint,
   url: [host: "localhost"],

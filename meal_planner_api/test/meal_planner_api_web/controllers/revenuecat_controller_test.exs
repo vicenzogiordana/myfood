@@ -1,12 +1,19 @@
 defmodule MealPlannerApiWeb.RevenuecatControllerTest do
   use MealPlannerApiWeb.ConnCase, async: false
 
+  alias MealPlannerApi.Accounts, as: DomainAccounts
   alias MealPlannerApi.Auth.Guardian
-  alias MealPlannerApi.Persistence.Accounts
-  alias MealPlannerApi.Persistence.Identity
+  alias MealPlannerApi.Persistence.Accounts, as: AccountsPersistence
 
   test "sync endpoint upserts customer and entitlements", %{conn: conn} do
-    token = issue_token(conn, %{"user_id" => "u_rc_sync", "account_id" => "acct_rc_sync"})
+    token =
+      issue_token(conn, %{
+        "mode" => "register",
+        "email" => "u_rc_sync@myfood.local",
+        "password" => "supersecret123",
+        "name" => "U RC Sync",
+        "account_type" => "group"
+      })
 
     conn =
       build_conn()
@@ -31,22 +38,23 @@ defmodule MealPlannerApiWeb.RevenuecatControllerTest do
     assert body["data"]["processed_entitlements"] == 1
     assert body["data"]["tier"] == "premium"
 
-    customer = Accounts.get_revenuecat_customer_by_app_user_id("rc_user_sync_1")
+    customer = AccountsPersistence.get_revenuecat_customer_by_app_user_id("rc_user_sync_1")
     assert customer != nil
   end
 
   test "webhook endpoint records event", %{conn: _conn} do
-    {:ok, ids} =
-      Identity.ensure_persistent_identity(%{
-        id: "u_rc_hook",
-        account_id: "acct_rc_hook",
-        account_type: :group
+    {:ok, register_payload} =
+      DomainAccounts.register_with_password(%{
+        "email" => "u_rc_hook@myfood.local",
+        "password" => "supersecret123",
+        "name" => "U RC Hook",
+        "account_type" => "group"
       })
 
     {:ok, _customer} =
-      Accounts.upsert_revenuecat_customer(%{
-        account_id: ids.account_id,
-        user_id: ids.user_id,
+      AccountsPersistence.upsert_revenuecat_customer(%{
+        account_id: register_payload.account.id,
+        user_id: register_payload.user.id,
         rc_app_user_id: "rc_user_hook_1"
       })
 
@@ -72,7 +80,15 @@ defmodule MealPlannerApiWeb.RevenuecatControllerTest do
   end
 
   test "auth token uses premium tier from active entitlement", %{conn: conn} do
-    token = issue_token(conn, %{"user_id" => "u_rc_auth", "account_id" => "acct_rc_auth"})
+    register_payload = %{
+      "mode" => "register",
+      "email" => "u_rc_auth@myfood.local",
+      "password" => "supersecret123",
+      "name" => "U RC Auth",
+      "account_type" => "group"
+    }
+
+    token = issue_token(conn, register_payload)
 
     sync_conn =
       build_conn()
@@ -92,9 +108,10 @@ defmodule MealPlannerApiWeb.RevenuecatControllerTest do
 
     auth_conn =
       build_conn()
-      |> post("/api/auth/token", %{
-        "user_id" => "u_rc_auth",
-        "account_id" => "acct_rc_auth",
+      |> post("/api/auth/password", %{
+        "mode" => "login",
+        "email" => "u_rc_auth@myfood.local",
+        "password" => "supersecret123",
         "subscription_tier" => "free"
       })
 
@@ -106,7 +123,7 @@ defmodule MealPlannerApiWeb.RevenuecatControllerTest do
   end
 
   defp issue_token(conn, params) do
-    response = conn |> post("/api/auth/token", params) |> json_response(200)
+    response = conn |> post("/api/auth/password", params) |> json_response(200)
     response["access_token"]
   end
 end

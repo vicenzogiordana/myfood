@@ -2,3 +2,28 @@
 
 export GEMINI_API_KEY="pega_tu_api_key_aqui"
 # export GEMINI_BASE_URL="https://generativelanguage.googleapis.com"
+
+# Server
+# export PORT="4000"
+# export PHX_HOST="localhost"
+# export SECRET_KEY_BASE="replace_with_generated_secret"
+
+# AI
+# export AI_CLIENT="gemini"
+# export GEMINI_MODEL="gemini-2.0-flash"
+# export GEMINI_TIMEOUT_MS="15000"
+
+# Social Auth: Google
+# export GOOGLE_OAUTH_CLIENT_IDS="your_google_ios_client_id,your_google_web_client_id"
+
+# Social Auth: Apple
+# export APPLE_OAUTH_CLIENT_IDS="com.myfood.app,com.myfood.web"
+
+# Social Auth: Facebook
+# export FACEBOOK_APP_ID="your_facebook_app_id"
+# export FACEBOOK_APP_SECRET="your_facebook_app_secret"
+
+# Social Auth provider endpoint overrides (optional)
+# export GOOGLE_TOKENINFO_URL="https://oauth2.googleapis.com/tokeninfo"
+# export APPLE_JWKS_URL="https://appleid.apple.com/auth/keys"
+# export FACEBOOK_GRAPH_URL="https://graph.facebook.com"

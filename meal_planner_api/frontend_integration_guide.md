@@ -11,30 +11,14 @@ This document is the integration reference for the current backend contracts in 
 
 ## 2. Authentication
 
-### 2.1 Issue access token
+Auth policy note:
 
-- Method: `POST`
-- Path: `/api/auth/token`
-- Auth required: No
+- Supported login entry points are `/api/auth/password` and `/api/auth/social`.
+- Legacy `/api/auth/token` has been removed.
 
-Request body (minimum):
+### 2.1 Shared auth success response
 
-```json
-{
-  "provider": "google",
-  "provider_user_id": "google-uid-123",
-  "email": "user@example.com",
-  "name": "Vicenzo",
-  "subscription_tier": "free"
-}
-```
-
-Notes:
-
-- `subscription_tier` is optional in input, defaults to `free`.
-- Tier is resolved server-side with RevenueCat before token generation.
-
-Success response:
+Both `/api/auth/social` and `/api/auth/password` return this payload on success:
 
 ```json
 {
@@ -61,15 +45,89 @@ Success response:
 }
 ```
 
-Error response (`422`):
+### 2.2 Social auth (Google / Apple / Facebook)
+
+- Method: `POST`
+- Path: `/api/auth/social`
+- Auth required: No
+
+Request body:
 
 ```json
 {
-  "error": "unable_to_issue_token"
+  "provider": "google",
+  "id_token": "<provider_id_token>",
+  "subscription_tier": "free"
 }
 ```
 
-### 2.2 Authenticated user endpoints
+Supported `provider` values:
+
+- `google`
+- `apple`
+- `facebook`
+
+Provider token semantics for `id_token` field:
+
+- `google`: Google ID token (JWT)
+- `apple`: Apple identity token (JWT)
+- `facebook`: Facebook user access token
+
+Success response (`200`):
+
+- Uses the shared auth payload described in `2.1`.
+
+Error responses:
+
+- `400`: invalid payload shape (`invalid_social_payload`)
+- `401`: invalid token/provider errors (`invalid_social_token`, `unsupported_provider`, etc.)
+- `422`: token issuance/identity persistence errors
+
+### 2.3 Email/password auth
+
+- Method: `POST`
+- Path: `/api/auth/password`
+- Auth required: No
+
+Request body (register):
+
+```json
+{
+  "mode": "register",
+  "email": "user@example.com",
+  "password": "supersecret123",
+  "name": "Vicenzo",
+  "account_type": "individual",
+  "subscription_tier": "free"
+}
+```
+
+Request body (login):
+
+```json
+{
+  "mode": "login",
+  "email": "user@example.com",
+  "password": "supersecret123"
+}
+```
+
+Rules:
+
+- `mode` supports `register` and `login` (defaults to `login` if omitted).
+- `password` minimum length is 8 for register.
+
+Success response (`200`):
+
+- Uses the shared auth payload described in `2.1`.
+
+Error responses:
+
+- `400`: invalid payload or mode (`invalid_email`, `invalid_password`, `password_too_short`, `invalid_auth_mode`)
+- `401`: auth errors (`invalid_credentials`, `email_already_registered`)
+- `422`: persistence/token issuance errors
+
+### 2.4 Authenticated user endpoints
 
 All routes below require:
 
@@ -606,7 +664,7 @@ Shopping errors are returned as `422` with:
 
 ## 8.1 Connect socket
 
-Use token returned by `/api/auth/token`:
+Use token returned by either `/api/auth/password` or `/api/auth/social`:
 
 ```ts
 import { Socket } from "phoenix";
@@ -834,7 +892,7 @@ For unsupported event name, channel reply error is:
 
 ## 9. Recommended React Native Integration Sequence
 
-1. `POST /api/auth/token` and persist `access_token` securely.
+1. `POST /api/auth/password` or `POST /api/auth/social` and persist `access_token` securely.
 2. Configure HTTP client with `Authorization: Bearer <token>`.
 3. Load `/api/account/context` for budget, inventory names, and plan limits.
 4. Open socket with token and join `planning:<account_id>`.

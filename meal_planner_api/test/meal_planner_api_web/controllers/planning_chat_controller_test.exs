@@ -2,6 +2,8 @@ defmodule MealPlannerApiWeb.PlanningChatControllerTest do
   use MealPlannerApiWeb.ConnCase, async: false
   import Ecto.Query
 
+  alias MealPlannerApi.Accounts
+  alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Calendar
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApi.Persistence.Identity
@@ -119,8 +121,12 @@ defmodule MealPlannerApiWeb.PlanningChatControllerTest do
     assert Enum.any?(body["data"], &(&1["recipe_id"] == recipe.id))
   end
 
-  defp issue_token(conn, params) do
-    response = conn |> post("/api/auth/token", params) |> json_response(200)
-    response["access_token"]
+  defp issue_token(_conn, params) do
+    {:ok, %{user: user, account: account}} = Accounts.find_or_create_identity(params)
+
+    {:ok, token, _claims} =
+      Guardian.encode_and_sign(user, Accounts.claims_for(user, account), token_type: "access")
+
+    token
   end
 end

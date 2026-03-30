@@ -46,7 +46,8 @@ All business logic uses pure Elixir structs and maps, with mock data and determi
 ## Auth Flow (HTTP + WS)
 
 1. Client requests token:
-   - `POST /api/auth/token`
+  - `POST /api/auth/password` (email/password)
+  - `POST /api/auth/social` (Google/Apple/Facebook)
 2. Client uses token for protected REST APIs:
    - `Authorization: Bearer <token>`
 3. Client uses same token for socket connect params:

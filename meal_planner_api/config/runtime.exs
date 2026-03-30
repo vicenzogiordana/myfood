@@ -44,6 +44,28 @@ config :meal_planner_api,
   gemini_base_url: System.get_env("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"),
   gemini_timeout_ms: String.to_integer(System.get_env("GEMINI_TIMEOUT_MS", "15000"))
 
+google_client_ids =
+  System.get_env("GOOGLE_OAUTH_CLIENT_IDS", "")
+  |> String.split(",", trim: true)
+  |> Enum.map(&String.trim/1)
+  |> Enum.reject(&(&1 == ""))
+
+apple_client_ids =
+  System.get_env("APPLE_OAUTH_CLIENT_IDS", "")
+  |> String.split(",", trim: true)
+  |> Enum.map(&String.trim/1)
+  |> Enum.reject(&(&1 == ""))
+
+config :meal_planner_api,
+  google_oauth_client_ids: google_client_ids,
+  apple_oauth_client_ids: apple_client_ids,
+  facebook_app_id: System.get_env("FACEBOOK_APP_ID"),
+  facebook_app_secret: System.get_env("FACEBOOK_APP_SECRET"),
+  google_tokeninfo_url:
+    System.get_env("GOOGLE_TOKENINFO_URL", "https://oauth2.googleapis.com/tokeninfo"),
+  apple_jwks_url: System.get_env("APPLE_JWKS_URL", "https://appleid.apple.com/auth/keys"),
+  facebook_graph_url: System.get_env("FACEBOOK_GRAPH_URL", "https://graph.facebook.com")
+
 if config_env() == :prod do
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you

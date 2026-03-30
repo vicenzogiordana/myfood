@@ -2,6 +2,7 @@ defmodule MealPlannerApiWeb.PlanningControllerTest do
   use MealPlannerApiWeb.ConnCase, async: true
 
   alias MealPlannerApi.Accounts
+  alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApi.Persistence.Planning
 
@@ -143,8 +144,20 @@ defmodule MealPlannerApiWeb.PlanningControllerTest do
     assert body["error"] == "invalid_payload"
   end
 
-  defp issue_token(conn, params) do
-    response = conn |> post("/api/auth/token", params) |> json_response(200)
-    response["access_token"]
+  defp issue_token(_conn, params) do
+    {:ok, %{user: user, account: account}} = Accounts.find_or_create_identity(params)
+
+    requested_tier =
+      params
+      |> Map.get("subscription_tier", "free")
+      |> MealPlannerApi.Subscriptions.normalize_tier()
+
+    user = Map.put(user, :subscription_tier, requested_tier)
+    account = Map.put(account, :subscription_tier, requested_tier)
+
+    {:ok, token, _claims} =
+      Guardian.encode_and_sign(user, Accounts.claims_for(user, account), token_type: "access")
+
+    token
   end
 end

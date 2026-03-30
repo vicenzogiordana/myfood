@@ -44,6 +44,7 @@ defmodule MealPlannerApi.MixProject do
       {:telemetry_poller, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:guardian, "~> 2.4"},
+      {:bcrypt_elixir, "~> 3.1"},
       {:ecto_sql, "~> 3.12"},
       {:postgrex, ">= 0.0.0"},
       {:cors_plug, "~> 3.0"},

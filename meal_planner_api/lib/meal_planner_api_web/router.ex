@@ -12,7 +12,8 @@ defmodule MealPlannerApiWeb.Router do
   scope "/api", MealPlannerApiWeb do
     pipe_through :api
 
-    post "/auth/token", AuthController, :create
+    post "/auth/social", AuthController, :social
+    post "/auth/password", AuthController, :password
     post "/billing/revenuecat/webhook", RevenuecatController, :webhook
   end
 

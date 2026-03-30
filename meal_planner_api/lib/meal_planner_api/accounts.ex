@@ -3,6 +3,7 @@ defmodule MealPlannerApi.Accounts do
   Accounts context implementing individual vs group business rules.
   """
 
+  alias Ecto.Multi
   alias MealPlannerApi.Repo
   alias MealPlannerApi.Subscriptions
   alias MealPlannerApi.Accounts.Account
@@ -24,6 +25,61 @@ defmodule MealPlannerApi.Accounts do
     else
       {:error, :missing_identity} -> {:error, :missing_identity}
       _ -> {:error, :unable_to_issue_identity}
+    end
+  end
+
+  @spec register_with_password(map()) ::
+          {:ok, %{user: PersistenceUser.t(), account: PersistenceAccount.t()}}
+          | {:error,
+             :email_already_registered
+             | :invalid_email
+             | :invalid_password
+             | :password_too_short
+             | :unable_to_issue_identity}
+  def register_with_password(params) when is_map(params) do
+    with {:ok, email} <- fetch_email(params),
+         {:ok, password} <- fetch_password(params),
+         :ok <- ensure_password_strength(password),
+         nil <- user_by_email(email),
+         type <- normalize_account_type(Map.get(params, "account_type", "individual")),
+         {:ok, subscription_plan_id} <- Subscriptions.ensure_default_plan_id(type),
+         password_hash <- Bcrypt.hash_pwd_salt(password),
+         {:ok, result} <-
+           create_account_and_user(email, password_hash, type, params, subscription_plan_id) do
+      {:ok, %{user: result.user, account: result.account}}
+    else
+      %PersistenceUser{} -> {:error, :email_already_registered}
+      {:error, _} = error -> error
+      _ -> {:error, :unable_to_issue_identity}
+    end
+  end
+
+  @spec authenticate_with_password(map()) ::
+          {:ok, %{user: PersistenceUser.t(), account: PersistenceAccount.t()}}
+          | {:error, :invalid_email | :invalid_password | :invalid_credentials}
+  def authenticate_with_password(params) when is_map(params) do
+    with {:ok, email} <- fetch_email(params),
+         {:ok, password} <- fetch_password(params),
+         %PersistenceUser{} = user <- user_by_email(email),
+         true <- is_binary(user.password_hash) and user.password_hash != "",
+         true <- Bcrypt.verify_pass(password, user.password_hash),
+         %PersistenceAccount{} = account <- Repo.get(PersistenceAccount, user.account_id) do
+      {:ok, %{user: user, account: account}}
+    else
+      nil ->
+        Bcrypt.no_user_verify()
+        {:error, :invalid_credentials}
+
+      false ->
+        Bcrypt.no_user_verify()
+        {:error, :invalid_credentials}
+
+      {:error, _} = error ->
+        error
+
+      _ ->
+        Bcrypt.no_user_verify()
+        {:error, :invalid_credentials}
     end
   end
 
@@ -89,6 +145,74 @@ defmodule MealPlannerApi.Accounts do
   defp normalize_account_type("group"), do: :group
   defp normalize_account_type(:group), do: :group
   defp normalize_account_type(_), do: :individual
+
+  defp fetch_email(params) when is_map(params) do
+    params
+    |> Map.get("email")
+    |> normalize_email()
+    |> case do
+      nil -> {:error, :invalid_email}
+      email -> {:ok, email}
+    end
+  end
+
+  defp fetch_password(params) when is_map(params) do
+    case Map.get(params, "password") do
+      value when is_binary(value) and value != "" -> {:ok, value}
+      _ -> {:error, :invalid_password}
+    end
+  end
+
+  defp ensure_password_strength(password) when is_binary(password) do
+    if String.length(password) >= 8,
+      do: :ok,
+      else: {:error, :password_too_short}
+  end
+
+  defp create_account_and_user(email, password_hash, type, params, subscription_plan_id) do
+    account_attrs = %{
+      name: Map.get(params, "name", "MyFood User"),
+      account_type: type,
+      default_budget_cents: 0,
+      subscription_plan_id: subscription_plan_id
+    }
+
+    user_attrs = %{
+      email: email,
+      name: Map.get(params, "name", "MyFood User"),
+      role: :owner,
+      password_hash: password_hash
+    }
+
+    transaction =
+      Multi.new()
+      |> Multi.insert(
+        :account,
+        PersistenceAccount.changeset(%PersistenceAccount{}, account_attrs)
+      )
+      |> Multi.insert(:user, fn %{account: account} ->
+        attrs = Map.put(user_attrs, :account_id, account.id)
+        PersistenceUser.changeset(%PersistenceUser{}, attrs)
+      end)
+
+    case Repo.transaction(transaction) do
+      {:ok, %{account: account, user: user}} -> {:ok, %{account: account, user: user}}
+      {:error, _step, _reason, _changes} -> {:error, :unable_to_issue_identity}
+    end
+  end
+
+  defp user_by_email(email) when is_binary(email),
+    do: Repo.get_by(PersistenceUser, email: email)
+
+  defp normalize_email(value) when is_binary(value) do
+    value = value |> String.trim() |> String.downcase()
+
+    if String.contains?(value, "@") and value != "@",
+      do: value,
+      else: nil
+  end
+
+  defp normalize_email(_), do: nil
 
   defp fetch_required_identity(params, key) do
     case Map.get(params, key) do
