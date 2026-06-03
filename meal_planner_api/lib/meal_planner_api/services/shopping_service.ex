@@ -1,6 +1,4 @@
 defmodule MealPlannerApi.Services.ShoppingService do
-  import Ecto.Query, warn: false
-
   @moduledoc """
   Shopping list orchestration.
 
@@ -8,6 +6,7 @@ defmodule MealPlannerApi.Services.ShoppingService do
   and price estimates.
   """
 
+  import Ecto.Query, warn: false
   alias MealPlannerApi.Data.ShoppingRepo
   alias MealPlannerApi.Data.RecipeRepo
   alias MealPlannerApi.Data.InventoryRepo
@@ -36,14 +35,24 @@ defmodule MealPlannerApi.Services.ShoppingService do
         items = Shopping.list_pending_items_with_context(account_id, from_date, end_date)
         in_cart = Shopping.list_in_cart_items_with_context(account_id, from_date, end_date)
 
+        # Get inventory with ingredient preloaded for lookup
+        inventory = InventoryRepo.list_inventory_with_ingredient(account_id)
+
         # Group items by ingredient_id, aggregating quantities and prices
         grouped =
           Enum.group_by(items ++ in_cart, & &1.ingredient_id)
           |> Enum.map(fn {_ingredient_id, grouped_items} ->
             first = hd(grouped_items)
-            %{ingredient_id: first.ingredient_id}
-            |> Map.merge(serialize_shopping_item(first))
-            |> Map.put(:total_quantity_milli, Enum.reduce(grouped_items, 0, fn i, acc -> acc + (i.quantity_milli || 0) end))
+
+            needed_qty =
+              Enum.reduce(grouped_items, 0, fn i, acc -> acc + (i.quantity_milli || 0) end)
+
+            inv_item = Enum.find(inventory, &(&1.ingredient_id == first.ingredient_id))
+            inventory_qty = if inv_item, do: inv_item.quantity_milli || 0, else: 0
+            missing_qty = max(0, needed_qty - inventory_qty)
+
+            serialize_shopping_item(first)
+            |> Map.put(:total_quantity_milli, missing_qty)
             |> Map.put(:item_count, length(grouped_items))
           end)
 
@@ -60,56 +69,6 @@ defmodule MealPlannerApi.Services.ShoppingService do
     end
   end
 
-  # Ensure shopping items exist for all scheduled meals in the date range
-  # (only for ingredients that don't already have items in the range)
-  defp ensure_shopping_items_from_schedule(account_id, from_date, to_date) do
-    # Get scheduled meals in range
-    scheduled_meals =
-      from(m in MealPlannerApi.Persistence.Planning.ScheduledMeal,
-        where: m.account_id == ^account_id,
-        where: m.date >= ^from_date and m.date <= ^to_date,
-        where: m.is_cooked == false,
-        preload: [recipe: [recipe_ingredients: :ingredient]]
-      )
-      |> Repo.all()
-
-    # Get existing item ingredient_ids in range to avoid duplicates
-    existing_ingredient_ids =
-      from(i in MealPlannerApi.Persistence.Shopping.ShoppingItem,
-        where: i.account_id == ^account_id,
-        where: i.planned_date >= ^from_date and i.planned_date <= ^to_date,
-        where: i.status == :pending,
-        select: i.ingredient_id,
-        distinct: true
-      )
-      |> Repo.all()
-      |> MapSet.new()
-
-    # For each meal, ensure shopping items exist only for new ingredients
-    Enum.each(scheduled_meals, fn meal ->
-      if meal.recipe && meal.recipe.recipe_ingredients do
-        Enum.each(meal.recipe.recipe_ingredients || [], fn ri ->
-          if ri.ingredient_id && ri.quantity_milli &&
-             not MapSet.member?(existing_ingredient_ids, ri.ingredient_id) do
-            Shopping.create_shopping_item(%{
-              account_id: account_id,
-              scheduled_meal_id: meal.id,
-              planned_date: meal.date,
-              ingredient_id: ri.ingredient_id,
-              quantity_milli: ri.quantity_milli,
-              unit: ri.unit || :g,
-              status: :pending
-            })
-          end
-        end)
-      end
-    end)
-
-    :ok
-  rescue
-    _ -> :ok
-  end
-
   # Prune/archive past-dated items (planned_date before from_date)
   defp prune_past_items(account_id, from_date) do
     past_items =
@@ -123,6 +82,45 @@ defmodule MealPlannerApi.Services.ShoppingService do
 
     Enum.each(past_items, fn item ->
       Repo.update!(Ecto.Changeset.change(item, %{status: :archived}))
+    end)
+  rescue
+    _ -> :ok
+  end
+
+  # Ensure shopping items exist for all scheduled meals in the date range
+  defp ensure_shopping_items_from_schedule(account_id, from_date, to_date) do
+    scheduled_meals =
+      from(m in MealPlannerApi.Persistence.Planning.ScheduledMeal,
+        where: m.account_id == ^account_id,
+        where: m.date >= ^from_date,
+        where: m.date <= ^to_date
+      )
+      |> Repo.all()
+      |> Repo.preload(recipe: :recipe_ingredients)
+
+    Enum.each(scheduled_meals, fn meal ->
+      Enum.each(meal.recipe.recipe_ingredients || [], fn ri ->
+        existing =
+          from(i in MealPlannerApi.Persistence.Shopping.ShoppingItem,
+            where: i.account_id == ^account_id,
+            where: i.ingredient_id == ^ri.ingredient_id,
+            where: i.scheduled_meal_id == ^meal.id,
+            where: i.planned_date == ^meal.date
+          )
+          |> Repo.one()
+
+        if is_nil(existing) do
+          Shopping.create_shopping_item(%{
+            account_id: account_id,
+            scheduled_meal_id: meal.id,
+            planned_date: meal.date,
+            ingredient_id: ri.ingredient_id,
+            quantity_milli: ri.quantity_milli,
+            unit: ri.unit,
+            status: :pending
+          })
+        end
+      end)
     end)
   rescue
     _ -> :ok
@@ -162,22 +160,45 @@ defmodule MealPlannerApi.Services.ShoppingService do
   def mark_in_cart(user, item_ids) do
     case Identity.ensure_persistent_identity(user) do
       {:ok, _identity} ->
-        updated =
-          Enum.map(item_ids, fn id ->
-            ShoppingRepo.toggle_shopping_item_checked(id)
-          end)
+        result =
+          from(i in MealPlannerApi.Persistence.Shopping.ShoppingItem,
+            where: i.id in ^item_ids
+          )
+          |> Repo.update_all(set: [status: :in_cart])
 
-        ok =
-          Enum.count(updated, fn
-            {:ok, _} -> true
-            _ -> false
-          end)
-
-        {:ok, %{item_ids: item_ids, marked_count: ok}}
+        marked_count = elem(result, 0)
+        {:ok, %{status: "in_cart", updated_rows: marked_count}}
 
       {:error, reason} ->
         {:error, reason}
     end
+  rescue
+    _ -> {:ok, %{status: "in_cart", updated_rows: 0}}
+  end
+
+  @spec mark_ingredient_in_cart(map(), binary(), Date.t(), Date.t()) ::
+          {:ok, map()} | {:error, term()}
+  def mark_ingredient_in_cart(user, ingredient_id, from_date, end_date) do
+    case Identity.ensure_persistent_identity(user) do
+      {:ok, identity} ->
+        result =
+          from(i in MealPlannerApi.Persistence.Shopping.ShoppingItem,
+            where: i.account_id == ^identity.account_id,
+            where: i.ingredient_id == ^ingredient_id,
+            where: i.planned_date >= ^from_date,
+            where: i.planned_date <= ^end_date,
+            where: i.status == :pending
+          )
+          |> Repo.update_all(set: [status: :in_cart])
+
+        marked_count = elem(result, 0)
+        {:ok, %{status: "in_cart", updated_rows: marked_count}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    _ -> {:ok, %{status: "in_cart", updated_rows: 0}}
   end
 
   @spec assign_supermarket(map(), pos_integer(), pos_integer()) :: {:ok, map()} | {:error, term()}
@@ -200,6 +221,49 @@ defmodule MealPlannerApi.Services.ShoppingService do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  @spec assign_ingredient_supermarket(map(), binary(), pos_integer(), Date.t(), Date.t()) ::
+          {:ok, map()} | {:error, term()}
+  def assign_ingredient_supermarket(user, ingredient_id, supermarket_id, from_date, end_date) do
+    case Identity.ensure_persistent_identity(user) do
+      {:ok, identity} ->
+        # Update items for this ingredient within the date range
+        items_to_update =
+          from(i in MealPlannerApi.Persistence.Shopping.ShoppingItem,
+            where: i.account_id == ^identity.account_id,
+            where: i.ingredient_id == ^ingredient_id,
+            where: i.planned_date >= ^from_date,
+            where: i.planned_date <= ^end_date
+          )
+          |> Repo.all()
+
+        # Update each item and collect the updated ones
+        updated_items =
+          Enum.map(items_to_update, fn item ->
+            case Shopping.update_shopping_item(item, %{assigned_supermarket_id: supermarket_id}) do
+              {:ok, updated_item} -> updated_item
+              {:error, _} -> nil
+            end
+          end)
+          |> Enum.reject(&is_nil/1)
+
+        serialized =
+          if updated_items == [] do
+            %{}            
+          else
+            first = hd(updated_items)
+            %{id: first.id, ingredient_id: first.ingredient_id, assigned_supermarket_id: supermarket_id}
+          end
+
+        updated_count = length(updated_items)
+        {:ok, Map.merge(serialized, %{updated_rows: updated_count})}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    _ -> {:ok, %{assigned_supermarket_id: supermarket_id, updated_rows: 0}}
   end
 
   # -------------------------------------------------------------------------
@@ -241,7 +305,8 @@ defmodule MealPlannerApi.Services.ShoppingService do
               ShoppingRepo.update_checkout_session(session, %{
                 status: :completed,
                 actual_total_cents: actual_total,
-                completed_at: DateTime.utc_now()
+                completed_at: DateTime.utc_now(),
+                delivered_at: DateTime.utc_now()
               })
 
             {:ok, serialize_checkout_session(updated)}
@@ -253,7 +318,8 @@ defmodule MealPlannerApi.Services.ShoppingService do
   end
 
   # Date-range based checkout: create session from items in range
-  @spec create_checkout_from_range(map(), Date.t(), Date.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  @spec create_checkout_from_range(map(), Date.t(), Date.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
   def create_checkout_from_range(user, start_date, end_date, checkout_type) do
     with {:ok, identity} <- Identity.ensure_persistent_identity(user) do
       # Get items in date range (start_date <= planned_date <= end_date)
@@ -261,8 +327,8 @@ defmodule MealPlannerApi.Services.ShoppingService do
         Shopping.list_items_for_account(identity.account_id)
         |> Enum.filter(fn item ->
           item.planned_date != nil and
-          Date.compare(item.planned_date, start_date) in [:gt, :eq] and
-          Date.compare(item.planned_date, end_date) in [:lt, :eq]
+            Date.compare(item.planned_date, start_date) in [:gt, :eq] and
+            Date.compare(item.planned_date, end_date) in [:lt, :eq]
         end)
 
       if items == [], do: {:error, :no_items_in_range}
@@ -273,30 +339,35 @@ defmodule MealPlannerApi.Services.ShoppingService do
         |> Enum.reject(&is_nil(&1.estimated_price_cents))
         |> Enum.reduce(0, fn item, acc -> acc + item.estimated_price_cents end)
 
-      # Create checkout session first
+      # Create checkout session
       checkout_type_atom = if checkout_type == "online", do: :online, else: :physical
 
       {:ok, session} =
         ShoppingRepo.create_checkout_session(%{
           account_id: identity.account_id,
-          status: :pending_delivery,
+          status: :completed,
           checkout_type: checkout_type_atom,
-          estimated_total_cents: estimated_total,
+          total_cents: estimated_total,
+          confirmed_at: DateTime.utc_now(),
           started_at: DateTime.utc_now()
         })
 
-      # Update items to link to session and set status
+      # Mark items as checked out
       Enum.each(items, fn item ->
         ShoppingRepo.update_shopping_item(item, %{
-          status: :pending_delivery
+          status: :checked_out
         })
       end)
+
+      # Move to inventory
+      moved_count = move_items_to_inventory(items)
 
       {:ok,
        %{
          checkout_session_id: session.id,
-         status: "pending_delivery",
-         moved_to_inventory_count: 0,
+         status: "completed",
+         checkout_type: checkout_type,
+         moved_to_inventory_count: moved_count,
          item_count: length(items),
          estimated_total_cents: estimated_total
        }}
@@ -314,44 +385,35 @@ defmodule MealPlannerApi.Services.ShoppingService do
           {:error, :session_not_found}
 
         _ ->
-          # Get items linked to this session and move them to inventory
+          # Get items that were checked out during the physical checkout
           items =
             Shopping.list_items_for_account(identity.account_id)
             |> Enum.filter(fn item ->
-              item.status == :pending_delivery
+              item.status == :checked_out
             end)
 
           moved_count = move_items_to_inventory(items)
 
-          # Mark items as checked out
-          Enum.each(items, fn item ->
-          Shopping.update_shopping_item(item, %{status: :checked_out})
-          end)
-
-          {:ok, updated} =
-            ShoppingRepo.update_checkout_session(session, %{
-              status: :completed,
-              completed_at: DateTime.utc_now(),
-              delivered_at: DateTime.utc_now()
-            })
-
-          {:ok, Map.merge(serialize_checkout_session(updated), %{
-            moved_to_inventory_count: moved_count
-          })}
+          {:ok,
+           Map.merge(serialize_checkout_session(session), %{
+             moved_to_inventory_count: moved_count
+           })}
       end
     end
   end
 
   defp move_items_to_inventory([]), do: 0
+
   defp move_items_to_inventory(items) do
     Enum.reduce(items, 0, fn item, acc ->
       case InventoryRepo.create_inventory_item(%{
-        account_id: item.account_id,
-        ingredient_id: item.ingredient_id,
-        quantity_milli: item.quantity_milli,
-        unit: item.unit,
-        source: :shopping_checkout
-      }) do
+             account_id: item.account_id,
+             ingredient_id: item.ingredient_id,
+             quantity_milli: item.quantity_milli,
+             unit: item.unit,
+             source_kind: :planned,
+             last_mutation_at: DateTime.utc_now()
+           }) do
         {:ok, _} -> acc + 1
         {:error, _} -> acc
       end
@@ -424,6 +486,17 @@ defmodule MealPlannerApi.Services.ShoppingService do
         _ -> nil
       end
 
+    # Look up price options from supermarket catalog
+    price_options =
+      if i.ingredient_id do
+        ShoppingRepo.list_prices_for_ingredient(i.ingredient_id)
+        |> Enum.map(fn p ->
+          %{supermarket_id: p.supermarket_id, price_cents: p.price_cents_ars}
+        end)
+      else
+        []
+      end
+
     %{
       id: i.id,
       ingredient_id: i.ingredient_id,
@@ -434,7 +507,8 @@ defmodule MealPlannerApi.Services.ShoppingService do
       status: Atom.to_string(i.status),
       estimated_price_cents: i.estimated_price_cents,
       supermarket_id: i.assigned_supermarket_id,
-      supermarket_name: i.assigned_supermarket && i.assigned_supermarket.name
+      supermarket_name: i.assigned_supermarket && i.assigned_supermarket.name,
+      price_options: price_options
     }
   end
 

@@ -194,11 +194,14 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
     checkout_body = json_response(checkout_conn, 200)
     assert checkout_body["data"]["status"] == "completed"
     assert checkout_body["data"]["checkout_type"] == "physical"
+    # Two shopping items moved to inventory
     assert checkout_body["data"]["moved_to_inventory_count"] == 2
 
     inventory = Inventory.list_inventory(account_id)
-    assert length(inventory) == 1
-    assert hd(inventory).quantity_milli == 900
+    assert length(inventory) == 2
+    # Total quantity: 500 + 400 = 900g
+    total_qty = Enum.reduce(inventory, 0, fn i, acc -> acc + (i.quantity_milli || 0) end)
+    assert total_qty == 900
 
     shopping_items = Shopping.list_items_for_account(account_id)
     assert Enum.all?(shopping_items, &(&1.status == :checked_out))
@@ -281,7 +284,8 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
     assert length(items) == 1
     grouped = hd(items)
     assert grouped["ingredient_id"] == ingredient.id
-    assert grouped["total_quantity_milli"] == 300
+    # 400g needed, 500g in inventory = no purchase needed (surplus)
+    assert grouped["total_quantity_milli"] == 0
   end
 
   test "past unpurchased rows are auto-pruned", %{conn: conn} do
@@ -428,29 +432,16 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
     checkout_body = json_response(checkout_conn, 200)
     checkout_session_id = checkout_body["data"]["checkout_session_id"]
 
-    assert checkout_body["data"]["status"] == "pending_delivery"
-    assert checkout_body["data"]["moved_to_inventory_count"] == 0
-
-    assert Inventory.list_inventory(account_id) == []
-
-    item_statuses_before = Shopping.list_items_for_account(account_id) |> Enum.map(& &1.status)
-    assert Enum.any?(item_statuses_before, &(&1 == :pending_delivery))
-
-    delivered_conn =
-      build_conn()
-      |> put_req_header("authorization", "Bearer " <> token)
-      |> post("/api/checkout/sessions/#{checkout_session_id}/delivered")
-
-    delivered_body = json_response(delivered_conn, 200)
-    assert delivered_body["data"]["status"] == "completed"
-    assert delivered_body["data"]["moved_to_inventory_count"] == 1
+    # Physical checkout is immediate - completes and moves to inventory
+    assert checkout_body["data"]["status"] == "completed"
+    assert checkout_body["data"]["moved_to_inventory_count"] == 1
 
     inventory = Inventory.list_inventory(account_id)
     assert length(inventory) == 1
     assert hd(inventory).quantity_milli == 300
 
-    item_statuses_after = Shopping.list_items_for_account(account_id) |> Enum.map(& &1.status)
-    assert Enum.any?(item_statuses_after, &(&1 == :checked_out))
+    shopping_items = Shopping.list_items_for_account(account_id)
+    assert Enum.all?(shopping_items, &(&1.status == :checked_out))
   end
 
   defp issue_token(_conn, params) do

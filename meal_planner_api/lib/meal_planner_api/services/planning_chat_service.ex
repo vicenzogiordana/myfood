@@ -27,10 +27,10 @@ defmodule MealPlannerApi.Services.PlanningChatService do
             recipe_id: recipe.id,
             recipe_name: recipe.name,
             slots:
-            Enum.map(recipe.suitable_for_slots || [], fn
-              slot when is_atom(slot) -> Atom.to_string(slot)
-              slot when is_binary(slot) -> slot
-            end),
+              Enum.map(recipe.suitable_for_slots || [], fn
+                slot when is_atom(slot) -> Atom.to_string(slot)
+                slot when is_binary(slot) -> slot
+              end),
             prep_time_minutes: recipe.prep_time_minutes,
             calories_per_serving: recipe.calories_per_serving
           }
@@ -130,8 +130,12 @@ defmodule MealPlannerApi.Services.PlanningChatService do
                   {:ok, parsed} -> parsed
                   :error -> Date.utc_today()
                 end
-              %Date{} = d -> d
-              _ -> Date.utc_today()
+
+              %Date{} = d ->
+                d
+
+              _ ->
+                Date.utc_today()
             end
 
           attrs = %{
@@ -236,10 +240,10 @@ defmodule MealPlannerApi.Services.PlanningChatService do
         day_plan = Enum.at(plan, rem(index, length(plan)), %{})
 
         day_meals =
-          (day_plan
-           |> Map.get("meals", [])
-           |> Enum.concat(day_plan[:meals] || []))
-           |> Enum.uniq()
+          day_plan
+          |> Map.get("meals", [])
+          |> Enum.concat(day_plan[:meals] || [])
+          |> Enum.uniq()
 
         day_meals
         |> Enum.map(fn meal ->

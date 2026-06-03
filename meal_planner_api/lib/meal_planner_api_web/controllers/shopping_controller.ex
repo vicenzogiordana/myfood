@@ -12,26 +12,68 @@ defmodule MealPlannerApiWeb.ShoppingController do
     end
   end
 
-  def mark_cart(conn, %{"item_ids" => item_ids} = payload) do
+  def mark_cart(conn, payload) do
     user = Guardian.Plug.current_resource(conn)
-    in_cart = parse_bool(Map.get(payload, "in_cart", true))
 
-    if in_cart do
-      case ShoppingService.mark_in_cart(user, item_ids) do
-        {:ok, response} -> json(conn, %{data: response})
-        {:error, reason} -> render_error(conn, reason)
-      end
-    else
-      render_error(conn, :not_implemented)
+    # Support both item_ids (list of item IDs) and ingredient_id (mark all items for ingredient)
+    item_ids = Map.get(payload, "item_ids")
+    ingredient_id = Map.get(payload, "ingredient_id")
+
+    cond do
+      is_list(item_ids) and length(item_ids) > 0 ->
+        # Mark specific items by item_ids
+        case ShoppingService.mark_in_cart(user, item_ids) do
+          {:ok, response} -> json(conn, %{data: response})
+          {:error, reason} -> render_error(conn, reason)
+        end
+
+      is_binary(ingredient_id) ->
+        # Mark all items for this ingredient in date range as in_cart
+        from_date = parse_date_param(payload["start_date"])
+        end_date = parse_date_param(payload["end_date"])
+
+        case ShoppingService.mark_ingredient_in_cart(user, ingredient_id, from_date, end_date) do
+          {:ok, response} -> json(conn, %{data: response})
+          {:error, reason} -> render_error(conn, reason)
+        end
+
+      true ->
+        render_error(conn, :invalid_payload)
     end
   end
 
-  def assign_supermarket(conn, %{"item_id" => item_id, "supermarket_id" => supermarket_id}) do
+  def assign_supermarket(conn, payload) do
     user = Guardian.Plug.current_resource(conn)
 
-    case ShoppingService.assign_supermarket(user, item_id, supermarket_id) do
-      {:ok, response} -> json(conn, %{data: response})
-      {:error, reason} -> render_error(conn, reason)
+    # Support both item_id (single item) and ingredient_id (assign all for ingredient in range)
+    item_id = Map.get(payload, "item_id")
+    ingredient_id = Map.get(payload, "ingredient_id")
+    supermarket_id = Map.get(payload, "supermarket_id")
+
+    cond do
+      is_binary(item_id) ->
+        case ShoppingService.assign_supermarket(user, item_id, supermarket_id) do
+          {:ok, response} -> json(conn, %{data: response})
+          {:error, reason} -> render_error(conn, reason)
+        end
+
+      is_binary(ingredient_id) ->
+        from_date = parse_date_param(payload["start_date"])
+        end_date = parse_date_param(payload["end_date"])
+
+        case ShoppingService.assign_ingredient_supermarket(
+               user,
+               ingredient_id,
+               supermarket_id,
+               from_date,
+               end_date
+             ) do
+          {:ok, response} -> json(conn, %{data: response})
+          {:error, reason} -> render_error(conn, reason)
+        end
+
+      true ->
+        render_error(conn, :invalid_payload)
     end
   end
 
@@ -65,12 +107,14 @@ defmodule MealPlannerApiWeb.ShoppingController do
   end
 
   defp parse_date_param(nil), do: Date.utc_today()
+
   defp parse_date_param(d) when is_binary(d) do
     case Date.from_iso8601(d) do
       {:ok, date} -> date
       :error -> Date.utc_today()
     end
   end
+
   defp parse_date_param(d), do: d
 
   def confirm_delivery(conn, %{"checkout_session_id" => checkout_session_id}) do
