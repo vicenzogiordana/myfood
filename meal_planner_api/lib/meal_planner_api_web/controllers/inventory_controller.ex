@@ -1,12 +1,13 @@
 defmodule MealPlannerApiWeb.InventoryController do
   use MealPlannerApiWeb, :controller
 
-  alias MealPlannerApi.InventoryHub
+  alias MealPlannerApi.Services.InventoryService
+  alias MealPlannerApi.Services.BudgetService
 
   def index(conn, _params) do
     user = Guardian.Plug.current_resource(conn)
 
-    case InventoryHub.inventory_view(user) do
+    case InventoryService.inventory_view(user) do
       {:ok, payload} -> json(conn, %{data: payload})
       {:error, reason} -> render_error(conn, reason)
     end
@@ -15,7 +16,7 @@ defmodule MealPlannerApiWeb.InventoryController do
   def add_extra(conn, payload) do
     user = Guardian.Plug.current_resource(conn)
 
-    case InventoryHub.add_extra_item(user, payload) do
+    case InventoryService.add_extra_item(user, payload) do
       {:ok, payload} -> json(conn, %{data: payload})
       {:error, reason} -> render_error(conn, reason)
     end
@@ -24,7 +25,7 @@ defmodule MealPlannerApiWeb.InventoryController do
   def update_quantity(conn, %{"item_id" => item_id} = payload) do
     user = Guardian.Plug.current_resource(conn)
 
-    case InventoryHub.adjust_item_quantity(user, item_id, payload) do
+    case InventoryService.adjust_item_quantity(user, item_id, payload) do
       {:ok, payload} -> json(conn, %{data: payload})
       {:error, reason} -> render_error(conn, reason)
     end
@@ -33,7 +34,7 @@ defmodule MealPlannerApiWeb.InventoryController do
   def dispose(conn, %{"item_id" => item_id} = payload) do
     user = Guardian.Plug.current_resource(conn)
 
-    case InventoryHub.dispose_item(user, item_id, payload) do
+    case InventoryService.dispose_item(user, item_id, payload) do
       {:ok, payload} -> json(conn, %{data: payload})
       {:error, reason} -> render_error(conn, reason)
     end
@@ -42,7 +43,7 @@ defmodule MealPlannerApiWeb.InventoryController do
   def voice_preview(conn, payload) do
     user = Guardian.Plug.current_resource(conn)
 
-    case InventoryHub.voice_preview(user, payload) do
+    case InventoryService.voice_preview(user, payload) do
       {:ok, data} -> json(conn, %{data: data})
       {:error, reason} -> render_error(conn, reason)
     end
@@ -51,7 +52,7 @@ defmodule MealPlannerApiWeb.InventoryController do
   def voice_apply(conn, payload) do
     user = Guardian.Plug.current_resource(conn)
 
-    case InventoryHub.voice_apply(user, payload) do
+    case InventoryService.voice_apply(user, payload) do
       {:ok, data} -> json(conn, %{data: data})
       {:error, reason} -> render_error(conn, reason)
     end
@@ -59,8 +60,9 @@ defmodule MealPlannerApiWeb.InventoryController do
 
   def rescue_plan(conn, payload) do
     user = Guardian.Plug.current_resource(conn)
+    budget = BudgetService.resolve(user)
 
-    case InventoryHub.rescue_plan(user, payload) do
+    case InventoryService.rescue_plan(user, payload, budget) do
       {:ok, data} -> json(conn, %{data: data})
       {:error, reason} -> render_error(conn, reason)
     end

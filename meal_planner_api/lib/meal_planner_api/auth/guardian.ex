@@ -26,7 +26,8 @@ defmodule MealPlannerApi.Auth.Guardian do
          |> Map.put(
            :subscription_tier,
            normalize_subscription_tier(Map.get(claims, "subscription_tier", "free"))
-         )}
+         )
+         |> Map.put(:account_id, Map.get(claims, "account_id"))}
 
       nil ->
         {:error, :resource_not_found}

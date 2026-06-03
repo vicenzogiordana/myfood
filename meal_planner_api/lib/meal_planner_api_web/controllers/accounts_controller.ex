@@ -1,32 +1,65 @@
 defmodule MealPlannerApiWeb.AccountsController do
   use MealPlannerApiWeb, :controller
 
-  alias MealPlannerApi.Accounts
-  alias MealPlannerApi.Budgets
-  alias MealPlannerApi.Inventory
-  alias MealPlannerApi.Subscriptions
+  alias MealPlannerApi.Services.AccountService
 
   def me(conn, _params) do
     user = Guardian.Plug.current_resource(conn)
 
-    json(conn, %{
-      user: Accounts.serialize_user(user),
-      claims: Guardian.Plug.current_claims(conn)
-    })
+    case AccountService.me(%{
+           account_id: user.account_id,
+           user_id: user.id
+         }) do
+      {:ok, account_data} ->
+        # Return full response matching test expectations: {user, account, claims}
+        json(conn, %{
+          user: %{
+            id: user.id,
+            email: user.email,
+            name: user.name,
+            subscription_tier: to_string(user.subscription_tier || :free)
+          },
+          account: account_data,
+          claims: %{
+            sub: user.id,
+            account_id: user.account_id,
+            subscription_tier: to_string(user.subscription_tier || :free)
+          }
+        })
+
+      {:error, reason} ->
+        render_error(conn, reason)
+    end
   end
 
-  def context(conn, params) do
+  def context(conn, _params) do
     user = Guardian.Plug.current_resource(conn)
 
-    budget = Budgets.resolve_for(user, params)
-    inventory = Inventory.available_for(user, params)
-    subscription = Subscriptions.policy_for_account(user.account_id)
+    case AccountService.context(%{
+           account_id: user.account_id,
+           user_id: user.id
+         }) do
+      {:ok, data} ->
+        json(conn, %{
+          user: %{
+            id: user.id,
+            email: user.email,
+            name: user.name,
+            subscription_tier: to_string(user.subscription_tier || :free)
+          },
+          account: data.account,
+          subscription: data.subscription,
+          active_users: data.active_users
+        })
 
-    json(conn, %{
-      account_id: user.account_id,
-      budget: Budgets.serialize(budget),
-      inventory_items: Inventory.names(inventory),
-      subscription: subscription
-    })
+      {:error, reason} ->
+        render_error(conn, reason)
+    end
+  end
+
+  defp render_error(conn, reason) do
+    conn
+    |> put_status(:unprocessable_entity)
+    |> json(%{error: Atom.to_string(reason)})
   end
 end

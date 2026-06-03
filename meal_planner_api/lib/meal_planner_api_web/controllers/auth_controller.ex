@@ -3,11 +3,12 @@ defmodule MealPlannerApiWeb.AuthController do
 
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.Auth.Guardian
-  alias MealPlannerApi.Revenuecat
-  alias MealPlannerApi.Subscriptions
+  alias MealPlannerApi.Services.RevenuecatService
+  alias MealPlannerApi.Services.SubscriptionService
 
   def social(conn, %{"provider" => provider, "id_token" => id_token} = params) do
-    requested_tier = Subscriptions.normalize_tier(Map.get(params, "subscription_tier", "free"))
+    requested_tier =
+      SubscriptionService.normalize_tier(Map.get(params, "subscription_tier", "free"))
 
     with {:ok, identity} <- social_verifier().verify(provider, id_token, social_opts()),
          identity_params <- social_identity_to_params(identity, params),
@@ -44,7 +45,8 @@ defmodule MealPlannerApiWeb.AuthController do
   end
 
   def password(conn, params) when is_map(params) do
-    requested_tier = Subscriptions.normalize_tier(Map.get(params, "subscription_tier", "free"))
+    requested_tier =
+      SubscriptionService.normalize_tier(Map.get(params, "subscription_tier", "free"))
 
     result =
       case Map.get(params, "mode", "login") do
@@ -85,7 +87,7 @@ defmodule MealPlannerApiWeb.AuthController do
   end
 
   defp issue_auth_response(conn, user, account, requested_tier) do
-    with resolved_tier <- Revenuecat.resolve_tier(account.id, requested_tier),
+    with resolved_tier <- RevenuecatService.resolve_tier(account.id, requested_tier),
          user <- Map.put(user, :subscription_tier, resolved_tier),
          account <- Map.put(account, :subscription_tier, resolved_tier),
          {:ok, token, _claims} <-
@@ -94,7 +96,7 @@ defmodule MealPlannerApiWeb.AuthController do
            ) do
       subscription =
         account.id
-        |> Subscriptions.policy_for_account()
+        |> SubscriptionService.policy_for_account()
         |> Map.put(:tier, Atom.to_string(resolved_tier))
 
       json(conn, %{

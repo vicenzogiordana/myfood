@@ -1,6 +1,6 @@
 defmodule MealPlannerApi.AI.GeminiClient do
   @moduledoc """
-  Gemini AI client used for both streamed chat (fallback via sync call) and sync generation.
+  Gemini AI client used for both streamed chat (true HTTP streaming) and sync generation.
   """
 
   @behaviour MealPlannerApi.AI.Client
@@ -12,39 +12,18 @@ defmodule MealPlannerApi.AI.GeminiClient do
 
   @impl true
   def stream_chat_completion(topic, prompt, opts) do
-    Task.start(fn ->
-      request_id = Keyword.get(opts, :request_id) || "req_stream"
-      account_id = get_in(opts, [:user, :account_id])
+    request_id = Keyword.get(opts, :request_id) || "req_stream"
+    account_id = get_in(opts, [:user, :account_id])
 
+    Task.start(fn ->
       Endpoint.broadcast(topic, "ai_response_started", %{
         request_id: request_id,
         account_id: account_id
       })
 
-      case generate_text(prompt, opts) do
-        {:ok, text} ->
-          text
-          |> chunk_text(7)
-          |> Enum.each(fn chunk ->
-            Endpoint.broadcast(topic, "ai_response_chunk", %{
-              request_id: request_id,
-              account_id: account_id,
-              chunk: chunk,
-              done: false
-            })
-          end)
-
-          Endpoint.broadcast(topic, "ai_response_chunk", %{
-            request_id: request_id,
-            account_id: account_id,
-            chunk: "",
-            done: true
-          })
-
-          Endpoint.broadcast(topic, "ai_response_finished", %{
-            request_id: request_id,
-            account_id: account_id
-          })
+      case do_stream_generate(prompt, opts) do
+        {:ok, http_request_id} ->
+          stream_loop(topic, request_id, account_id, http_request_id, "")
 
         {:error, reason} ->
           Endpoint.broadcast(topic, "ai_response_error", %{
@@ -67,6 +46,100 @@ defmodule MealPlannerApi.AI.GeminiClient do
     end
   end
 
+  defp do_stream_generate(prompt, opts) do
+    with {:ok, api_key} <- fetch_api_key() do
+      model = Application.get_env(:meal_planner_api, :gemini_model, @default_model)
+      base_url = Application.get_env(:meal_planner_api, :gemini_base_url, @default_base_url)
+
+      url =
+        base_url <> "/v1beta/models/" <> model <> ":streamGenerateContent?alt=sse&key=" <> URI.encode(api_key)
+
+      {headers, body} = build_request(prompt, opts)
+
+      :inets.start()
+      :ssl.start()
+
+      case :httpc.request(
+             :post,
+             {String.to_charlist(url), headers, ~c"application/json", body},
+             [{:timeout, 30_000}],
+             [{:sync, false}, {:stream, :self}, {:body_format, :binary}]
+           ) do
+        {:ok, request_id} -> {:ok, request_id}
+        {:error, reason} -> {:error, {:http_request_failed, reason}}
+      end
+    end
+  end
+
+  defp stream_loop(topic, request_id, account_id, http_request_id, buffer) do
+    receive do
+      {:http, {^http_request_id, :stream, bin}} ->
+        new_buffer = buffer <> bin
+        remaining_buffer = process_sse_buffer(topic, request_id, account_id, new_buffer)
+        stream_loop(topic, request_id, account_id, http_request_id, remaining_buffer)
+
+      {:http, {^http_request_id, :stream_end, _headers}} ->
+        Endpoint.broadcast(topic, "ai_response_chunk", %{
+          request_id: request_id,
+          account_id: account_id,
+          chunk: "",
+          done: true
+        })
+        Endpoint.broadcast(topic, "ai_response_finished", %{
+          request_id: request_id,
+          account_id: account_id
+        })
+
+      {:http, {^http_request_id, {:error, reason}}} ->
+        Endpoint.broadcast(topic, "ai_response_error", %{
+          request_id: request_id,
+          account_id: account_id,
+          error: inspect(reason)
+        })
+    after
+      30_000 ->
+        Endpoint.broadcast(topic, "ai_response_error", %{
+          request_id: request_id,
+          account_id: account_id,
+          error: "stream_timeout"
+        })
+    end
+  end
+
+  defp process_sse_buffer(topic, request_id, account_id, buffer) do
+    case String.split(buffer, "\n\n", parts: 2) do
+      [event, rest] ->
+        if String.starts_with?(event, "data: ") do
+          data_json = String.replace_prefix(event, "data: ", "")
+          
+          if data_json != "[DONE]" do
+             case Jason.decode(data_json) do
+               {:ok, decoded} ->
+                 case Map.fetch(decoded, "candidates") do
+                   {:ok, [first | _]} ->
+                     case get_in(first, ["content", "parts"]) do
+                       [%{"text" => text} | _] ->
+                         Endpoint.broadcast(topic, "ai_response_chunk", %{
+                           request_id: request_id,
+                           account_id: account_id,
+                           chunk: text,
+                           done: false
+                         })
+                       _ -> :ok
+                     end
+                   _ -> :ok
+                 end
+               _ -> :ok
+             end
+          end
+        end
+        process_sse_buffer(topic, request_id, account_id, rest)
+
+      [incomplete] ->
+        incomplete
+    end
+  end
+
   defp do_generate(prompt, opts, api_key) do
     model = Application.get_env(:meal_planner_api, :gemini_model, @default_model)
     base_url = Application.get_env(:meal_planner_api, :gemini_base_url, @default_base_url)
@@ -75,6 +148,30 @@ defmodule MealPlannerApi.AI.GeminiClient do
     url =
       base_url <> "/v1beta/models/" <> model <> ":generateContent?key=" <> URI.encode(api_key)
 
+    {headers, body} = build_request(prompt, opts)
+
+    :inets.start()
+    :ssl.start()
+
+    case :httpc.request(
+           :post,
+           {String.to_charlist(url), headers, ~c"application/json", body},
+           [{:timeout, timeout}],
+           [{:body_format, :binary}]
+         ) do
+      {:ok, {{_http_version, status, _reason}, _headers, response_body}}
+      when status in 200..299 ->
+        {:ok, response_body}
+
+      {:ok, {{_http_version, status, _reason}, _headers, response_body}} ->
+        {:error, {:http_error, status, response_body}}
+
+      {:error, reason} ->
+        {:error, {:http_request_failed, reason}}
+    end
+  end
+
+  defp build_request(prompt, opts) do
     system_prompt =
       case Keyword.get(opts, :system_prompt) do
         value when is_binary(value) and value != "" -> value
@@ -101,26 +198,7 @@ defmodule MealPlannerApi.AI.GeminiClient do
 
     headers = [{~c"content-type", ~c"application/json"}]
     body = Jason.encode!(payload)
-
-    :inets.start()
-    :ssl.start()
-
-    case :httpc.request(
-           :post,
-           {String.to_charlist(url), headers, ~c"application/json", body},
-           [{:timeout, timeout}],
-           [{:body_format, :binary}]
-         ) do
-      {:ok, {{_http_version, status, _reason}, _headers, response_body}}
-      when status in 200..299 ->
-        {:ok, response_body}
-
-      {:ok, {{_http_version, status, _reason}, _headers, response_body}} ->
-        {:error, {:http_error, status, response_body}}
-
-      {:error, reason} ->
-        {:error, {:http_request_failed, reason}}
-    end
+    {headers, body}
   end
 
   defp parse_text(response_body) when is_binary(response_body) do
@@ -150,12 +228,5 @@ defmodule MealPlannerApi.AI.GeminiClient do
       "" -> {:error, :missing_gemini_api_key}
       key -> {:ok, key}
     end
-  end
-
-  defp chunk_text(text, words_per_chunk) do
-    text
-    |> String.split(" ")
-    |> Enum.chunk_every(words_per_chunk)
-    |> Enum.map(&Enum.join(&1, " "))
   end
 end

@@ -1,7 +1,28 @@
 defmodule MealPlannerApiWeb.PlanningChannel do
+  @moduledoc """
+  Phoenix Channel para el flujo de planificación v2 con streaming via Phoenix Channels.
+
+  El canal delega la lógica pesada a `GenerationServer` (un GenServer por account_id).
+  `GenerationServer` hace broadcast directo al `channel_pid` del socket.
+
+  Eventos entrantes del cliente:
+  - `generate_menu` — inicia generación de menú (usa GenerationServer)
+  - `chat` — mensaje de modificación del usuario (usa GenerationServer)
+  - `confirm_proposal` — confirma propuesta (usa PlanningChatService, backward compat)
+  - `reject_proposal` — rechaza propuesta (usa PlanningChatService, backward compat)
+
+  Eventos salientes (broadcast):
+  - `generation_started` — generación iniciada
+  - `proposal_ready` — propuesta disponible
+  - `proposal_confirmed` — propuesta confirmada
+  - `proposal_rejected` — propuesta rechazada
+  - `generation_error` — error durante generación
+  - `proposal_update` — propuesta actualizada tras modificación de usuario
+  """
   use MealPlannerApiWeb, :channel
 
-  alias MealPlannerApi.PlanningChat
+  alias MealPlannerApi.Generation.Server
+  alias MealPlannerApi.Services.PlanningChatService
 
   @impl true
   def join("planning:" <> account_id, _payload, socket) do
@@ -19,21 +40,16 @@ defmodule MealPlannerApiWeb.PlanningChannel do
     user = socket.assigns.current_user
     request_id = Map.get(payload, "request_id", build_request_id())
 
-    broadcast!(socket, "generation_started", %{request_id: request_id})
+    # Constraints viene del payload (date_from, date_to, budget_cents, etc.)
+    constraints = Map.get(payload, "constraints", %{}) |> Map.merge(payload)
 
-    case PlanningChat.generate_menu(user, payload) do
-      {:ok, result} ->
-        event = %{
-          request_id: request_id,
-          run_id: result.run.id,
-          proposal_id: result.proposal.id,
-          date_from: Date.to_iso8601(result.date_from),
-          date_to: Date.to_iso8601(result.date_to),
-          proposal: result.proposal_json
-        }
+    case Server.start_generation(user.account_id, user.id, constraints, socket.channel_pid) do
+      {:ok, run_id} ->
+        broadcast!(socket, "generation_started", %{request_id: request_id, run_id: run_id})
+        {:reply, {:ok, %{request_id: request_id, run_id: run_id}}, socket}
 
-        broadcast!(socket, "proposal_ready", event)
-        {:reply, {:ok, event}, socket}
+      {:error, :already_running} ->
+        {:reply, {:error, %{request_id: request_id, reason: "generation_in_progress"}}, socket}
 
       {:error, reason} ->
         payload = %{request_id: request_id, reason: serialize_reason(reason)}
@@ -53,7 +69,7 @@ defmodule MealPlannerApiWeb.PlanningChannel do
       reason: "constraint_update"
     })
 
-    case PlanningChat.regenerate_menu(user, base_payload, constraints) do
+    case PlanningChatService.regenerate_menu(user, base_payload, constraints) do
       {:ok, result} ->
         event = %{
           request_id: request_id,
@@ -75,31 +91,67 @@ defmodule MealPlannerApiWeb.PlanningChannel do
     end
   end
 
+  @impl true
+  def handle_in("chat", %{"message" => message, "proposal_id" => proposal_id}, socket) do
+    user = socket.assigns.current_user
+
+    # Obtener el PID del GenerationServer para este account
+    case Registry.lookup(MealPlannerApi.Generation.Generations, {:generation, user.account_id}) do
+      [{server_pid, _}] ->
+        Server.chat(server_pid, proposal_id, message)
+        {:noreply, socket}
+
+      [] ->
+        {:reply, {:error, %{reason: "no_active_generation"}}, socket}
+    end
+  end
+
   def handle_in("confirm_proposal", %{"proposal_id" => proposal_id}, socket) do
     user = socket.assigns.current_user
 
-    case PlanningChat.confirm_proposal(user, proposal_id) do
-      {:ok, result} ->
-        event = Map.put(result, :status, "confirmed")
-        broadcast!(socket, "proposal_confirmed", event)
-        {:reply, {:ok, event}, socket}
+    # Primero intentar con GenerationServer (si existe para este account)
+    case Registry.lookup(MealPlannerApi.Generation.Generations, {:generation, user.account_id}) do
+      [{server_pid, _}] ->
+        case Server.confirm(server_pid, proposal_id) do
+          {:ok, result} ->
+            {:reply, {:ok, result}, socket}
 
-      {:error, reason} ->
-        {:reply, {:error, %{reason: serialize_reason(reason)}}, socket}
+          {:error, reason} ->
+            {:reply, {:error, %{reason: serialize_reason(reason)}}, socket}
+        end
+
+      [] ->
+        # Fallback: usar PlanningChatService (REST API backward compat)
+        case PlanningChatService.confirm_proposal(user, proposal_id) do
+          {:ok, result} ->
+            event = Map.put(result, :status, "confirmed")
+            broadcast!(socket, "proposal_confirmed", event)
+            {:reply, {:ok, event}, socket}
+
+          {:error, reason} ->
+            {:reply, {:error, %{reason: serialize_reason(reason)}}, socket}
+        end
     end
   end
 
   def handle_in("reject_proposal", %{"proposal_id" => proposal_id}, socket) do
     user = socket.assigns.current_user
 
-    case PlanningChat.reject_proposal(user, proposal_id) do
-      {:ok, result} ->
-        event = Map.put(result, :status, "rejected")
-        broadcast!(socket, "proposal_rejected", event)
-        {:reply, {:ok, event}, socket}
+    case Registry.lookup(MealPlannerApi.Generation.Generations, {:generation, user.account_id}) do
+      [{server_pid, _}] ->
+        Server.reject(server_pid, proposal_id)
+        {:noreply, socket}
 
-      {:error, reason} ->
-        {:reply, {:error, %{reason: serialize_reason(reason)}}, socket}
+      [] ->
+        case PlanningChatService.reject_proposal(user, proposal_id) do
+          {:ok, result} ->
+            event = Map.put(result, :status, "rejected")
+            broadcast!(socket, "proposal_rejected", event)
+            {:reply, {:ok, event}, socket}
+
+          {:error, reason} ->
+            {:reply, {:error, %{reason: serialize_reason(reason)}}, socket}
+        end
     end
   end
 

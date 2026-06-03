@@ -1,12 +1,12 @@
 defmodule MealPlannerApiWeb.PlanningChatController do
   use MealPlannerApiWeb, :controller
 
-  alias MealPlannerApi.PlanningChat
+  alias MealPlannerApi.Services.PlanningChatService
 
   def create(conn, payload) do
     user = Guardian.Plug.current_resource(conn)
 
-    case PlanningChat.generate_menu(user, payload) do
+    case PlanningChatService.generate_menu(user, payload) do
       {:ok, result} ->
         json(conn, %{data: serialize_generation(result)})
 
@@ -21,7 +21,7 @@ defmodule MealPlannerApiWeb.PlanningChatController do
     user = Guardian.Plug.current_resource(conn)
     limit = parse_limit(Map.get(params, "limit"))
 
-    case PlanningChat.quick_favorites(user, limit) do
+    case PlanningChatService.quick_favorites(user, limit) do
       {:ok, favorites} ->
         json(conn, %{data: Enum.map(favorites, &serialize_favorite/1)})
 
@@ -35,7 +35,7 @@ defmodule MealPlannerApiWeb.PlanningChatController do
   def confirm(conn, %{"proposal_id" => proposal_id}) do
     user = Guardian.Plug.current_resource(conn)
 
-    case PlanningChat.confirm_proposal(user, proposal_id) do
+    case PlanningChatService.confirm_proposal(user, proposal_id) do
       {:ok, result} ->
         json(conn, %{data: serialize_confirmation(result)})
 
@@ -49,7 +49,7 @@ defmodule MealPlannerApiWeb.PlanningChatController do
   def reject(conn, %{"proposal_id" => proposal_id}) do
     user = Guardian.Plug.current_resource(conn)
 
-    case PlanningChat.reject_proposal(user, proposal_id) do
+    case PlanningChatService.reject_proposal(user, proposal_id) do
       {:ok, result} ->
         json(conn, %{data: serialize_rejection(result)})
 
@@ -85,9 +85,9 @@ defmodule MealPlannerApiWeb.PlanningChatController do
     %{
       recipe_id: favorite.recipe_id,
       name: favorite.recipe_name,
-      slots: Enum.map(favorite.suitable_for_slots, &Atom.to_string/1),
-      prep_time_minutes: favorite.prep_time_minutes,
-      calories_per_serving: favorite.calories_per_serving
+      slots: favorite.slots,
+      prep_time_minutes: Map.get(favorite, :prep_time_minutes),
+      calories_per_serving: Map.get(favorite, :calories_per_serving)
     }
   end
 

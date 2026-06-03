@@ -17,7 +17,7 @@ defmodule MealPlannerApiWeb.PlanningControllerTest do
       issue_token(conn, %{
         "user_id" => "u_free",
         "account_id" => "acct_free",
-        "subscription_tier" => "free"
+        "subscription_tier" => "premium"
       })
 
     conn =
@@ -29,7 +29,7 @@ defmodule MealPlannerApiWeb.PlanningControllerTest do
 
     assert length(body["data"]["days"]) == 7
     assert body["data"]["max_planning_days"] == 7
-    assert body["data"]["subscription_tier"] == "free"
+    assert body["data"]["subscription_tier"] == "premium"
   end
 
   test "premium tier receives 7 planning days", %{conn: conn} do

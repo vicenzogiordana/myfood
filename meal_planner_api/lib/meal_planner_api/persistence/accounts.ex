@@ -87,6 +87,16 @@ defmodule MealPlannerApi.Persistence.Accounts do
   end
 
   def upsert_revenuecat_entitlement(attrs) do
+    # Normalize status → is_active for backwards compatibility
+    attrs =
+      cond do
+        Map.has_key?(attrs, :is_active) -> attrs
+        Map.has_key?(attrs, "is_active") -> attrs
+        Map.get(attrs, "status") == "active" -> Map.put(attrs, :is_active, true)
+        Map.get(attrs, "status") == "inactive" -> Map.put(attrs, :is_active, false)
+        true -> attrs
+      end
+
     %RevenuecatEntitlement{}
     |> RevenuecatEntitlement.changeset(attrs)
     |> Repo.insert(

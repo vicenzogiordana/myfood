@@ -4,7 +4,7 @@ defmodule MealPlannerApi.Persistence.Calendar do
   import Ecto.Query, warn: false
 
   alias MealPlannerApi.Repo
-  alias MealPlannerApi.Persistence.Catalog.FavoriteRecipe
+  alias MealPlannerApi.Persistence.Catalog.{FavoriteRecipe, SlotFavorite}
   alias MealPlannerApi.Persistence.Planning.ScheduledMeal
 
   @default_slot :lunch
@@ -20,6 +20,10 @@ defmodule MealPlannerApi.Persistence.Calendar do
         left_join: r in assoc(m, :recipe),
         left_join: f in FavoriteRecipe,
         on: f.account_id == m.account_id and f.user_id == ^user_id and f.recipe_id == m.recipe_id,
+        left_join: sf in SlotFavorite,
+        on:
+          sf.account_id == m.account_id and sf.user_id == ^user_id and sf.date == m.date and
+            sf.slot == m.slot,
         order_by: [asc: m.date, asc: m.slot],
         select: %{
           id: m.id,
@@ -30,7 +34,7 @@ defmodule MealPlannerApi.Persistence.Calendar do
           recipe_name: r.name,
           calories_per_serving: r.calories_per_serving,
           prep_time_minutes: r.prep_time_minutes,
-          is_favorite: not is_nil(f.id)
+          is_favorite: not is_nil(sf.id)
         }
       )
       |> Repo.all()

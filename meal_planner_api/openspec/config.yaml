@@ -1,0 +1,57 @@
+---
+project: meal_planner_api
+description: Complete architecture re-architecture for MealPlannerApi
+sdd_version: "1.0"
+created: "2026-06-01"
+scope: full_architecture
+
+# SDD Configuration
+
+artifacts:
+  store: openspec/artifacts
+  prefix: "meal_planner_api"
+
+# Testing strategy
+test_runner: "mix test"
+strict_tdd: true
+
+# Review budget
+max_changed_lines: 400
+chained_pr_recommended_above: 400
+
+# Execution mode
+execution_mode: interactive
+artifact_store: openspec
+
+# Boundaries
+excluded_from_index:
+  - skill-registry
+  - _shared
+  - "sdd-*"
+
+# Layer definition
+layers:
+  - name: Web (Controllers + Channels)
+    description: HTTP/WebSocket boundary. Thin controllers that receive requests and format responses.
+  - name: Application (Services)
+    description: Orchestration and use cases. No HTTP, no DB queries directly.
+  - name: Data (Persistence + Schemas)
+    description: Pure data access, Ecto schemas, no business logic.
+
+# External integrations (Ports)
+external_integrations:
+  optimizer:
+    type: GenServer + Port (stdio)
+    language: Python (OR-Tools)
+    protocol: JSON over stdin/stdout
+  ai:
+    type: Behaviour injection
+    provider: Gemini
+    streaming: SSE
+
+# Constraints
+constraints:
+  clean_slate: true
+  regenerate_ingredients: true
+  keep_python_optimizer: true
+  keep_or_tools: true

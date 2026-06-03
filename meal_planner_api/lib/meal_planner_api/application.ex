@@ -12,10 +12,14 @@ defmodule MealPlannerApi.Application do
       MealPlannerApiWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:meal_planner_api, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: MealPlannerApi.PubSub},
+      # DynamicSupervisor para GenerationServer (v2 streaming)
+      # El Registry se inicia dentro del Supervisor para mantenerlo bajo el mismo árbol
+      MealPlannerApi.Generation.Supervisor,
       # Start a worker by calling: MealPlannerApi.Worker.start_link(arg)
       # {MealPlannerApi.Worker, arg},
       # Start to serve requests, typically the last entry
-      MealPlannerApiWeb.Endpoint
+      MealPlannerApiWeb.Endpoint,
+      {MealPlannerApi.Optimization.OptimizerServer, []}
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

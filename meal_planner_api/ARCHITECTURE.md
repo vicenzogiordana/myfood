@@ -1,91 +1,41 @@
-# Meal Planner API Skeleton (No DB)
+# Meal Planner API Architecture
 
-This backend is intentionally database-free for now.
-All business logic uses pure Elixir structs and maps, with mock data and deterministic flows.
+The application is built in Elixir/Phoenix, following Domain-Driven Design and Clean Architecture principles. It persists state using PostgreSQL and Ecto.
 
 ## Clean Architecture Boundaries
 
 ### Web Layer (Delivery)
-- `lib/meal_planner_api_web/router.ex`
-  - Public route for token minting.
-  - Protected routes for account/profile and planning APIs.
-- `lib/meal_planner_api_web/controllers/auth_controller.ex`
-  - Issues JWT with account claims.
-- `lib/meal_planner_api_web/controllers/accounts_controller.ex`
-  - Returns authenticated user and claims.
-- `lib/meal_planner_api_web/controllers/planning_controller.ex`
-  - Returns mock weekly meal plan.
-- `lib/meal_planner_api_web/user_socket.ex`
-  - Validates JWT for WebSocket connection.
-- `lib/meal_planner_api_web/channels/ai_channel.ex`
-  - Handles `new_message` and triggers streaming responses.
+- `lib/meal_planner_api_web/router.ex`: Defines public and protected routes.
+- `lib/meal_planner_api_web/controllers/`: Receives HTTP requests, calls the Application Layer, and formats JSON responses.
+- `lib/meal_planner_api_web/channels/`: Handles WebSocket connections and streaming responses (e.g., AI chat).
 
-### Application Layer (Use Cases)
-- `lib/meal_planner_api/accounts.ex`
-  - Individual vs group account rules.
-  - Linked user restriction policy.
-  - Claim composition for JWT.
-- `lib/meal_planner_api/planning.ex`
-  - Weekly meal planning use-case with account-aware behavior.
-- `lib/meal_planner_api/ai.ex`
-  - AI context boundary delegating to configured provider.
+### Application Layer (Use Cases / Contexts)
+Contains business logic and orchestration. This layer coordinates between the domain, persistence, and external services.
+- `MealPlannerApi.Accounts`: Handles user registration, dietary profiles, and subscriptions.
+- `MealPlannerApi.Planning`: Orchestrates weekly meal planning, optimization logic, and proposal confirmations.
+- `MealPlannerApi.PlanningChat`: Handles the AI conversational flow for meal planning and invokes the AI models.
+- `MealPlannerApi.InventoryHub`: Coordinates ingredient tracking and shopping logic.
 
-### Domain Layer (Core Models)
-- `lib/meal_planner_api/accounts/user.ex`
-- `lib/meal_planner_api/accounts/account.ex`
-- `lib/meal_planner_api/planning/weekly_plan.ex`
+### Persistence Layer (Adapters)
+Responsible for interacting with the database. The application layer delegates data retrieval and storage to this layer, keeping Ecto schemas isolated from the core business workflows.
+- `MealPlannerApi.Persistence.Accounts`: Queries and schemas for users, accounts, and RevenueCat data.
+- `MealPlannerApi.Persistence.Planning`: Queries and schemas for scheduled meals, proposals, and generation runs.
+- `MealPlannerApi.Persistence.Catalog`: Queries and schemas for recipes and ingredients.
 
-### Infrastructure Layer (Adapters)
-- `lib/meal_planner_api/auth/guardian.ex`
-  - JWT encode/decode integration.
-- `lib/meal_planner_api/ai/client.ex`
-  - AI behavior contract.
-- `lib/meal_planner_api/ai/mock_client.ex`
-  - Mock streaming adapter that emits `ai_response_chunk`.
+### Infrastructure Layer (External Services)
+- `MealPlannerApi.AI.GeminiClient`: Implements true HTTP Server-Sent Events (SSE) streaming with Google's Gemini API.
+- `MealPlannerApi.Planning.PythonOptimizerClient`: Integrates with a local Python script running Google OR-Tools to solve the nutritional and budget constraints for meal proposals.
 
 ## Auth Flow (HTTP + WS)
-
-1. Client requests token:
-  - `POST /api/auth/password` (email/password)
-  - `POST /api/auth/social` (Google/Apple/Facebook)
-2. Client uses token for protected REST APIs:
-   - `Authorization: Bearer <token>`
-3. Client uses same token for socket connect params:
-   - `ws://localhost:4000/socket/websocket?token=<token>&vsn=2.0.0`
-4. Socket join topic:
-   - `ai_chat:<room_id>`
-
-## WebSocket Streaming Contract
-
-### Inbound event
-- event: `new_message`
-- payload: `%{"message" => "Build me a weekly high-protein plan"}`
-
-### Outbound event
-- event: `ai_response_chunk`
-- payload chunk: `%{chunk: "...", done: false}`
-- completion chunk: `%{chunk: "", done: true}`
+1. Token Minting: `POST /api/auth/password` or `POST /api/auth/social` returns a JWT via Guardian.
+2. HTTP Access: The JWT is passed as a Bearer token in the `Authorization` header.
+3. WebSocket Access: The JWT is passed as a `token` query parameter to connect to Phoenix Channels.
 
 ## Group vs Individual Rules
+- `:individual`: Maximum of 1 linked user.
+- `:group`: Allows multiple linked users under the same account.
 
-- `:individual`
-  - max linked users: 1
-  - additional links beyond one return `{:error, :individual_limit_reached}`
-- `:group`
-  - linked users: unlimited in current mock
-
-## Config Knobs
-
-- `config/config.exs`
-  - `:ai_client` points to `MealPlannerApi.AI.MockClient`
-  - Guardian issuer and secret settings.
-
-## No Persistence Guarantee
-
-This skeleton intentionally includes:
-- no Ecto
-- no Repo
-- no migrations
-- no database schemas
-
-All state is generated and returned in-memory to support early API and socket integration from React Native.
+## Integrations
+- **RevenueCat**: Webhook processing and active entitlement synchronization update user subscription tiers.
+- **OR-Tools (Python)**: The Elixir backend executes an external `optimizador.py` script via `System.cmd` to run the constraint solver over recipes.
+- **Gemini**: Used for the conversational interface, providing a fully streamed AI experience.

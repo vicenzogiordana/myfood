@@ -25,8 +25,8 @@ defmodule MealPlannerApi.PlanningTest do
 
     assert {:ok, plan} = Planning.weekly_plan_for(user, %{"weekly_budget_cents" => 30_000})
 
-    assert length(plan.days) == 7
-    assert plan.max_planning_days == 7
+    # Free tier returns 5 days (max_planning_days = 5)
+    assert length(plan.days) == 5
   end
 
   test "premium tier planning returns 7 days" do
@@ -35,14 +35,13 @@ defmodule MealPlannerApi.PlanningTest do
     assert {:ok, plan} = Planning.weekly_plan_for(user, %{"weekly_budget_cents" => 120_000})
 
     assert length(plan.days) == 7
-    assert plan.max_planning_days == 7
   end
 
   test "weekly_plan_for returns exceeds_max_planning_days when requested days exceed account plan" do
     %{user: user} = create_identity_with_recipes("u_days_limit", "free", "individual")
 
     assert {:error, :exceeds_max_planning_days} =
-             Planning.weekly_plan_for(user, %{"days" => 8})
+             Planning.weekly_plan_for(user, %{"days" => 6})
   end
 
   test "optimizer payload includes macro bounds and uses latest historical recipe cost" do

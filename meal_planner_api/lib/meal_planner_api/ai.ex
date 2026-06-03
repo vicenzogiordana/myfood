@@ -4,11 +4,10 @@ defmodule MealPlannerApi.AI do
   Orchestrates requests and delegates provider calls to the configured client.
   """
 
-  alias MealPlannerApi.Budgets
-  alias MealPlannerApi.Inventory
-  alias MealPlannerApi.Messages
-  alias MealPlannerApi.Subscriptions
   alias MealPlannerApi.Accounts.User
+  alias MealPlannerApi.Services.BudgetService
+  alias MealPlannerApi.Services.SubscriptionService
+  alias MealPlannerApi.Messages
 
   @spec stream_response(String.t(), String.t(), User.t(), map()) :: :ok | {:error, term()}
   def stream_response(room_id, prompt, %User{} = user, params \\ %{})
@@ -16,16 +15,15 @@ defmodule MealPlannerApi.AI do
     with {:ok, client_module} <- client(),
          :ok <- ensure_client_ready(client_module) do
       topic = "ai_chat:" <> room_id
-      budget = Budgets.resolve_for(user, params)
-      inventory = Inventory.available_for(user, params)
-      subscription = Subscriptions.policy_for_account(user.account_id)
+      budget = BudgetService.resolve(user)
+      subscription = SubscriptionService.policy_for(user.account_id)
       message_history = Messages.parse_history(params)
 
       client_module.stream_chat_completion(topic, prompt,
         user: user,
         request_id: Map.get(params, "request_id"),
-        budget: Budgets.serialize(budget),
-        inventory_items: Inventory.names(inventory),
+        budget: BudgetService.serialize(budget),
+        inventory_items: [],
         subscription: subscription,
         persona: Messages.persona(),
         message_history: message_history

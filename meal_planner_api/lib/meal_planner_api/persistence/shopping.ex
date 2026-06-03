@@ -74,7 +74,7 @@ defmodule MealPlannerApi.Persistence.Shopping do
   def list_pending_items_with_context(account_id, from_date, to_date) do
     from(i in ShoppingItem,
       where:
-        i.account_id == ^account_id and i.status in [:pending, :in_cart] and
+        i.account_id == ^account_id and i.status == :pending and
           i.planned_date >= ^from_date and i.planned_date <= ^to_date,
       order_by: [asc: i.planned_date],
       preload: [:assigned_supermarket, :ingredient]

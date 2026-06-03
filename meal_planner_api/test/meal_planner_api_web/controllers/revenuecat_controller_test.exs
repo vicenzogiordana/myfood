@@ -29,7 +29,7 @@ defmodule MealPlannerApiWeb.RevenuecatControllerTest do
             "will_renew" => true,
             "store" => "app_store",
             "purchase_date" => "2026-03-23T12:00:00Z",
-            "expiration_date" => "2026-04-23T12:00:00Z"
+            "expiration_date" => "2030-04-23T12:00:00Z"
           }
         ]
       })

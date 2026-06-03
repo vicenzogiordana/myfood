@@ -32,7 +32,7 @@ defmodule MealPlannerApi.Persistence.Planning.PlanningGenerationRun do
   def changeset(run, attrs) do
     run
     |> cast(attrs, [:account_id, :user_id, :status, :input_context, :started_at, :completed_at])
-    |> validate_required([:account_id, :user_id, :status, :input_context])
+    |> validate_required([:account_id, :user_id, :status])
     |> foreign_key_constraint(:account_id)
     |> foreign_key_constraint(:user_id)
   end

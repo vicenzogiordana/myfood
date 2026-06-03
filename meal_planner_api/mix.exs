@@ -42,6 +42,8 @@ defmodule MealPlannerApi.MixProject do
       {:phoenix, "~> 1.8.5"},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
+      {:hackney, "~> 1.18"},
+      {:tesla, "~> 1.7"},
       {:jason, "~> 1.2"},
       {:guardian, "~> 2.4"},
       {:bcrypt_elixir, "~> 3.1"},
@@ -49,7 +51,8 @@ defmodule MealPlannerApi.MixProject do
       {:postgrex, ">= 0.0.0"},
       {:cors_plug, "~> 3.0"},
       {:dns_cluster, "~> 0.2.0"},
-      {:bandit, "~> 1.5"}
+      {:bandit, "~> 1.5"},
+      {:uuid, "~> 1.1"}
     ]
   end
 
