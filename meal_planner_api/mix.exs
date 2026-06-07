@@ -10,7 +10,18 @@ defmodule MealPlannerApi.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
+      docs: docs(),
       listeners: [Phoenix.CodeReloader]
+    ]
+  end
+
+  defp docs do
+    [
+      extras: ["docs/CHANNELS.md"],
+      main: "overview",
+      api_reference: true,
+      source_ref: "main",
+      source_url: "https://github.com/your-org/meal_planner_api"
     ]
   end
 
@@ -52,7 +63,8 @@ defmodule MealPlannerApi.MixProject do
       {:cors_plug, "~> 3.0"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
-      {:uuid, "~> 1.1"}
+      {:uuid, "~> 1.1"},
+      {:ex_doc, "~> 0.36", only: :dev, runtime: false}
     ]
   end
 
