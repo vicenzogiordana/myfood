@@ -25,8 +25,9 @@ defmodule MealPlannerApi.Services.ShoppingService do
         account_id = identity.account_id
         from_date = parse_date(Map.get(params, "from_date"), Date.utc_today())
         end_date = parse_date(Map.get(params, "to_date"), Date.add(from_date, 6))
+        include_archived = params |> Map.get("include_archived", "false") |> parse_bool_param()
 
-        # Auto-archive past items
+        # Auto-archive past items (always runs on every call)
         prune_past_items(account_id, from_date)
 
         # Build items from scheduled meals (if not already created)
@@ -35,12 +36,22 @@ defmodule MealPlannerApi.Services.ShoppingService do
         items = Shopping.list_pending_items_with_context(account_id, from_date, end_date)
         in_cart = Shopping.list_in_cart_items_with_context(account_id, from_date, end_date)
 
+        # If include_archived is true, also fetch archived items
+        archived =
+          if include_archived do
+            Shopping.list_items_for_account(account_id, include_archived: true)
+            |> Enum.filter(fn item -> item.status == :archived end)
+          else
+            []
+          end
+
         # Get inventory with ingredient preloaded for lookup
         inventory = InventoryRepo.list_inventory_with_ingredient(account_id)
 
         # Group items by ingredient_id, aggregating quantities and prices
+        all_items = items ++ in_cart ++ archived
         grouped =
-          Enum.group_by(items ++ in_cart, & &1.ingredient_id)
+          Enum.group_by(all_items, & &1.ingredient_id)
           |> Enum.map(fn {_ingredient_id, grouped_items} ->
             first = hd(grouped_items)
 
@@ -61,6 +72,7 @@ defmodule MealPlannerApi.Services.ShoppingService do
            items: grouped,
            pending_count: length(items),
            in_cart_count: length(in_cart),
+           archived_count: length(archived),
            total_estimated_cents: Enum.reduce(items, 0, &((&1.estimated_price_cents || 0) + &2))
          }}
 
@@ -69,13 +81,21 @@ defmodule MealPlannerApi.Services.ShoppingService do
     end
   end
 
-  # Prune/archive past-dated items (planned_date before from_date)
-  defp prune_past_items(account_id, from_date) do
+  defp parse_bool_param("true"), do: true
+  defp parse_bool_param("1"), do: true
+  defp parse_bool_param(true), do: true
+  defp parse_bool_param(_), do: false
+
+  # Prune/archive past-dated items (planned_date before today)
+  # Always runs on every get_shopping_list call
+  defp prune_past_items(account_id, _from_date) do
+    today = Date.utc_today()
+
     past_items =
       Ecto.Query.from(i in MealPlannerApi.Persistence.Shopping.ShoppingItem,
         where: i.account_id == ^account_id,
         where: not is_nil(i.planned_date),
-        where: i.planned_date < ^from_date,
+        where: i.planned_date < ^today,
         where: i.status == :pending
       )
       |> Repo.all()
@@ -306,15 +326,36 @@ defmodule MealPlannerApi.Services.ShoppingService do
           _ ->
             actual_total = Map.get(payload, "actual_total_cents", 0)
 
-            {:ok, updated} =
-              ShoppingRepo.update_checkout_session(session, %{
-                status: :completed,
-                actual_total_cents: actual_total,
-                completed_at: DateTime.utc_now(),
-                delivered_at: DateTime.utc_now()
-              })
+            result =
+              Repo.transaction(fn ->
+                # Update session status
+                {:ok, updated} =
+                  ShoppingRepo.update_checkout_session(session, %{
+                    status: :completed,
+                    actual_total_cents: actual_total,
+                    completed_at: DateTime.utc_now(),
+                    delivered_at: DateTime.utc_now()
+                  })
 
-            {:ok, serialize_checkout_session(updated)}
+                # Get checked-out items via list_items_by_session
+                items =
+                  Shopping.list_items_by_session(identity.account_id, session_id)
+                  |> Enum.filter(fn item -> item.status == :checked_out end)
+
+                # Move items to inventory
+                moved_count = move_items_to_inventory(items)
+
+                # Attach moved_to_inventory_count to session struct
+                Map.put(updated, :moved_to_inventory_count, moved_count)
+              end)
+
+            case result do
+              {:ok, updated_session} ->
+                {:ok, serialize_checkout_session(updated_session)}
+
+              {:error, _} ->
+                {:error, :transaction_failed}
+            end
         end
 
       {:error, reason} ->
@@ -485,9 +526,24 @@ defmodule MealPlannerApi.Services.ShoppingService do
   defp parse_date(d, _default), do: d
 
   defp serialize_shopping_item(i) do
+    # Handle Ecto.Association.NotLoaded case
+    ingredient = i.ingredient
+    ingredient_map = cond do
+      is_nil(ingredient) -> nil
+      Map.has_key?(ingredient, :__struct__) and String.contains?(inspect(ingredient.__struct__), "NotLoaded") -> nil
+      true -> ingredient
+    end
+
+    assigned_supermarket = i.assigned_supermarket
+    supermarket_map = cond do
+      is_nil(assigned_supermarket) -> nil
+      Map.has_key?(assigned_supermarket, :__struct__) and String.contains?(inspect(assigned_supermarket.__struct__), "NotLoaded") -> nil
+      true -> assigned_supermarket
+    end
+
     category =
-      case i do
-        %{ingredient: %{category: cat}} when cat != nil -> Atom.to_string(cat)
+      case ingredient_map do
+        %{category: cat} when cat != nil -> Atom.to_string(cat)
         _ -> nil
       end
 
@@ -505,14 +561,14 @@ defmodule MealPlannerApi.Services.ShoppingService do
     %{
       id: i.id,
       ingredient_id: i.ingredient_id,
-      ingredient_name: i.ingredient && i.ingredient.name,
+      ingredient_name: ingredient_map && ingredient_map.name,
       category: category,
       quantity_milli: i.quantity_milli,
       unit: Atom.to_string(i.unit),
       status: Atom.to_string(i.status),
       estimated_price_cents: i.estimated_price_cents,
       supermarket_id: i.assigned_supermarket_id,
-      supermarket_name: i.assigned_supermarket && i.assigned_supermarket.name,
+      supermarket_name: supermarket_map && supermarket_map.name,
       price_options: price_options
     }
   end
@@ -525,7 +581,9 @@ defmodule MealPlannerApi.Services.ShoppingService do
       actual_total_cents: s.total_cents || 0,
       started_at: iso_datetime(s.inserted_at),
       completed_at: iso_datetime(s.confirmed_at),
-      delivered_at: iso_datetime(s.invalidated_at)
+      delivered_at: iso_datetime(s.invalidated_at),
+      moved_to_inventory_count: Map.get(s, :moved_to_inventory_count, 0),
+      total_items: Map.get(s, :total_items, 0)
     }
   end
 

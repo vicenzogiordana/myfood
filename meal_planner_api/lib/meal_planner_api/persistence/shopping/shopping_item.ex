@@ -25,6 +25,11 @@ defmodule MealPlannerApi.Persistence.Shopping.ShoppingItem do
       foreign_key: :assigned_supermarket_id
     )
 
+    belongs_to(:checkout_session, MealPlannerApi.Persistence.Shopping.CheckoutSession,
+      foreign_key: :checkout_session_id,
+      type: :binary_id
+    )
+
     timestamps(type: :utc_datetime_usec)
   end
 
@@ -38,6 +43,7 @@ defmodule MealPlannerApi.Persistence.Shopping.ShoppingItem do
       :quantity_milli,
       :unit,
       :assigned_supermarket_id,
+      :checkout_session_id,
       :status,
       :estimated_price_cents
     ])

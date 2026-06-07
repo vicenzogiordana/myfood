@@ -354,7 +354,7 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
         "end_date" => Date.to_iso8601(Date.add(Date.utc_today(), 2))
       })
 
-    items = Shopping.list_items_for_account(account_id)
+    items = Shopping.list_items_for_account(account_id, include_archived: true)
     assert Enum.any?(items, &(&1.status == :archived))
   end
 

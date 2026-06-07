@@ -93,10 +93,29 @@ defmodule MealPlannerApi.Persistence.Shopping do
     |> Repo.all()
   end
 
-  def list_items_for_account(account_id) do
+  @spec list_items_for_account(pos_integer(), keyword()) :: [ShoppingItem.t()]
+  def list_items_for_account(account_id, opts \\ []) do
+    query =
+      from(i in ShoppingItem,
+        where: i.account_id == ^account_id,
+        order_by: [asc: i.planned_date]
+      )
+
+    query =
+      if Keyword.get(opts, :include_archived, false) do
+        query
+      else
+        from(i in query, where: i.status != :archived)
+      end
+
+    Repo.all(query)
+  end
+
+  @spec list_items_by_session(pos_integer(), pos_integer()) :: [ShoppingItem.t()]
+  def list_items_by_session(account_id, checkout_session_id) do
     from(i in ShoppingItem,
       where: i.account_id == ^account_id,
-      order_by: [asc: i.planned_date]
+      where: i.checkout_session_id == ^checkout_session_id
     )
     |> Repo.all()
   end
