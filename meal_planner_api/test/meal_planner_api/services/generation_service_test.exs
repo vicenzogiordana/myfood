@@ -11,12 +11,31 @@ defmodule MealPlannerApi.Services.GenerationServiceTest do
       assert "maní" in result.excluded_ingredients
     end
 
+    test "with nil payload, returns empty favorite_recipe_ids list" do
+      result = GenerationService.build_constraints(%{}, nil)
+      assert result.favorite_recipe_ids == []
+    end
+
     test "with payload, overrides profile values" do
       profile = %{protein_g_per_meal: 25, default_exclusions: []}
       payload = %{"protein_g" => 50, "budget_cents" => 3000}
       result = GenerationService.build_constraints(profile, payload)
       assert result.protein_g_per_meal == 50
       assert result.budget_cents == 3000
+    end
+
+    test "with string-keyed payload, propagates favorite_recipe_ids" do
+      profile = %{}
+      payload = %{"favorite_recipe_ids" => [1, 2, 3]}
+      result = GenerationService.build_constraints(profile, payload)
+      assert result.favorite_recipe_ids == [1, 2, 3]
+    end
+
+    test "with atom-keyed payload, propagates favorite_recipe_ids" do
+      profile = %{}
+      payload = %{favorite_recipe_ids: [4, 5, 6]}
+      result = GenerationService.build_constraints(profile, payload)
+      assert result.favorite_recipe_ids == [4, 5, 6]
     end
 
     test "with nil profile, uses sensible defaults" do

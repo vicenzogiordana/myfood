@@ -52,7 +52,9 @@ defmodule MealPlannerApi.AI.GeminiClient do
       base_url = Application.get_env(:meal_planner_api, :gemini_base_url, @default_base_url)
 
       url =
-        base_url <> "/v1beta/models/" <> model <> ":streamGenerateContent?alt=sse&key=" <> URI.encode(api_key)
+        base_url <>
+          "/v1beta/models/" <>
+          model <> ":streamGenerateContent?alt=sse&key=" <> URI.encode(api_key)
 
       {headers, body} = build_request(prompt, opts)
 
@@ -85,6 +87,7 @@ defmodule MealPlannerApi.AI.GeminiClient do
           chunk: "",
           done: true
         })
+
         Endpoint.broadcast(topic, "ai_response_finished", %{
           request_id: request_id,
           account_id: account_id
@@ -111,28 +114,35 @@ defmodule MealPlannerApi.AI.GeminiClient do
       [event, rest] ->
         if String.starts_with?(event, "data: ") do
           data_json = String.replace_prefix(event, "data: ", "")
-          
+
           if data_json != "[DONE]" do
-             case Jason.decode(data_json) do
-               {:ok, decoded} ->
-                 case Map.fetch(decoded, "candidates") do
-                   {:ok, [first | _]} ->
-                     case get_in(first, ["content", "parts"]) do
-                       [%{"text" => text} | _] ->
-                         Endpoint.broadcast(topic, "ai_response_chunk", %{
-                           request_id: request_id,
-                           account_id: account_id,
-                           chunk: text,
-                           done: false
-                         })
-                       _ -> :ok
-                     end
-                   _ -> :ok
-                 end
-               _ -> :ok
-             end
+            case Jason.decode(data_json) do
+              {:ok, decoded} ->
+                case Map.fetch(decoded, "candidates") do
+                  {:ok, [first | _]} ->
+                    case get_in(first, ["content", "parts"]) do
+                      [%{"text" => text} | _] ->
+                        Endpoint.broadcast(topic, "ai_response_chunk", %{
+                          request_id: request_id,
+                          account_id: account_id,
+                          chunk: text,
+                          done: false
+                        })
+
+                      _ ->
+                        :ok
+                    end
+
+                  _ ->
+                    :ok
+                end
+
+              _ ->
+                :ok
+            end
           end
         end
+
         process_sse_buffer(topic, request_id, account_id, rest)
 
       [incomplete] ->

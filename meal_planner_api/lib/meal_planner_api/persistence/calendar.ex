@@ -106,6 +106,37 @@ defmodule MealPlannerApi.Persistence.Calendar do
     end
   end
 
+  @doc """
+    Returns the meal for a specific (account_id, date, slot) tuple.
+
+    Returns `nil` if no meal exists for that slot.
+    Includes recipe macros and favorite status via joins.
+  """
+  @spec get_slot_meal(pos_integer(), pos_integer(), Date.t(), atom()) :: map() | nil
+  def get_slot_meal(account_id, user_id, date, slot) when is_atom(slot) do
+    from(m in ScheduledMeal,
+      where: m.account_id == ^account_id and m.date == ^date and m.slot == ^slot,
+      left_join: r in assoc(m, :recipe),
+      left_join: sf in SlotFavorite,
+      on:
+        sf.account_id == m.account_id and sf.user_id == ^user_id and sf.date == m.date and
+          sf.slot == m.slot,
+      limit: 1,
+      select: %{
+        id: m.id,
+        date: m.date,
+        slot: m.slot,
+        is_cooked: m.is_cooked,
+        recipe_id: m.recipe_id,
+        recipe_name: r.name,
+        calories_per_serving: r.calories_per_serving,
+        prep_time_minutes: r.prep_time_minutes,
+        is_favorite: not is_nil(sf.id)
+      }
+    )
+    |> Repo.one()
+  end
+
   def toggle_favorite(account_id, user_id, recipe_id) do
     case Repo.get_by(FavoriteRecipe,
            account_id: account_id,

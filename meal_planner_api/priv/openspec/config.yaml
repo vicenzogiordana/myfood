@@ -1,0 +1,20 @@
+version: "1.0"
+project: MyFood Backend
+description: AI-powered meal planning backend with Elixir/Phoenix
+
+artifacts:
+  store: files
+  path: "priv/openspec/changes/{change}"
+
+phases:
+  - proposal
+  - spec
+  - design
+  - tasks
+  - apply
+  - verify
+
+defaults:
+  execution_mode: interactive
+  review_workload_threshold: 400
+  pr_strategy: ask-always

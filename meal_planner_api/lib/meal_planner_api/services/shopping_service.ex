@@ -250,10 +250,15 @@ defmodule MealPlannerApi.Services.ShoppingService do
 
         serialized =
           if updated_items == [] do
-            %{}            
+            %{}
           else
             first = hd(updated_items)
-            %{id: first.id, ingredient_id: first.ingredient_id, assigned_supermarket_id: supermarket_id}
+
+            %{
+              id: first.id,
+              ingredient_id: first.ingredient_id,
+              assigned_supermarket_id: supermarket_id
+            }
           end
 
         updated_count = length(updated_items)

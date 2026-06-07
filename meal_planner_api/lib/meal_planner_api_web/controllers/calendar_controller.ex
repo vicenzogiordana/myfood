@@ -27,6 +27,28 @@ defmodule MealPlannerApiWeb.CalendarController do
     end
   end
 
+  def show_slot(conn, params) do
+    user = Guardian.Plug.current_resource(conn)
+
+    with {:ok, date} <- parse_date(Map.get(params, "date")),
+         {:ok, slot} <- parse_slot(Map.get(params, "slot")),
+         {:ok, meal} <- get_slot_meal_result(user, date, slot) do
+      json(conn, %{data: serialize_slot_response(meal, date, slot)})
+    else
+      {:error, reason} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: reason})
+    end
+  end
+
+  defp get_slot_meal_result(user, date, slot) do
+    case Calendar.get_slot_meal(user.account_id, user.id, date, slot) do
+      nil -> {:ok, nil}
+      meal -> {:ok, meal}
+    end
+  end
+
   defp validate_date_range(start_date, end_date) do
     if Date.compare(start_date, end_date) in [:lt, :eq] do
       :ok
@@ -63,6 +85,21 @@ defmodule MealPlannerApiWeb.CalendarController do
 
   defp parse_date(_), do: {:error, "invalid_date_format"}
 
+  # Required slot parser (used by show_slot)
+  defp parse_slot(nil), do: {:error, "missing_slot_param"}
+
+  defp parse_slot(value) when is_binary(value) do
+    case value do
+      "breakfast" -> {:ok, :breakfast}
+      "lunch" -> {:ok, :lunch}
+      "snack" -> {:ok, :snack}
+      "dinner" -> {:ok, :dinner}
+      _ -> {:error, "invalid_slot"}
+    end
+  end
+
+  defp parse_slot(_), do: {:error, "invalid_slot"}
+
   defp serialize_payload(payload) do
     %{
       start_date: Date.to_iso8601(payload.start_date),
@@ -94,11 +131,40 @@ defmodule MealPlannerApiWeb.CalendarController do
       recipe_id: meal.recipe_id,
       recipe_name: meal.recipe_name,
       is_favorite: meal.is_favorite,
+      can_create: false,
       macros: %{calories: meal.calories_per_serving},
       prep_time_minutes: meal.prep_time_minutes
     }
   end
 
   defp serialize_selected_meal(nil), do: nil
-  defp serialize_selected_meal(meal), do: serialize_meal(meal)
+
+  defp serialize_selected_meal(meal) do
+    base = serialize_meal(meal)
+    Map.put(base, :can_create, is_nil(meal.recipe_id))
+  end
+
+  # Serializers for slot response (show_slot endpoint)
+
+  defp serialize_slot_response(nil, date, slot) do
+    # Empty slot — can create
+    %{
+      meal_id: nil,
+      date: Date.to_iso8601(date),
+      slot: Atom.to_string(slot),
+      recipe_id: nil,
+      recipe_name: nil,
+      is_cooked: false,
+      is_favorite: false,
+      can_create: true,
+      macros: nil,
+      prep_time_minutes: nil
+    }
+  end
+
+  defp serialize_slot_response(meal, _date, _slot) do
+    # Filled slot — can_create is always false for existing meals
+    serialize_meal(meal)
+    |> Map.put(:can_create, false)
+  end
 end

@@ -201,18 +201,20 @@ defmodule MealPlannerApi.Generation.Server do
 
   defp run_pipeline(state) do
     %{
-      account_id: _account_id,
+      account_id: account_id,
       user_id: user_id,
       current_run_id: run_id,
       current_proposal_id: proposal_id,
       constraints: constraints
     } = state
 
-    # 1. Perfil de usuario
-    user_profile = load_user_profile(user_id)
+    # 1. Perfil de usuario + recetas favoritas
+    {user_profile, favorite_recipe_ids} = load_user_profile_and_favorites(account_id, user_id)
 
-    # 2. Resolver constraints
-    resolved = GenerationService.build_constraints(user_profile, constraints)
+    # 2. Resolver constraints (favorite_recipe_ids injected below)
+    resolved =
+      GenerationService.build_constraints(user_profile, constraints)
+      |> Map.put(:favorite_recipe_ids, favorite_recipe_ids)
 
     # 3. Slot list
     slots_input = build_slots_input(resolved)
@@ -365,6 +367,16 @@ defmodule MealPlannerApi.Generation.Server do
       %{protein_g_per_meal: 25, default_exclusions: [], default_budget_cents: 10_000}
   end
 
+  defp load_user_profile_and_favorites(account_id, user_id) do
+    profile = load_user_profile(user_id)
+
+    favorite_ids =
+      RecipeRepo.list_favorite_ids(account_id)
+      |> Enum.map(& &1.id)
+
+    {profile, favorite_ids}
+  end
+
   defp build_slots_input(constraints) do
     date_from =
       constraints["date_from"] || constraints[:date_from] ||
@@ -377,6 +389,11 @@ defmodule MealPlannerApi.Generation.Server do
     slot_types =
       constraints["slot_types"] || constraints[:slot_types] || [:breakfast, :lunch, :dinner]
 
+    # Extract favorite IDs from constraints and convert to strings for JSON
+    favorite_ids =
+      (constraints[:favorite_recipe_ids] || [])
+      |> Enum.map(&to_string/1)
+
     for date <- Date.range(Date.from_iso8601!(date_from), Date.from_iso8601!(date_to)),
         slot <- slot_types do
       %{
@@ -388,7 +405,8 @@ defmodule MealPlannerApi.Generation.Server do
           "protein_g" => constraints["protein_g"] || 25,
           "max_calories" => constraints["max_calories"] || 800,
           "excluded_recipe_ids" => [],
-          "excluded_ingredients" => []
+          "excluded_ingredients" => [],
+          "preferred_recipe_ids" => favorite_ids
         }
       }
     end

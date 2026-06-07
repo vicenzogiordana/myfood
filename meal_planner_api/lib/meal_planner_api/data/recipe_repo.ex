@@ -182,4 +182,23 @@ defmodule MealPlannerApi.Data.RecipeRepo do
       )
     )
   end
+
+  # -------------------------------------------------------------------------
+  # Favorite IDs (for GenerationServer optimization hints)
+  # -------------------------------------------------------------------------
+
+  @doc """
+  Returns the list of favorite recipe IDs for a given account.
+  Used by GenerationServer to inject preferred_recipe_ids into the OR-Tools payload.
+
+  Returns a list of maps with `:id` key, e.g. `[%{id: 1}, %{id: 5}]`.
+  """
+  @spec list_favorite_ids(pos_integer()) :: [%{id: pos_integer()}]
+  def list_favorite_ids(account_id) do
+    from(f in FavoriteRecipe,
+      where: f.account_id == ^account_id,
+      select: %{id: f.recipe_id}
+    )
+    |> Repo.all()
+  end
 end

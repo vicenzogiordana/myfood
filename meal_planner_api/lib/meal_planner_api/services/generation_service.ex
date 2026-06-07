@@ -23,7 +23,8 @@ defmodule MealPlannerApi.Services.GenerationService do
       budget_cents: Map.get(user_profile, :default_budget_cents, 10_000),
       max_calories: Map.get(user_profile, :max_calories, 800),
       excluded_recipe_ids: Map.get(user_profile, :excluded_recipe_ids, []),
-      excluded_ingredients: Map.get(user_profile, :default_exclusions, [])
+      excluded_ingredients: Map.get(user_profile, :default_exclusions, []),
+      favorite_recipe_ids: []
     }
   end
 
@@ -41,7 +42,10 @@ defmodule MealPlannerApi.Services.GenerationService do
         excluded_recipe_ids:
           payload["excluded_recipe_ids"] || payload[:excluded_recipe_ids] ||
             resolved.excluded_recipe_ids,
-        excluded_ingredients: payload_exclusions ++ resolved.excluded_ingredients
+        excluded_ingredients: payload_exclusions ++ resolved.excluded_ingredients,
+        favorite_recipe_ids:
+          payload["favorite_recipe_ids"] || payload[:favorite_recipe_ids] ||
+            resolved.favorite_recipe_ids
     }
   end
 
