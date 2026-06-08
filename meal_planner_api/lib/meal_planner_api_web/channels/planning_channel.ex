@@ -122,14 +122,23 @@ defmodule MealPlannerApiWeb.PlanningChannel do
 
       [] ->
         # Fallback: usar PlanningChatService (REST API backward compat)
-        case PlanningChatService.confirm_proposal(user, proposal_id) do
-          {:ok, result} ->
-            event = Map.put(result, :status, "confirmed")
-            broadcast!(socket, "proposal_confirmed", event)
-            {:reply, {:ok, event}, socket}
+        # Catch exceptions from service to return graceful errors
+        try do
+          case PlanningChatService.confirm_proposal(user, proposal_id) do
+            {:ok, result} ->
+              event = Map.put(result, :status, "confirmed")
+              broadcast!(socket, "proposal_confirmed", event)
+              {:reply, {:ok, event}, socket}
 
-          {:error, reason} ->
-            {:reply, {:error, %{reason: serialize_reason(reason)}}, socket}
+            {:error, reason} ->
+              {:reply, {:error, %{reason: serialize_reason(reason)}}, socket}
+          end
+        rescue
+          Ecto.NoResultsError ->
+            {:reply, {:error, %{reason: "not_found"}}, socket}
+
+          Ecto.Query.CastError ->
+            {:reply, {:error, %{reason: "invalid_proposal_id"}}, socket}
         end
     end
   end
@@ -143,14 +152,24 @@ defmodule MealPlannerApiWeb.PlanningChannel do
         {:noreply, socket}
 
       [] ->
-        case PlanningChatService.reject_proposal(user, proposal_id) do
-          {:ok, result} ->
-            event = Map.put(result, :status, "rejected")
-            broadcast!(socket, "proposal_rejected", event)
-            {:reply, {:ok, event}, socket}
+        # Fallback: usar PlanningChatService (REST API backward compat)
+        # Catch exceptions from service to return graceful errors
+        try do
+          case PlanningChatService.reject_proposal(user, proposal_id) do
+            {:ok, result} ->
+              event = Map.put(result, :status, "rejected")
+              broadcast!(socket, "proposal_rejected", event)
+              {:reply, {:ok, event}, socket}
 
-          {:error, reason} ->
-            {:reply, {:error, %{reason: serialize_reason(reason)}}, socket}
+            {:error, reason} ->
+              {:reply, {:error, %{reason: serialize_reason(reason)}}, socket}
+          end
+        rescue
+          Ecto.NoResultsError ->
+            {:reply, {:error, %{reason: "not_found"}}, socket}
+
+          Ecto.Query.CastError ->
+            {:reply, {:error, %{reason: "invalid_proposal_id"}}, socket}
         end
     end
   end

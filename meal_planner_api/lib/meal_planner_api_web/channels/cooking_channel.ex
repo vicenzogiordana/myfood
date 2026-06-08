@@ -102,7 +102,7 @@ defmodule MealPlannerApiWeb.CookingChannel do
   def handle_in("ask_assistant", %{"message" => message} = payload, socket)
       when is_binary(message) do
     user = socket.assigns.current_user
-    session_id = Map.get(payload, "session_id") || socket.assigns.session_id
+    session_id = Map.get(payload, "session_id") || Map.get(socket.assigns, :session_id)
     content_type = Map.get(payload, "content_type", "text")
 
     if session_id do
