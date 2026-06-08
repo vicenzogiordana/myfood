@@ -64,6 +64,7 @@ defmodule MealPlannerApi.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       {:uuid, "~> 1.1"},
+      {:mox, "~> 1.1", only: :test},
       {:ex_doc, "~> 0.36", only: :dev, runtime: false}
     ]
   end

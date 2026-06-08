@@ -8,6 +8,7 @@ defmodule MealPlannerApiWeb.ChannelCase do
   using do
     quote do
       import Phoenix.ChannelTest
+      import MealPlannerApiWeb.ChannelHelpers
       @endpoint MealPlannerApiWeb.Endpoint
     end
   end
