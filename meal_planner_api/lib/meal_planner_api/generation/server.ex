@@ -24,7 +24,8 @@ defmodule MealPlannerApi.Generation.Server do
     UserPreferenceRepo
   }
 
-  alias MealPlannerApi.Integrations.PythonClient
+  alias MealPlannerApi.Optimization.OptimizerServer
+  alias MealPlannerApi.Optimization.PayloadAdapter
   alias MealPlannerApi.Services.GenerationService
   alias MealPlannerApi.Services.PriceService
   alias MealPlannerApi.Repo
@@ -220,13 +221,33 @@ defmodule MealPlannerApi.Generation.Server do
     slots_input = build_slots_input(resolved)
 
     # 4. Recipe prices + macros
-    all_recipe_ids = slots_input |> Enum.flat_map(& &1["available_recipe_ids"]) |> Enum.uniq()
+    all_recipe_ids =
+      slots_input
+      |> Enum.flat_map(&(&1["available_recipe_ids"] || []))
+      |> Enum.map(&String.to_integer/1)
+      |> Enum.uniq()
+
     recipe_prices = PriceService.fetch_recipe_prices_float(all_recipe_ids)
     recipe_macros = load_recipe_macros(all_recipe_ids)
 
-    # 5. Llamar a OR-Tools
-    case PythonClient.optimize_menu(slots_input, recipe_prices, recipe_macros) do
-      {:ok, optimized_slots} ->
+    # 5. Build optimizer payload (translate format)
+    optimizer_payload =
+      PayloadAdapter.build_optimizer_payload(
+        slots_input,
+        convert_prices_to_string_keys(recipe_prices),
+        convert_macros_to_string_keys(recipe_macros)
+      )
+
+    # 6. Get recipe data for response translation
+    recipe_data = load_recipe_data_for_response(all_recipe_ids)
+
+    # 7. Call OptimizerServer (Port/stdio, working integration)
+    case OptimizerServer.select_weekly_menu(optimizer_payload) do
+      {:ok, optimizer_result} ->
+        # Translate response and enrich with DB data
+        {:ok, optimized_slots} =
+          PayloadAdapter.translate_response({:ok, optimizer_result}, recipe_data)
+
         proposal_json = GenerationService.build_proposal_json(optimized_slots)
         persist_proposal_result(proposal_id, run_id, proposal_json, state)
 
@@ -423,6 +444,36 @@ defmodule MealPlannerApi.Generation.Server do
          carbs_g: recipe.carbs_g_per_serving || 0
        }}
     end)
+  end
+
+  @spec load_recipe_data_for_response([pos_integer()]) :: %{String.t() => map()}
+  defp load_recipe_data_for_response(recipe_ids) do
+    recipe_ids
+    |> RecipeRepo.list_by_ids_with_prices()
+    |> Enum.into(%{}, fn recipe ->
+      {to_string(recipe.id),
+       %{
+         name: recipe.name,
+         price_cents: (recipe.recipe_price && recipe.recipe_price.price_per_serving_cents) || 0,
+         protein_g: recipe.protein_g_per_serving || 0,
+         calories: recipe.calories_per_serving || 0,
+         carbs_g: recipe.carbs_g_per_serving || 0
+       }}
+    end)
+  end
+
+  # Convert integer-keyed map to string-keyed map for PayloadAdapter
+  defp convert_prices_to_string_keys(prices) do
+    prices
+    |> Enum.map(fn {k, v} -> {to_string(k), v} end)
+    |> Enum.into(%{})
+  end
+
+  # Convert integer-keyed map to string-keyed map for PayloadAdapter
+  defp convert_macros_to_string_keys(macros) do
+    macros
+    |> Enum.map(fn {k, v} -> {to_string(k), v} end)
+    |> Enum.into(%{})
   end
 
   defp persist_proposal_result(proposal_id, run_id, proposal_json, state) do

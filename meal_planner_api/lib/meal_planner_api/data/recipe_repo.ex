@@ -174,6 +174,19 @@ defmodule MealPlannerApi.Data.RecipeRepo do
     |> Repo.all()
   end
 
+  @doc """
+  Returns recipes with their prices preloaded.
+  Used by GenerationServer to enrich optimizer responses with recipe names and prices.
+  """
+  @spec list_by_ids_with_prices([pos_integer()]) :: [Recipe.t()]
+  def list_by_ids_with_prices(recipe_ids) when is_list(recipe_ids) do
+    from(r in Recipe,
+      where: r.id in ^recipe_ids,
+      preload: [:recipe_price]
+    )
+    |> Repo.all()
+  end
+
   @spec is_favorite?(pos_integer(), pos_integer()) :: boolean()
   def is_favorite?(account_id, recipe_id) do
     Repo.exists?(
