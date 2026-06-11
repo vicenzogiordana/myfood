@@ -12,15 +12,29 @@ defmodule MealPlannerApiWeb.Router do
   scope "/api", MealPlannerApiWeb do
     pipe_through(:api)
 
+    # Auth endpoints (no auth required)
     post("/auth/social", AuthController, :social)
     post("/auth/password", AuthController, :password)
+    # Route aliases for frontend compatibility (G1-G5)
+    post("/auth/login", AuthController, :password)
+    post("/auth/register", AuthController, :password)
+    post("/auth/google", AuthController, :social)
+    post("/auth/facebook", AuthController, :social)
+    post("/auth/apple", AuthController, :social)
+    # Refresh token (G6)
+    post("/auth/refresh", AuthController, :refresh)
+    # Logout (G7)
+    post("/auth/logout", AuthController, :logout)
+
     post("/billing/revenuecat/webhook", RevenuecatController, :webhook)
   end
 
   scope "/api", MealPlannerApiWeb do
     pipe_through([:api, :auth])
 
+    # User endpoints (auth required)
     get("/me", AccountsController, :me)
+    get("/auth/me", AccountsController, :me)  # Alias for frontend (G8)
     get("/account/context", AccountsController, :context)
     get("/calendar", CalendarController, :index)
     get("/calendar/slot", CalendarController, :show_slot)

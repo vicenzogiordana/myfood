@@ -119,10 +119,11 @@ defmodule MealPlannerApi.Accounts do
   @spec serialize_user(map()) :: map()
   def serialize_user(user) when is_map(user) do
     %{
-      id: user.id,
-      account_id: user.account_id,
+      id: to_string(user.id),
+      account_id: to_string(user.account_id),
       email: user.email,
       name: user.name,
+      avatar_url: Map.get(user, :avatar_url),
       account_type: Map.get(user, :account_type, :individual),
       subscription_tier: subscription_tier_from(user)
     }

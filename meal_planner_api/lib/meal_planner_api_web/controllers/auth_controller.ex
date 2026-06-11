@@ -86,13 +86,80 @@ defmodule MealPlannerApiWeb.AuthController do
     end
   end
 
+  # POST /auth/refresh
+  def refresh(conn, %{"refresh_token" => refresh_token}) do
+    case Guardian.decode_and_verify(refresh_token, %{}, token_type: "refresh") do
+      {:ok, %{"sub" => user_id, "account_id" => account_id}} ->
+        case load_user_and_account(user_id, account_id) do
+          {:ok, user, account} ->
+            requested_tier = Map.get(conn.params, "subscription_tier", "free")
+            resolved_tier = RevenuecatService.resolve_tier(account.id, requested_tier)
+            user = Map.put(user, :subscription_tier, resolved_tier)
+            account = Map.put(account, :subscription_tier, resolved_tier)
+
+            with {:ok, new_access_token, _} <-
+                   Guardian.encode_and_sign(user, Accounts.claims_for(user, account),
+                     token_type: "access"
+                   ),
+                 {:ok, new_refresh_token, _} <-
+                   Guardian.encode_and_sign(user, Accounts.claims_for(user, account),
+                     token_type: "refresh"
+                   ) do
+              json(conn, %{
+                access_token: new_access_token,
+                refresh_token: new_refresh_token
+              })
+            else
+              _ ->
+                conn
+                |> put_status(:unauthorized)
+                |> json(%{error: "token_refresh_failed"})
+            end
+
+          _ ->
+            conn
+            |> put_status(:unauthorized)
+            |> json(%{error: "invalid_refresh_token"})
+        end
+
+      {:error, _reason} ->
+        conn
+        |> put_status(:unauthorized)
+        |> json(%{error: "invalid_refresh_token"})
+    end
+  end
+
+  def refresh(conn, _params) do
+    conn
+    |> put_status(:bad_request)
+    |> json(%{error: "missing_refresh_token"})
+  end
+
+  # POST /auth/logout
+  def logout(conn, _params) do
+    # For now, just acknowledge logout
+    # Token invalidation would require denylist or token tracking
+    json(conn, %{message: "Logged out successfully"})
+  end
+
+  defp load_user_and_account(user_id, account_id) do
+    user = MealPlannerApi.Repo.get(MealPlannerApi.Persistence.Accounts.User, user_id)
+    account = MealPlannerApi.Repo.get(MealPlannerApi.Persistence.Accounts.Account, account_id)
+
+    if user && account, do: {:ok, user, account}, else: {:error, :not_found}
+  end
+
   defp issue_auth_response(conn, user, account, requested_tier) do
     with resolved_tier <- RevenuecatService.resolve_tier(account.id, requested_tier),
          user <- Map.put(user, :subscription_tier, resolved_tier),
          account <- Map.put(account, :subscription_tier, resolved_tier),
-         {:ok, token, _claims} <-
+         {:ok, access_token, _access_claims} <-
            Guardian.encode_and_sign(user, Accounts.claims_for(user, account),
              token_type: "access"
+           ),
+         {:ok, refresh_token, _refresh_claims} <-
+           Guardian.encode_and_sign(user, Accounts.claims_for(user, account),
+             token_type: "refresh"
            ) do
       subscription =
         account.id
@@ -100,14 +167,15 @@ defmodule MealPlannerApiWeb.AuthController do
         |> Map.put(:tier, Atom.to_string(resolved_tier))
 
       json(conn, %{
-        access_token: token,
+        access_token: access_token,
+        refresh_token: refresh_token,
         token_type: "Bearer",
         user: Accounts.serialize_user(user),
         account: Accounts.serialize_account(account),
         subscription: subscription,
         websocket: %{
           path: "/socket/websocket",
-          params: %{token: token}
+          params: %{token: access_token}
         }
       })
     end
