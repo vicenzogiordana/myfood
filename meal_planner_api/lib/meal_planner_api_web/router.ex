@@ -34,7 +34,8 @@ defmodule MealPlannerApiWeb.Router do
 
     # User endpoints (auth required)
     get("/me", AccountsController, :me)
-    get("/auth/me", AccountsController, :me)  # Alias for frontend (G8)
+    # Alias for frontend (G8)
+    get("/auth/me", AccountsController, :me)
     get("/account/context", AccountsController, :context)
     get("/calendar", CalendarController, :index)
     get("/calendar/slot", CalendarController, :show_slot)
