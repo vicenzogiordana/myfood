@@ -40,10 +40,13 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembershipTest do
       token = issue_access_v2_token(user, membership)
       {:ok, claims} = Guardian.decode_and_verify(token)
 
+      # The plug expects Guardian to have populated conn.assigns[:default]
+      # with the user (via Guardian.Plug.LoadResource). In tests we set
+      # that key explicitly.
       conn =
         conn
         |> Plug.Conn.put_private(:guardian_default_claims, claims)
-        |> Plug.Conn.assign(:current_user, user)
+        |> Plug.Conn.assign(:default, user)
         |> LoadCurrentMembership.call(%{})
 
       assert %AccountMembership{id: ms_id, account_id: account_id} = conn.assigns.current_membership
@@ -86,7 +89,7 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembershipTest do
       conn =
         conn
         |> Plug.Conn.put_private(:guardian_default_claims, legacy_claims)
-        |> Plug.Conn.assign(:current_user, user)
+        |> Plug.Conn.assign(:default, user)
         |> LoadCurrentMembership.call(%{})
 
       synthesized = conn.assigns.current_membership
@@ -134,7 +137,7 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembershipTest do
       conn =
         conn
         |> Plug.Conn.put_private(:guardian_default_claims, partial_claims)
-        |> Plug.Conn.assign(:current_user, user)
+        |> Plug.Conn.assign(:default, user)
         |> LoadCurrentMembership.call(%{})
 
       assert conn.halted

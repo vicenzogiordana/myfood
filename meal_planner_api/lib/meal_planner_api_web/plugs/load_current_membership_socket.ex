@@ -36,6 +36,34 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket do
     end
   end
 
+  @doc """
+  Convenience that reads the membership from a Conn (HTTP) the same way
+  the HTTP plug does. Provided so channel tests that have a conn shape
+  can exercise the membership loading logic without instantiating a
+  full Phoenix.Socket struct.
+  """
+  @spec membership_from_conn(Plug.Conn.t()) :: AccountMembership.t() | nil
+  def membership_from_conn(%Plug.Conn{} = conn) do
+    claims =
+      conn.private[:guardian_default_claims] ||
+        conn.assigns[:guardian_default_claims] || %{}
+
+    current_user =
+      try do
+        MealPlannerApi.Auth.Guardian.Plug.current_resource(conn)
+      rescue
+        _ -> nil
+      end
+
+    typ = Map.get(claims, "typ", "access")
+
+    case typ do
+      "access_v2" -> load_access_v2_membership(claims)
+      "access" -> synthesize_legacy_membership(current_user)
+      _ -> nil
+    end
+  end
+
   defp load_access_v2_membership(claims) do
     case Map.get(claims, "membership_id") do
       nil -> nil

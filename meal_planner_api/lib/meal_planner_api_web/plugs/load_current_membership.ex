@@ -21,9 +21,12 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
   presented.
   """
 
+  alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Accounts.Account
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Repo
+
+  @behaviour Plug
 
   @impl true
   def init(opts), do: opts
@@ -55,7 +58,13 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
         conn.assigns[:guardian_default_claims] || %{}
 
     typ = Map.get(claims, "typ", "access")
-    current_user = conn.assigns[:current_user]
+
+    current_user =
+      try do
+        Guardian.Plug.current_resource(conn) || conn.assigns[:default]
+      rescue
+        _ -> conn.assigns[:default]
+      end
 
     case typ do
       "access_v2" ->
