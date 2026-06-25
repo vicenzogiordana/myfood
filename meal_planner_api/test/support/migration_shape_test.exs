@@ -171,6 +171,30 @@ defmodule MealPlannerApi.MigrationShapeTest do
     end
   end
 
+  describe "users.account_id nullable (dual-write window)" do
+    test "a user with account_id nil persists" do
+      {:ok, id_bin} = Ecto.UUID.dump(Ecto.UUID.generate())
+      now = DateTime.utc_now()
+
+      assert {:ok, %{rows: [[returned_id]]}} =
+               Repo.query!(
+                 """
+                 INSERT INTO users (id, account_id, email, name, role, inserted_at, updated_at)
+                 VALUES ($1, NULL, $2, 'No-Account User', 'member', $3, $3)
+                 RETURNING id
+                 """,
+                 [id_bin, "u_noaccount_#{Ecto.UUID.generate()}@example.com", now]
+               )
+
+      assert returned_id == id_bin
+
+      [[account_id]] =
+        Repo.query!("SELECT account_id FROM users WHERE id = $1", [id_bin]).rows
+
+      assert is_nil(account_id)
+    end
+  end
+
   # ---- helpers ---------------------------------------------------------------
 
   defp table_columns(table) do
