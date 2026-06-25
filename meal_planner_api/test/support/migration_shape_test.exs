@@ -19,6 +19,8 @@ defmodule MealPlannerApi.MigrationShapeTest do
 
   use ExUnit.Case, async: false
 
+  import Ecto.Query, warn: false
+
   alias Ecto.Adapters.SQL.Sandbox
   alias MealPlannerApi.Repo
 
@@ -118,6 +120,51 @@ defmodule MealPlannerApi.MigrationShapeTest do
                |> Repo.insert()
 
       assert %{account_id: ["has already been taken"]} = errors_on(changeset)
+    end
+  end
+
+  describe "accounts.plan enum" do
+    test "the legacy account_type column is gone" do
+      refute "account_type" in table_columns("accounts"),
+             "expected account_type column to be dropped"
+    end
+
+    test "the plan column exists with the right type" do
+      columns = table_columns("accounts")
+      assert "plan" in columns
+      assert column_data_type("accounts", "plan") == "text"
+    end
+
+    test "plan has a CHECK constraint limiting values" do
+      assert check_constraint_exists?("accounts", "accounts_plan_check"),
+             "expected accounts_plan_check constraint"
+    end
+
+    test "inserting an unknown plan value is rejected by the CHECK constraint" do
+      sql = """
+      INSERT INTO accounts (id, name, plan, default_budget_cents, subscription_plan_id, inserted_at, updated_at)
+      VALUES (gen_random_uuid(), 'X', 'enterprise', 0, $1, now(), now())
+      """
+
+      plan_id = Repo.get_by!(MealPlannerApi.Subscriptions.Plan, name: "family_4").id
+      assert_raises_postgres("23514", fn -> Repo.query!(sql, [plan_id]) end)
+    end
+  end
+
+  describe "subscription_plans seed (Q10)" do
+    test "all four plan names are seeded" do
+      plan_names = Repo.all(from p in MealPlannerApi.Subscriptions.Plan, select: p.name) |> Enum.sort()
+      assert plan_names == ["family_4", "family_6", "individual", "trial"]
+    end
+
+    test ":family_6 plan has max_users 6" do
+      plan = Repo.get_by!(MealPlannerApi.Subscriptions.Plan, name: "family_6")
+      assert plan.max_users == 6
+    end
+
+    test ":trial plan has max_users 6" do
+      plan = Repo.get_by!(MealPlannerApi.Subscriptions.Plan, name: "trial")
+      assert plan.max_users == 6
     end
   end
 
