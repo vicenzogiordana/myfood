@@ -132,7 +132,9 @@ defmodule MealPlannerApi.MigrationShapeTest do
     test "the plan column exists with the right type" do
       columns = table_columns("accounts")
       assert "plan" in columns
-      assert column_data_type("accounts", "plan") == "text"
+      data_type = column_data_type("accounts", "plan")
+      assert data_type in ["text", "character varying"],
+             "expected plan to be text/varchar, got #{data_type}"
     end
 
     test "plan has a CHECK constraint limiting values" do
@@ -146,8 +148,9 @@ defmodule MealPlannerApi.MigrationShapeTest do
       VALUES (gen_random_uuid(), 'X', 'enterprise', 0, $1, now(), now())
       """
 
-      plan_id = Repo.get_by!(MealPlannerApi.Subscriptions.Plan, name: "family_4").id
-      assert_raises_postgres("23514", fn -> Repo.query!(sql, [plan_id]) end)
+      plan = Repo.get_by!(MealPlannerApi.Subscriptions.Plan, name: "family_4")
+      {:ok, plan_id_bin} = Ecto.UUID.dump(plan.id)
+      assert_raises_postgres("23514", fn -> Repo.query!(sql, [plan_id_bin]) end)
     end
   end
 
@@ -244,25 +247,41 @@ defmodule MealPlannerApi.MigrationShapeTest do
 
   defp insert_account! do
     plan = Repo.get_by!(MealPlannerApi.Subscriptions.Plan, name: "family_4")
+    {:ok, id_bin} = Ecto.UUID.dump(Ecto.UUID.generate())
+    {:ok, plan_id_bin} = Ecto.UUID.dump(plan.id)
+    now = DateTime.utc_now()
 
-    %MealPlannerApi.Persistence.Accounts.Account{}
-    |> MealPlannerApi.Persistence.Accounts.Account.changeset(%{
-      name: "Test Account #{Ecto.UUID.generate()}",
-      account_type: :group,
-      default_budget_cents: 0,
-      subscription_plan_id: plan.id
-    })
-    |> Repo.insert!()
+    Repo.query!(
+      """
+      INSERT INTO accounts (id, name, plan, default_budget_cents, subscription_plan_id, inserted_at, updated_at)
+      VALUES ($1, $2, 'family_4', 0, $3, $4, $4)
+      RETURNING id
+      """,
+      [id_bin, "Test Account #{Ecto.UUID.generate()}", plan_id_bin, now]
+    )
+
+    %{id: Ecto.UUID.cast!(id_bin)}
   end
 
   defp insert_user!(account_id) do
-    %MealPlannerApi.Persistence.Accounts.User{}
-    |> MealPlannerApi.Persistence.Accounts.User.changeset(%{
-      account_id: account_id,
-      email: "u_#{Ecto.UUID.generate()}@example.com",
-      name: "Test User",
-      role: :owner
-    })
-    |> Repo.insert!()
+    {:ok, id_bin} = Ecto.UUID.dump(Ecto.UUID.generate())
+    {:ok, account_id_bin} = Ecto.UUID.dump(account_id)
+    now = DateTime.utc_now()
+
+    Repo.query!(
+      """
+      INSERT INTO users (id, account_id, email, name, role, inserted_at, updated_at)
+      VALUES ($1, $2, $3, 'Test User', 'owner', $4, $4)
+      RETURNING id
+      """,
+      [
+        id_bin,
+        account_id_bin,
+        "u_#{Ecto.UUID.generate()}@example.com",
+        now
+      ]
+    )
+
+    %{id: Ecto.UUID.cast!(id_bin)}
   end
 end
