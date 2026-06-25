@@ -176,22 +176,74 @@ defmodule MealPlannerApi.MigrationShapeTest do
       {:ok, id_bin} = Ecto.UUID.dump(Ecto.UUID.generate())
       now = DateTime.utc_now()
 
-      assert {:ok, %{rows: [[returned_id]]}} =
-               Repo.query!(
-                 """
-                 INSERT INTO users (id, account_id, email, name, role, inserted_at, updated_at)
-                 VALUES ($1, NULL, $2, 'No-Account User', 'member', $3, $3)
-                 RETURNING id
-                 """,
-                 [id_bin, "u_noaccount_#{Ecto.UUID.generate()}@example.com", now]
-               )
+      result =
+        Repo.query!(
+          """
+          INSERT INTO users (id, account_id, email, name, role, inserted_at, updated_at)
+          VALUES ($1, NULL, $2, 'No-Account User', 'member', $3, $3)
+          RETURNING id
+          """,
+          [id_bin, "u_noaccount_#{Ecto.UUID.generate()}@example.com", now]
+        )
 
-      assert returned_id == id_bin
+      assert result.command == :insert
+      assert result.num_rows == 1
 
       [[account_id]] =
         Repo.query!("SELECT account_id FROM users WHERE id = $1", [id_bin]).rows
 
       assert is_nil(account_id)
+    end
+  end
+
+  describe "backfill + invariant function" do
+    test "check_account_membership_invariants() returns void on a clean DB" do
+      # The backfill migration already populated account_memberships from
+      # the legacy users.account_id rows in this DB. The function should
+      # complete without raising.
+      result = Repo.query!("SELECT check_account_membership_invariants()")
+      assert result.command == :select
+      assert result.num_rows == 1
+    end
+
+    test "function raises when a user lacks an active membership" do
+      # Insert a fresh user+account pair WITHOUT a corresponding
+      # account_memberships row, then call the invariant — it must raise.
+      plan = Repo.get_by!(MealPlannerApi.Subscriptions.Plan, name: "family_4")
+      {:ok, account_id} = Ecto.UUID.dump(Ecto.UUID.generate())
+      {:ok, user_id} = Ecto.UUID.dump(Ecto.UUID.generate())
+      {:ok, plan_id_bin} = Ecto.UUID.dump(plan.id)
+      now = DateTime.utc_now()
+
+      Repo.query!(
+        """
+        INSERT INTO accounts (id, name, plan, default_budget_cents, subscription_plan_id, inserted_at, updated_at)
+        VALUES ($1, 'Inv-Test A', 'family_4', 0, $2, $3, $3)
+        """,
+        [account_id, plan_id_bin, now]
+      )
+
+      Repo.query!(
+        """
+        INSERT INTO users (id, account_id, email, name, role, inserted_at, updated_at)
+        VALUES ($1, $2, $3, 'Inv-Test User', 'owner', $4, $4)
+        """,
+        [user_id, account_id, "inv_test_#{Ecto.UUID.generate()}@example.com", now]
+      )
+
+      try do
+        Repo.query!("SELECT check_account_membership_invariants()")
+        flunk("expected backfill_invariant_failed exception")
+      rescue
+        ex in Postgrex.Error ->
+          assert ex.postgres.message =~ "backfill_invariant_failed",
+                 "expected backfill_invariant_failed, got: #{ex.postgres.message}"
+      end
+
+      # Clean up so subsequent tests in the suite do not see this
+      # broken invariant.
+      Repo.query!("DELETE FROM users WHERE id = $1", [user_id])
+      Repo.query!("DELETE FROM accounts WHERE id = $1", [account_id])
     end
   end
 
