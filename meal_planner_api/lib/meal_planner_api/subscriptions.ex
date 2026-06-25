@@ -1,6 +1,12 @@
 defmodule MealPlannerApi.Subscriptions do
   @moduledoc """
   Subscription plans backed by PostgreSQL.
+
+  Phase A — Tenancy Refactor (PR 1) renamed the legacy
+  `default_plan_name_for_account_type/1` and `ensure_default_plan_id/1`
+  helpers to operate on the new `Account.plan` enum. The functions
+  accept any of `:individual | :family_4 | :family_6 | :trial` and
+  return the matching `subscription_plans.name`.
   """
 
   import Ecto.Query, warn: false
@@ -42,8 +48,9 @@ defmodule MealPlannerApi.Subscriptions do
       %Account{subscription_plan: %Plan{} = plan} ->
         {:ok, plan}
 
-      %Account{account_type: account_type} ->
-        get_plan_by_name(default_plan_name_for_account_type(account_type))
+      %Account{plan: plan} ->
+        plan_atom = plan_atom_from_value(plan)
+        get_plan_by_name(default_plan_name_for_plan(plan_atom))
     end
   end
 
@@ -70,16 +77,20 @@ defmodule MealPlannerApi.Subscriptions do
     end
   end
 
-  @spec default_plan_name_for_account_type(atom() | binary()) :: binary()
-  def default_plan_name_for_account_type(:group), do: @default_group_plan
-  def default_plan_name_for_account_type("group"), do: @default_group_plan
-  def default_plan_name_for_account_type(_), do: @default_individual_plan
+  @spec default_plan_name_for_plan(atom() | binary()) :: binary()
+  def default_plan_name_for_plan(:family_4), do: @default_group_plan
+  def default_plan_name_for_plan(:family_6), do: @default_group_plan
+  def default_plan_name_for_plan(:trial), do: @default_group_plan
+  def default_plan_name_for_plan("family_4"), do: @default_group_plan
+  def default_plan_name_for_plan("family_6"), do: @default_group_plan
+  def default_plan_name_for_plan("trial"), do: @default_group_plan
+  def default_plan_name_for_plan(_), do: @default_individual_plan
 
   @spec ensure_default_plan_id(atom() | binary()) ::
           {:ok, Ecto.UUID.t()} | {:error, :plan_not_found}
-  def ensure_default_plan_id(account_type) do
-    with {:ok, plan} <- get_plan_by_name(default_plan_name_for_account_type(account_type)) do
-      {:ok, plan.id}
+  def ensure_default_plan_id(plan) do
+    with {:ok, plan_row} <- get_plan_by_name(default_plan_name_for_plan(plan)) do
+      {:ok, plan_row.id}
     end
   end
 
@@ -91,4 +102,9 @@ defmodule MealPlannerApi.Subscriptions do
       revenuecat_entitlement_id: plan.revenuecat_entitlement_id
     }
   end
+
+  # Accept string or atom form of plan (the schema casts Ecto.Enum to atom,
+  # but Repo.get/preload may surface the raw DB string).
+  defp plan_atom_from_value(plan) when is_atom(plan), do: plan
+  defp plan_atom_from_value(plan) when is_binary(plan), do: String.to_existing_atom(plan)
 end

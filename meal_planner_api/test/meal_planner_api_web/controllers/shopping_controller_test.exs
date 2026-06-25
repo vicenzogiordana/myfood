@@ -19,7 +19,7 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       Identity.ensure_persistent_identity(%{
         id: "u_shop",
         account_id: "acct_shop",
-        account_type: :group
+        plan: :family_4
       })
 
     {:ok, ingredient} =
@@ -218,7 +218,7 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       Identity.ensure_persistent_identity(%{
         id: "u_shop_delta",
         account_id: "acct_shop_delta",
-        account_type: :group
+        plan: :family_4
       })
 
     {:ok, ingredient} =
@@ -295,7 +295,7 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       Identity.ensure_persistent_identity(%{
         id: "u_prune",
         account_id: "acct_prune",
-        account_type: :group
+        plan: :family_4
       })
 
     {:ok, ingredient} =
@@ -368,7 +368,7 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       Identity.ensure_persistent_identity(%{
         id: "u_online",
         account_id: "acct_online",
-        account_type: :group
+        plan: :family_4
       })
 
     {:ok, ingredient} =

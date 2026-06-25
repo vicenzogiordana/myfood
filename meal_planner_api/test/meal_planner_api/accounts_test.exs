@@ -30,6 +30,11 @@ defmodule MealPlannerApi.AccountsTest do
       linked_user_ids: []
     }
 
+    # Phase A: link_user/2 was the legacy single-account seat cap. With the
+    # AccountMembership join (PR 2) the seat cap is enforced by
+    # AccountsMembership.seat_usage/1 + enforce_seat_cap/2 instead. The
+    # legacy link_user helper still exists for the public-facing DTO and
+    # is exercised here against the pre-Phase-A shape.
     assert {:ok, updated} = Accounts.link_user(account, Ecto.UUID.generate())
     assert {:error, :individual_limit_reached} = Accounts.link_user(updated, Ecto.UUID.generate())
   end

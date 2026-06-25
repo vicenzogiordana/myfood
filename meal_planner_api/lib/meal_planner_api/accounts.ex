@@ -1,6 +1,15 @@
 defmodule MealPlannerApi.Accounts do
   @moduledoc """
   Accounts context implementing individual vs group business rules.
+
+  Phase A — Tenancy Refactor (PR 1) swapped the legacy `:account_type`
+  taxonomy (`:individual | :group`) for the canonical `Account.plan`
+  enum (`:individual | :family_4 | :family_6 | :trial`). The legacy
+  `account_type` field is gone from the `Account` schema and from
+  `Accounts.claims_for/2`'s output keys; the JWT still carries
+  `"account_type"` for backwards compatibility (derived from plan:
+  `:individual` → "individual", everything else → "group") so existing
+  consumers continue to work without an app release.
   """
 
   alias Ecto.Multi
@@ -10,16 +19,18 @@ defmodule MealPlannerApi.Accounts do
   alias MealPlannerApi.Persistence.Accounts.Account, as: PersistenceAccount
   alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
 
+  @plan_values [:individual, :family_4, :family_6, :trial]
+
   @spec find_or_create_identity(map()) ::
           {:ok, %{user: PersistenceUser.t(), account: PersistenceAccount.t()}}
           | {:error, :missing_identity | :unable_to_issue_identity}
   def find_or_create_identity(params) when is_map(params) do
     with {:ok, user_id} <- fetch_required_identity(params, "user_id"),
          {:ok, account_id} <- fetch_required_identity(params, "account_id"),
-         type <- normalize_account_type(Map.get(params, "account_type", "individual")),
+         plan <- normalize_plan(Map.get(params, "account_type", "individual")),
          {:ok, db_account_id} <- stable_uuid("account:" <> account_id),
          {:ok, db_user_id} <- stable_uuid("user:" <> user_id),
-         {:ok, account} <- upsert_account(db_account_id, type, params),
+         {:ok, account} <- upsert_account(db_account_id, plan, params),
          {:ok, user} <- upsert_user(db_user_id, db_account_id, params) do
       {:ok, %{user: user, account: account}}
     else
@@ -41,11 +52,11 @@ defmodule MealPlannerApi.Accounts do
          {:ok, password} <- fetch_password(params),
          :ok <- ensure_password_strength(password),
          nil <- user_by_email(email),
-         type <- normalize_account_type(Map.get(params, "account_type", "individual")),
-         {:ok, subscription_plan_id} <- Subscriptions.ensure_default_plan_id(type),
+         plan <- normalize_plan(Map.get(params, "account_type", "individual")),
+         {:ok, subscription_plan_id} <- Subscriptions.ensure_default_plan_id(plan),
          password_hash <- Bcrypt.hash_pwd_salt(password),
          {:ok, result} <-
-           create_account_and_user(email, password_hash, type, params, subscription_plan_id) do
+           create_account_and_user(email, password_hash, plan, params, subscription_plan_id) do
       {:ok, %{user: result.user, account: result.account}}
     else
       %PersistenceUser{} -> {:error, :email_already_registered}
@@ -101,14 +112,28 @@ defmodule MealPlannerApi.Accounts do
   def can_link_user?(%Account{type: :group}), do: true
   def can_link_user?(%Account{type: :individual, linked_user_ids: linked}), do: linked == []
 
+  @doc """
+  Returns the seat usage for an Account-shaped DTO. In Phase A this is a
+  placeholder (the canonical implementation lives in
+  `MealPlannerApi.AccountsMembership.seat_usage/1` per design §6.2 / §10
+  Q10 — landed in PR 2). The function exists here so callers can compile
+  during the dual-write window.
+  """
+  @spec seat_usage(map()) :: %{active: non_neg_integer(), invited: non_neg_integer(), capacity: pos_integer()}
+  def seat_usage(%{plan: plan}) when is_atom(plan) do
+    %{active: 0, invited: 0, capacity: max_users_for_plan(plan)}
+  end
+
+  def seat_usage(_), do: %{active: 0, invited: 0, capacity: 1}
+
   @spec claims_for(map(), map()) :: map()
   def claims_for(user, account) when is_map(user) and is_map(account) do
-    account_type = account_type_from(account)
+    legacy_account_type = legacy_account_type_from_plan(plan_from(account))
     subscription_tier = subscription_tier_from(user)
 
     %{
       "account_id" => account.id,
-      "account_type" => Atom.to_string(account_type),
+      "account_type" => legacy_account_type,
       "subscription_tier" => Atom.to_string(subscription_tier),
       "email" => user.email,
       "name" => user.name,
@@ -120,32 +145,51 @@ defmodule MealPlannerApi.Accounts do
   def serialize_user(user) when is_map(user) do
     %{
       id: to_string(user.id),
-      account_id: to_string(user.account_id),
+      account_id: to_string(Map.get(user, :account_id)),
       email: user.email,
       name: user.name,
       avatar_url: Map.get(user, :avatar_url),
-      account_type: Map.get(user, :account_type, :individual),
+      plan: Map.get(user, :plan, :individual),
       subscription_tier: subscription_tier_from(user)
     }
   end
 
   @spec serialize_account(map()) :: map()
   def serialize_account(account) when is_map(account) do
-    type = account_type_from(account)
+    plan = plan_from(account)
 
     %{
       id: account.id,
-      type: type,
+      plan: plan,
       owner_id: Map.get(account, :owner_id),
       subscription_tier: subscription_tier_from(account),
       linked_user_ids: Map.get(account, :linked_user_ids, []),
-      max_linked_users: if(type == :group, do: :unlimited, else: 1)
+      max_linked_users: max_users_for_plan(plan)
     }
   end
 
-  defp normalize_account_type("group"), do: :group
-  defp normalize_account_type(:group), do: :group
-  defp normalize_account_type(_), do: :individual
+  @doc """
+  Normalizes an `account_type`-shaped API input (`:individual | :group` or
+  their string forms) into the canonical `Account.plan` atom.
+
+  * `:individual | "individual"` → `:individual`
+  * `:group | "group"` → `:family_4` (per design §2.2 data migration)
+  * `:family_4 | "family_4"` → `:family_4`
+  * `:family_6 | "family_6"` → `:family_6`
+  * `:trial | "trial"` → `:trial`
+  * Anything else → `:individual`
+  """
+  @spec normalize_plan(term()) :: atom()
+  def normalize_plan(plan) when plan in @plan_values, do: plan
+  def normalize_plan(:group), do: :family_4
+  def normalize_plan("group"), do: :family_4
+  def normalize_plan("family_4"), do: :family_4
+  def normalize_plan("family_6"), do: :family_6
+  def normalize_plan("trial"), do: :trial
+  def normalize_plan("individual"), do: :individual
+  def normalize_plan(_), do: :individual
+
+  # ---- private helpers -------------------------------------------------------
 
   defp fetch_email(params) when is_map(params) do
     params
@@ -170,10 +214,10 @@ defmodule MealPlannerApi.Accounts do
       else: {:error, :password_too_short}
   end
 
-  defp create_account_and_user(email, password_hash, type, params, subscription_plan_id) do
+  defp create_account_and_user(email, password_hash, plan, params, subscription_plan_id) do
     account_attrs = %{
       name: Map.get(params, "name", "MyFood User"),
-      account_type: type,
+      plan: plan,
       default_budget_cents: 0,
       subscription_plan_id: subscription_plan_id
     }
@@ -222,11 +266,11 @@ defmodule MealPlannerApi.Accounts do
     end
   end
 
-  defp upsert_account(db_account_id, type, params) do
-    with {:ok, subscription_plan_id} <- Subscriptions.ensure_default_plan_id(type) do
+  defp upsert_account(db_account_id, plan, params) do
+    with {:ok, subscription_plan_id} <- Subscriptions.ensure_default_plan_id(plan) do
       attrs = %{
         name: Map.get(params, "name", "MyFood User"),
-        account_type: type,
+        plan: plan,
         default_budget_cents: 0,
         subscription_plan_id: subscription_plan_id
       }
@@ -285,9 +329,22 @@ defmodule MealPlannerApi.Accounts do
     Ecto.UUID.cast(uuid)
   end
 
-  defp account_type_from(account) do
-    Map.get(account, :type) || Map.get(account, :account_type, :individual)
+  defp plan_from(account) when is_map(account) do
+    case Map.get(account, :plan) do
+      nil -> :individual
+      plan when is_atom(plan) -> plan
+      plan when is_binary(plan) -> String.to_existing_atom(plan)
+    end
   end
+
+  defp legacy_account_type_from_plan(:individual), do: "individual"
+  defp legacy_account_type_from_plan(_), do: "group"
+
+  defp max_users_for_plan(:individual), do: 1
+  defp max_users_for_plan(:family_4), do: 4
+  defp max_users_for_plan(:family_6), do: 6
+  defp max_users_for_plan(:trial), do: 6
+  defp max_users_for_plan(_), do: 1
 
   defp subscription_tier_from(entity) do
     Map.get(entity, :subscription_tier, :free)

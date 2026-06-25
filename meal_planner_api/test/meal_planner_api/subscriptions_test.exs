@@ -21,7 +21,7 @@ defmodule MealPlannerApi.SubscriptionsTest do
     {:ok, account} =
       MealPlannerApi.Persistence.Accounts.create_account(%{
         name: "Subscription test account",
-        account_type: :group,
+        plan: :family_4,
         default_budget_cents: 50_000
       })
 

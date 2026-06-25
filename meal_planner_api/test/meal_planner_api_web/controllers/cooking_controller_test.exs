@@ -14,7 +14,7 @@ defmodule MealPlannerApiWeb.CookingControllerTest do
       Identity.ensure_persistent_identity(%{
         id: "u_cook",
         account_id: "acct_cook",
-        account_type: :group
+        plan: :family_4
       })
 
     {:ok, ingredient} =

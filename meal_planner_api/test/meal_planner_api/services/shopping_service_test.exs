@@ -61,11 +61,11 @@ defmodule MealPlannerApi.ShoppingServiceTest do
         Identity.ensure_persistent_identity(%{
           id: "u_checkout_txn_#{:rand.uniform(10000)}",
           account_id: "acct_checkout_txn_#{:rand.uniform(10000)}",
-          account_type: :group
+          plan: :family_4
         })
 
       account_id = identity.account_id
-      user = %{id: identity.user_id, account_id: account_id, account_type: :group}
+      user = %{id: identity.user_id, account_id: account_id, plan: :family_4}
 
       ingredient = create_test_ingredient(account_id)
       recipe = create_test_recipe(account_id, identity.user_id)
@@ -119,11 +119,11 @@ defmodule MealPlannerApi.ShoppingServiceTest do
         Identity.ensure_persistent_identity(%{
           id: "u_count_#{:rand.uniform(10000)}",
           account_id: "acct_count_#{:rand.uniform(10000)}",
-          account_type: :group
+          plan: :family_4
         })
 
       account_id = identity.account_id
-      user = %{id: identity.user_id, account_id: account_id, account_type: :group}
+      user = %{id: identity.user_id, account_id: account_id, plan: :family_4}
 
       ingredient = create_test_ingredient(account_id)
       recipe = create_test_recipe(account_id, identity.user_id)
@@ -189,10 +189,10 @@ defmodule MealPlannerApi.ShoppingServiceTest do
         Identity.ensure_persistent_identity(%{
           id: "u_rollback_#{:rand.uniform(10000)}",
           account_id: "acct_rollback_#{:rand.uniform(10000)}",
-          account_type: :group
+          plan: :family_4
         })
 
-      user = %{id: identity.user_id, account_id: identity.account_id, account_type: :group}
+      user = %{id: identity.user_id, account_id: identity.account_id, plan: :family_4}
 
       # Try to confirm a non-existent session
       fake_session_id = Ecto.UUID.generate()
@@ -211,11 +211,11 @@ defmodule MealPlannerApi.ShoppingServiceTest do
         Identity.ensure_persistent_identity(%{
           id: "u_archive_#{:rand.uniform(10000)}",
           account_id: "acct_archive_#{:rand.uniform(10000)}",
-          account_type: :group
+          plan: :family_4
         })
 
       account_id = identity.account_id
-      user = %{id: identity.user_id, account_id: account_id, account_type: :group}
+      user = %{id: identity.user_id, account_id: account_id, plan: :family_4}
 
       ingredient = create_test_ingredient(account_id)
       recipe = create_test_recipe(account_id, identity.user_id)
@@ -275,11 +275,11 @@ defmodule MealPlannerApi.ShoppingServiceTest do
         Identity.ensure_persistent_identity(%{
           id: "u_exclude_#{:rand.uniform(10000)}",
           account_id: "acct_exclude_#{:rand.uniform(10000)}",
-          account_type: :group
+          plan: :family_4
         })
 
       account_id = identity.account_id
-      user = %{id: identity.user_id, account_id: account_id, account_type: :group}
+      user = %{id: identity.user_id, account_id: account_id, plan: :family_4}
 
       ingredient = create_test_ingredient(account_id)
       recipe = create_test_recipe(account_id, identity.user_id)
@@ -333,11 +333,11 @@ defmodule MealPlannerApi.ShoppingServiceTest do
         Identity.ensure_persistent_identity(%{
           id: "u_include_#{:rand.uniform(10000)}",
           account_id: "acct_include_#{:rand.uniform(10000)}",
-          account_type: :group
+          plan: :family_4
         })
 
       account_id = identity.account_id
-      user = %{id: identity.user_id, account_id: account_id, account_type: :group}
+      user = %{id: identity.user_id, account_id: account_id, plan: :family_4}
 
       ingredient = create_test_ingredient(account_id)
       recipe = create_test_recipe(account_id, identity.user_id)

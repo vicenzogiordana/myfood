@@ -28,7 +28,7 @@ defmodule MealPlannerApi.InventoryTest do
       Identity.ensure_persistent_identity(%{
         id: user.id,
         account_id: account.id,
-        account_type: :group
+        plan: :family_4
       })
 
     {:ok, ingredient} =

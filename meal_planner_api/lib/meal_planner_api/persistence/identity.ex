@@ -43,7 +43,7 @@ defmodule MealPlannerApi.Persistence.Identity do
   defp ensure_account(account_id, user) do
     attrs = %{
       name: map_user_name(user),
-      account_type: Map.get(user, :account_type, :individual),
+      plan: Map.get(user, :plan, :individual),
       default_budget_cents: 0
     }
 
