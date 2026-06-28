@@ -90,13 +90,16 @@ defmodule MealPlannerApi.Data.InventoryRepo do
   def append_mutation(attrs),
     do: %InventoryMutationEvent{} |> InventoryMutationEvent.changeset(attrs) |> Repo.insert()
 
-  @spec list_mutations(pos_integer(), Date.t(), Date.t()) :: [InventoryMutationEvent.t()]
-  def list_mutations(account_id, from_date, to_date) do
+  @spec list_mutations(pos_integer(), DateTime.t(), DateTime.t()) ::
+          [InventoryMutationEvent.t()]
+  def list_mutations(account_id, %DateTime{} = from_datetime, %DateTime{} = to_datetime)
+      when is_binary(account_id) do
     from(e in InventoryMutationEvent,
       join: i in assoc(e, :inventory_item),
       where:
-        i.account_id == ^account_id and e.occurred_at >= ^from_date and e.occurred_at <= ^to_date,
-      order_by: [desc: e.occurred_at],
+        i.account_id == ^account_id and e.inserted_at >= ^from_datetime and
+          e.inserted_at <= ^to_datetime,
+      order_by: [desc: e.inserted_at],
       preload: [:inventory_item]
     )
     |> Repo.all()
