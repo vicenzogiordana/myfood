@@ -511,6 +511,76 @@ defmodule MealPlannerApi.AccountsMembershipTest do
     end
   end
 
+  describe "current_membership/2" do
+    test "returns the real membership for an access_v2 claim" do
+      user =
+        user_with_memberships(
+          %{email: "current-v2@example.com"},
+          [
+            {%{plan: :family_4, name: "CurrentV2"}, :owner}
+          ]
+        )
+
+      [membership] = user.memberships
+      claims = %{"typ" => "access_v2", "membership_id" => to_string(membership.id)}
+
+      result = AccountsMembership.current_membership(user, claims)
+      assert result.id == membership.id
+      assert result.account_id == membership.account_id
+      refute Map.get(result, :__synthesized__) == true
+    end
+
+    test "returns a synthesized membership for a legacy access claim with __synthesized__ = true" do
+      owner =
+        user_with_memberships(
+          %{email: "current-v1@example.com", role: :owner},
+          [
+            {%{plan: :family_4, name: "CurrentV1"}, :owner}
+          ]
+        )
+
+      [membership] = owner.memberships
+
+      # The legacy claim carries account_id; current_membership must
+      # synthesize from the user + account_id + Account.plan. In the
+      # legacy single-tenant model the role lived on User (not on a
+      # membership row), so the synthesis uses user.role.
+      claims = %{"typ" => "access", "account_id" => to_string(membership.account_id)}
+
+      result = AccountsMembership.current_membership(owner, claims)
+      assert Map.get(result, :__synthesized__) == true
+      assert result.account_id == membership.account_id
+      assert result.role == :owner
+      assert result.status == :active
+    end
+
+    test "returns nil for an access_v2 claim whose membership_id doesn't exist" do
+      user =
+        user_with_memberships(
+          %{email: "current-nil@example.com"},
+          []
+        )
+
+      claims = %{"typ" => "access_v2", "membership_id" => Ecto.UUID.generate()}
+
+      assert AccountsMembership.current_membership(user, claims) == nil
+    end
+
+    test "returns nil for an unknown typ" do
+      user =
+        user_with_memberships(
+          %{email: "current-typ@example.com"},
+          []
+        )
+
+      assert AccountsMembership.current_membership(user, %{"typ" => "access_v3"}) == nil
+    end
+
+    test "returns nil when the user is nil" do
+      assert AccountsMembership.current_membership(nil, %{"typ" => "access_v2"}) == nil
+    end
+  end
+
   describe "leave/2" do
     test "a :member can leave the Account" do
       member =

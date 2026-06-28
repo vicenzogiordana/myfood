@@ -154,6 +154,90 @@ defmodule MealPlannerApi.AccountsMembership do
   def invite(_account, %AccountMembership{}, _email), do: {:error, :not_owner}
 
   @doc """
+  Resolves the `current_membership` from a JWT claim map. Mirrors the
+  `LoadCurrentMembership` plug logic in `meal_planner_api_web/plugs/`
+  (PR 1 task 1.10) so the application layer has a single source of
+  truth for membership resolution — useful for tests, channels, and
+  background jobs that need to bypass the conn pipeline.
+
+  Per design §10 (Q1) — when the JWT is `access_v1` (legacy) the
+  function **synthesizes** a virtual membership struct in memory, with
+  `__synthesized__: true` so callers can assert which path populated
+  it. No row is inserted.
+
+  Returns `nil` if `user` is `nil`, the membership can't be resolved,
+  or the `typ` claim is unknown.
+  """
+  @spec current_membership(PersistenceUser.t() | nil, map()) :: AccountMembership.t() | nil
+  def current_membership(nil, _claims), do: nil
+
+  def current_membership(%PersistenceUser{} = user, claims) when is_map(claims) do
+    case Map.get(claims, "typ", "access") do
+      "access_v2" -> load_v2_membership(claims)
+      "access" -> synthesize_v1_membership(user, claims)
+      _ -> nil
+    end
+  end
+
+  defp load_v2_membership(claims) do
+    case Map.get(claims, "membership_id") do
+      nil -> nil
+      "" -> nil
+      membership_id -> fetch_membership_by_id(membership_id)
+    end
+  end
+
+  defp fetch_membership_by_id(membership_id) do
+    case Ecto.UUID.cast(membership_id) do
+      {:ok, uuid} ->
+        case Repo.get(AccountMembership, uuid) do
+          %AccountMembership{} = m -> m
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp synthesize_v1_membership(%PersistenceUser{} = user, claims) do
+    case Map.get(claims, "account_id") do
+      nil ->
+        nil
+
+      "" ->
+        nil
+
+      account_id ->
+        uuid = case Ecto.UUID.cast(account_id) do
+          {:ok, u} -> u
+          _ -> nil
+        end
+
+        if uuid do
+          plan =
+            case Repo.get(Account, uuid) do
+              %Account{plan: plan} -> plan
+              _ -> :individual
+            end
+
+          %AccountMembership{
+            id: nil,
+            account_id: account_id,
+            user_id: user.id,
+            role: user.role || :member,
+            status: :active,
+            joined_at: nil
+          }
+          |> Map.put(:plan, plan)
+          |> Map.put(:__synthesized__, true)
+        else
+          nil
+        end
+    end
+  end
+
+  @doc """
   Accepts an invite token. Two entry points:
 
     * `accept_invite(plaintext, %User{} = user)` — existing User. Flips
