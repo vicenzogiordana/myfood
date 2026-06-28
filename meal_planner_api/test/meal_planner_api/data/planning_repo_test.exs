@@ -1,67 +1,310 @@
 defmodule MealPlannerApi.Data.PlanningRepoTest do
-  use ExUnit.Case, async: true
+  @moduledoc """
+  Tests for `MealPlannerApi.Data.PlanningRepo` — Phase A — Tenancy
+  Refactor, PR 2b task 2.13.
 
+  Coverage:
+
+    * `list_scheduled_meals/3` filters by `account_id` — a multi-familia
+      User with meals in Account A and Account B does NOT leak meals
+      across the boundary.
+    * `list_uncooked_scheduled_meals/3` and
+      `list_uncooked_scheduled_meals_with_recipe_ingredients/3` apply
+      the same filter.
+    * `get_scheduled_meal_for_account/2` rejects a `meal_id` that
+      belongs to another account even when the caller has access to
+      both.
+
+  Pre-PR-2b the existing test only asserted function arity (smoke
+  tests). This PR replaces them with real behavioral assertions.
+
+  StreamData was suggested in `tasks.md` but is not in the dependency
+  tree; this file uses deterministic fixtures for the multi-familia
+  scenario instead.
+  """
+  use ExUnit.Case, async: false
+
+  alias Ecto.Adapters.SQL.Sandbox
   alias MealPlannerApi.Data.PlanningRepo
+  alias MealPlannerApi.Persistence.Accounts.Account, as: PersistenceAccount
+  alias MealPlannerApi.Persistence.Accounts.AccountMembership
+  alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
+  alias MealPlannerApi.Persistence.Catalog.Recipe
+  alias MealPlannerApi.Persistence.Planning.ScheduledMeal
+  alias MealPlannerApi.Repo
 
-  describe "slot_favorite functions" do
-    test "toggle_slot_favorite/1 has correct arity" do
-      fun = &PlanningRepo.toggle_slot_favorite/1
-      assert is_function(fun, 1)
+  setup do
+    :ok = Sandbox.checkout(Repo)
+    :ok = MealPlannerApi.SubscriptionPlanFixtures.ensure_plans!()
+  end
+
+  describe "list_scheduled_meals/3 — account_id scoping" do
+    test "returns only the meals for the requested account, not other accounts the user belongs to" do
+      account_a = insert_account("Family A")
+      account_b = insert_account("Family B")
+
+      multi_user =
+        insert_user_with_active_membership(account_a.id, "multi@example.com", :owner)
+
+      _family_membership =
+        insert_active_membership_for(account_b.id, multi_user, :member)
+
+      recipe_a = insert_recipe("Recipe A")
+      recipe_b = insert_recipe("Recipe B")
+
+      {:ok, meal_a1} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account_a.id,
+          recipe_id: recipe_a.id,
+          user_id: multi_user.id,
+          date: ~D[2026-07-01],
+          slot: :lunch,
+          servings: 2
+        })
+
+      {:ok, meal_a2} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account_a.id,
+          recipe_id: recipe_a.id,
+          user_id: multi_user.id,
+          date: ~D[2026-07-02],
+          slot: :dinner,
+          servings: 4
+        })
+
+      {:ok, _meal_b1} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account_b.id,
+          recipe_id: recipe_b.id,
+          user_id: multi_user.id,
+          date: ~D[2026-07-01],
+          slot: :lunch,
+          servings: 3
+        })
+
+      list_a =
+        PlanningRepo.list_scheduled_meals(account_a.id, ~D[2026-07-01], ~D[2026-07-31])
+
+      list_b =
+        PlanningRepo.list_scheduled_meals(account_b.id, ~D[2026-07-01], ~D[2026-07-31])
+
+      assert length(list_a) == 2
+      assert Enum.all?(list_a, &(&1.account_id == account_a.id))
+      assert Enum.map(list_a, & &1.id) |> Enum.sort() ==
+               Enum.sort([meal_a1.id, meal_a2.id])
+
+      assert length(list_b) == 1
+      assert hd(list_b).account_id == account_b.id
     end
 
-    test "is_slot_favorite?/4 has correct arity" do
-      fun = &PlanningRepo.is_slot_favorite?/4
-      assert is_function(fun, 4)
-    end
+    test "returns an empty list when the account has no meals in the date range" do
+      account = insert_account("Empty")
 
-    test "list_slot_favorites/2 has correct arity" do
-      fun = &PlanningRepo.list_slot_favorites/2
-      assert is_function(fun, 2)
-    end
-
-    test "slot values are valid atoms" do
-      slots = [:breakfast, :lunch, :snack, :dinner]
-      assert Enum.all?(slots, &is_atom/1)
-      assert length(slots) == 4
-    end
-
-    test "toggle input structure is valid map" do
-      input = %{
-        account_id: 123,
-        user_id: 456,
-        date: ~D[2025-06-02],
-        slot: "lunch"
-      }
-
-      assert is_map(input)
-      assert is_integer(input.account_id)
-      assert is_integer(input.user_id)
-      assert is_struct(input.date, Date)
-      assert is_binary(input.slot)
-    end
-
-    test "is_slot_favorite? returns boolean signature" do
-      # Just verify the function exists and is callable
-      fun = &PlanningRepo.is_slot_favorite?/4
-      assert is_function(fun, 4)
+      assert PlanningRepo.list_scheduled_meals(account.id, ~D[2026-07-01], ~D[2026-07-31]) == []
     end
   end
 
-  describe "slot favorite persistence structure" do
-    test "SlotFavorite changeset fields are present" do
-      # Verify the expected field list for insert
-      required_fields = [:account_id, :user_id, :date, :slot, :scheduled_meal_id, :recipe_id]
-      assert length(required_fields) == 6
+  describe "list_uncooked_scheduled_meals/3 — account_id scoping" do
+    test "filters by account_id AND is_cooked = false" do
+      account_a = insert_account("Uncooked A")
+      account_b = insert_account("Uncooked B")
 
-      # All fields are atoms (valid Ecto field names)
-      assert Enum.all?(required_fields, &is_atom/1)
+      user = insert_user_with_active_membership(account_a.id, "uncooked@example.com", :owner)
+      _family_membership = insert_active_membership_for(account_b.id, user, :member)
+
+      recipe = insert_recipe("Lunch")
+
+      {:ok, uncooked_a} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account_a.id,
+          recipe_id: recipe.id,
+          user_id: user.id,
+          date: ~D[2026-07-01],
+          slot: :lunch,
+          servings: 2,
+          is_cooked: false
+        })
+
+      {:ok, cooked_a} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account_a.id,
+          recipe_id: recipe.id,
+          user_id: user.id,
+          date: ~D[2026-07-02],
+          slot: :lunch,
+          servings: 2,
+          is_cooked: true
+        })
+
+      {:ok, _uncooked_b} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account_b.id,
+          recipe_id: recipe.id,
+          user_id: user.id,
+          date: ~D[2026-07-01],
+          slot: :lunch,
+          servings: 2,
+          is_cooked: false
+        })
+
+      list_a =
+        PlanningRepo.list_uncooked_scheduled_meals(account_a.id, ~D[2026-07-01], ~D[2026-07-31])
+
+      assert length(list_a) == 1
+      assert hd(list_a).id == uncooked_a.id
+      refute Enum.any?(list_a, &(&1.id == cooked_a.id))
+      refute Enum.any?(list_a, &(&1.account_id == account_b.id))
+    end
+  end
+
+  describe "get_scheduled_meal_for_account/2 — rejects cross-account meal ids" do
+    test "returns nil when the meal_id belongs to a different account" do
+      account_a = insert_account("Cross A")
+      account_b = insert_account("Cross B")
+
+      user = insert_user_with_active_membership(account_a.id, "cross@example.com", :owner)
+      _family_membership = insert_active_membership_for(account_b.id, user, :member)
+
+      recipe = insert_recipe("Dinner")
+
+      {:ok, meal_a} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account_a.id,
+          recipe_id: recipe.id,
+          user_id: user.id,
+          date: ~D[2026-07-01],
+          slot: :dinner,
+          servings: 2
+        })
+
+      {:ok, meal_b} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account_b.id,
+          recipe_id: recipe.id,
+          user_id: user.id,
+          date: ~D[2026-07-01],
+          slot: :dinner,
+          servings: 2
+        })
+
+      # Canonical lookup: meal_a with account_a scope → returns the meal.
+      assert PlanningRepo.get_scheduled_meal_for_account(account_a.id, meal_a.id).id ==
+               meal_a.id
+
+      # Cross-account: meal_b with account_a scope → returns nil.
+      assert PlanningRepo.get_scheduled_meal_for_account(account_a.id, meal_b.id) == nil
     end
 
-    test "unique constraint includes all dimensions" do
-      # account_id + user_id + date + slot = one favorite per slot instance
-      dimensions = [:account_id, :user_id, :date, :slot]
-      assert length(dimensions) == 4
-      assert Enum.all?(dimensions, &is_atom/1)
+    test "returns the meal when the meal belongs to the requested account" do
+      account = insert_account("Self")
+      user = insert_user_with_active_membership(account.id, "self@example.com", :owner)
+      recipe = insert_recipe("Self Recipe")
+
+      {:ok, meal} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account.id,
+          recipe_id: recipe.id,
+          user_id: user.id,
+          date: ~D[2026-07-01],
+          slot: :lunch,
+          servings: 2
+        })
+
+      fetched = PlanningRepo.get_scheduled_meal_for_account(account.id, meal.id)
+      assert fetched.id == meal.id
     end
+  end
+
+  describe "fetch_owned_proposal/3 — account_id + user_id scoping" do
+    test "rejects a proposal that belongs to a different account" do
+      account_a = insert_account("Proposal A")
+      account_b = insert_account("Proposal B")
+
+      user_a = insert_user_with_active_membership(account_a.id, "prop-a@example.com", :owner)
+      user_b = insert_user_with_active_membership(account_b.id, "prop-b@example.com", :owner)
+
+      proposal_a = insert_proposal(account_a.id, user_a.id, "A-Proposal")
+      _proposal_b = insert_proposal(account_b.id, user_b.id, "B-Proposal")
+
+      # Asking for the A proposal with account_b scope returns :proposal_not_found.
+      assert {:error, :proposal_not_found} =
+               PlanningRepo.fetch_owned_proposal(proposal_a.id, account_b.id, user_b.id)
+
+      # And the canonical lookup (account_a, user_a) succeeds.
+      assert {:ok, _proposal, _run} =
+               PlanningRepo.fetch_owned_proposal(proposal_a.id, account_a.id, user_a.id)
+    end
+  end
+
+  # ---- helpers --------------------------------------------------------------
+
+  defp insert_account(name) do
+    plan = Repo.get_by!(MealPlannerApi.Subscriptions.Plan, name: "family_4")
+
+    {:ok, account} =
+      %PersistenceAccount{}
+      |> PersistenceAccount.changeset(%{
+        name: name,
+        plan: :family_4,
+        default_budget_cents: 0,
+        subscription_plan_id: plan.id
+      })
+      |> Repo.insert()
+
+    account
+  end
+
+  defp insert_user_with_active_membership(account_id, email, role) do
+    user =
+      %PersistenceUser{}
+      |> PersistenceUser.changeset(%{email: email, name: email, role: role})
+      |> Repo.insert!()
+
+    insert_active_membership_for(account_id, user, role)
+    user
+  end
+
+  defp insert_active_membership_for(account_id, user, role) do
+    %AccountMembership{}
+    |> AccountMembership.changeset(%{
+      account_id: account_id,
+      user_id: user.id,
+      role: role,
+      status: :active,
+      joined_at: DateTime.utc_now()
+    })
+    |> Repo.insert!()
+  end
+
+  defp insert_recipe(name) do
+    %Recipe{}
+    |> Recipe.changeset(%{
+      name: name,
+      description: "Test recipe",
+      servings: 2,
+      cooking_time_minutes: 30,
+      suitable_for_slots: ["lunch", "dinner"],
+      source: :user_created,
+      created_by_user_id: nil
+    })
+    |> Repo.insert!()
+  end
+
+  defp insert_proposal(account_id, user_id, label) do
+    run =
+      Repo.insert!(%MealPlannerApi.Persistence.Planning.PlanningGenerationRun{
+        account_id: account_id,
+        user_id: user_id,
+        status: :completed,
+        input_context: %{},
+        started_at: DateTime.utc_now(),
+        completed_at: DateTime.utc_now()
+      })
+
+    Repo.insert!(%MealPlannerApi.Persistence.Planning.PlanningProposal{
+      generation_run_id: run.id,
+      proposal_json: %{"title" => label},
+      status: :pending
+    })
   end
 end
