@@ -2,11 +2,24 @@ defmodule MealPlannerApi.Subscriptions do
   @moduledoc """
   Subscription plans backed by PostgreSQL.
 
-  Phase A — Tenancy Refactor (PR 1) renamed the legacy
-  `default_plan_name_for_account_type/1` and `ensure_default_plan_id/1`
-  helpers to operate on the new `Account.plan` enum. The functions
-  accept any of `:individual | :family_4 | :family_6 | :trial` and
-  return the matching `subscription_plans.name`.
+  Phase A — Tenancy Refactor:
+
+    * PR 1 (task 1.2): the legacy `:account_type` taxonomy
+      (`:individual | :group`) was dropped from the `Account` schema;
+      the canonical `:plan` Ecto.Enum (`:individual | :family_4 |
+      :family_6 | :trial`) is now the source of truth.
+    * PR 2a (task 2.11): `policy_for_account/1` reads `account.plan`
+      and resolves through `subscription_plans.name`. `:family_6` and
+      `:trial` rows were seeded in PR 1 (design §2.6 / Q10). `:trial`
+      reuses the `:family_6` seat cap (6) until the trial-expiration
+      timer ships in the follow-up change `tenancy-v2-hardening`.
+    * PR 1's `default_plan_name_for_account_type/1` was renamed to
+      `default_plan_name_for_plan/1` (operates on the new enum).
+
+  This module is the single source of truth for plan → policy
+  resolution. The Application layer (`AccountsMembership`) calls it
+  for seat-cap arithmetic; the Web layer reads it for billing surfaces
+  in PR 3.
   """
 
   import Ecto.Query, warn: false
