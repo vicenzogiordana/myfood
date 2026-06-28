@@ -17,6 +17,7 @@ defmodule MealPlannerApi.Accounts do
   alias MealPlannerApi.Subscriptions
   alias MealPlannerApi.Accounts.Account
   alias MealPlannerApi.Persistence.Accounts.Account, as: PersistenceAccount
+  alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
 
   @plan_values [:individual, :family_4, :family_6, :trial]
@@ -238,6 +239,16 @@ defmodule MealPlannerApi.Accounts do
       |> Multi.insert(:user, fn %{account: account} ->
         attrs = Map.put(user_attrs, :account_id, account.id)
         PersistenceUser.changeset(%PersistenceUser{}, attrs)
+      end)
+      |> Multi.insert(:membership, fn %{account: account, user: user} ->
+        %AccountMembership{}
+        |> AccountMembership.changeset(%{
+          account_id: account.id,
+          user_id: user.id,
+          role: :owner,
+          status: :active,
+          joined_at: DateTime.utc_now()
+        })
       end)
 
     case Repo.transaction(transaction) do
