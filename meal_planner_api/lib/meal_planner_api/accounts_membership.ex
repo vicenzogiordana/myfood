@@ -153,6 +153,119 @@ defmodule MealPlannerApi.AccountsMembership do
 
   def invite(_account, %AccountMembership{}, _email), do: {:error, :not_owner}
 
+  @doc """
+  Accepts an invite token. Two entry points:
+
+    * `accept_invite(plaintext, %User{} = user)` — existing User. Flips
+      the membership `:invited → :active`, sets `joined_at`, points
+      `user_id` at the User. Returns the auth payload ready for the
+      API layer to mint an `access_v2` JWT.
+
+    * `accept_invite(plaintext, %{name: ..., password_hash: ...})` —
+      new User. The `InviteService.create_invite_row/2` created a stub
+      `User` row at invite time; this function fills it in with the
+      real `name` and `password_hash`, then flips the membership.
+
+  Errors: `:invite_token_used`, `:invite_token_expired`,
+  `:invite_token_unknown`.
+
+  The returned `claims` map matches design §3.2 — `AccountsMembership.
+  claims_for/2` (task 2.1) is the single source of truth for the
+  `access_v2` shape.
+  """
+  @spec accept_invite(String.t(), PersistenceUser.t() | map()) ::
+          {:ok, %{user: PersistenceUser.t(), account: Account.t(), membership: AccountMembership.t(), claims: map()}}
+          | {:error, atom()}
+  def accept_invite(plaintext, %PersistenceUser{} = invitee) when is_binary(plaintext) do
+    accept_invite_with_lookup(plaintext, fn _existing ->
+      {:ok, invitee}
+    end)
+  end
+
+  def accept_invite(plaintext, %{name: name, password_hash: password_hash})
+      when is_binary(plaintext) and is_binary(name) and is_binary(password_hash) do
+    accept_invite_with_lookup(plaintext, fn %PersistenceUser{id: user_id} = stub ->
+      case stub
+           |> PersistenceUser.changeset(%{name: name, password_hash: password_hash})
+           |> Repo.update() do
+        {:ok, %PersistenceUser{id: ^user_id} = updated} -> {:ok, updated}
+        {:error, _} = err -> err
+      end
+    end)
+  end
+
+  def accept_invite(_plaintext, _args), do: {:error, :invalid_invitee}
+
+  defp accept_invite_with_lookup(plaintext, resolve_user) when is_binary(plaintext) do
+    hash = InviteService.hash_token(plaintext)
+
+    query =
+      from m in AccountMembership,
+        where: m.invite_token_hash == ^hash,
+        where: m.status == :invited,
+        limit: 1
+
+    case Repo.one(query) do
+      nil ->
+        # Could be :invite_token_used (replay) or :invite_token_unknown
+        # (wrong plaintext) — distinguish by looking up by hash without
+        # the :invited filter.
+        if Repo.exists?(from m in AccountMembership, where: m.invite_token_hash == ^hash) do
+          {:error, :invite_token_used}
+        else
+          {:error, :invite_token_unknown}
+        end
+
+      %AccountMembership{} = membership ->
+        now = DateTime.utc_now()
+
+        cond do
+          is_nil(membership.invite_expires_at) ->
+            {:error, :invite_token_used}
+
+          DateTime.compare(membership.invite_expires_at, now) == :lt ->
+            {:error, :invite_token_expired}
+
+          true ->
+            with {:ok, invitee} <- resolve_user.(:stub),
+                 {:ok, consumed} <-
+                   Repo.update(
+                     AccountMembership.changeset(membership, %{
+                       status: :active,
+                       joined_at: DateTime.utc_now(),
+                       user_id: invitee.id
+                     })
+                   ),
+                 {:ok, account} <- load_account(consumed.account_id) do
+              consumed = Repo.preload(consumed, :account)
+
+              {:ok,
+               %{
+                 user: invitee,
+                 account: account,
+                 membership: consumed,
+                 claims: claims_for(invitee, consumed)
+               }}
+            else
+              {:error, reason} -> {:error, reason}
+            end
+        end
+    end
+  end
+
+  defp load_account(account_id) do
+    case Ecto.UUID.cast(account_id) do
+      {:ok, uuid} ->
+        case Repo.get(Account, uuid) do
+          %Account{} = account -> {:ok, account}
+          nil -> {:error, :account_not_found}
+        end
+
+      _ ->
+        {:error, :account_not_found}
+    end
+  end
+
   # Per proposal §"Risks" (seat-cap race), we hold a row-level lock on
   # the Account during the seat-cap check + invite insert. The lock is
   # released when the transaction commits.
