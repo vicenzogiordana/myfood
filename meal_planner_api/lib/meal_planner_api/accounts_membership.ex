@@ -324,8 +324,10 @@ defmodule MealPlannerApi.AccountsMembership do
 
   defp load_active_membership(uuid) do
     case Repo.get(AccountMembership, uuid) do
-      nil -> {:error, :membership_not_found}
-      %AccountMembership{status: status} = m when status != :active ->
+      nil ->
+        {:error, :membership_not_found}
+
+      %AccountMembership{status: status} = _m when status != :active ->
         {:error, :membership_not_active}
 
       %AccountMembership{} = m ->
