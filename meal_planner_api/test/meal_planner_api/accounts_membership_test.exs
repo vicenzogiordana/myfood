@@ -169,6 +169,114 @@ defmodule MealPlannerApi.AccountsMembershipTest do
     end
   end
 
+  describe "invite/3" do
+    test "owner invite returns 201 with a plaintext token and a stored hash" do
+      owner =
+        user_with_memberships(
+          %{email: "invite-owner@example.com"},
+          [
+            {%{plan: :family_4, name: "F"}, :owner}
+          ]
+        )
+
+      [owner_membership] = owner.memberships
+      account = Repo.get!(PersistenceAccount, owner_membership.account_id)
+
+      assert {:ok, %{token: plaintext, membership_id: membership_id, expires_at: expires_at}} =
+               AccountsMembership.invite(account, owner_membership, "newbie@example.com")
+
+      assert is_binary(plaintext)
+      assert String.length(plaintext) >= 40
+      assert is_binary(membership_id)
+      assert %DateTime{} = expires_at
+
+      # Verify the row exists in the DB.
+      row = Repo.get!(AccountMembership, membership_id)
+      assert row.status == :invited
+      assert row.role == :member
+      assert row.invited_by_user_id == owner.id
+      # Hash is stored (never plaintext).
+      assert is_binary(row.invite_token_hash)
+      assert row.invite_token_hash != plaintext
+      assert %DateTime{} = row.invite_expires_at
+    end
+
+    test "a :member actor is refused with :not_owner" do
+      member =
+        user_with_memberships(
+          %{email: "invite-member@example.com"},
+          [
+            {%{plan: :family_4, name: "F"}, :member}
+          ]
+        )
+
+      [member_membership] = member.memberships
+      account = Repo.get!(PersistenceAccount, member_membership.account_id)
+
+      assert {:error, :not_owner} =
+               AccountsMembership.invite(account, member_membership, "x@example.com")
+    end
+
+    test "a 5th invite on a :family_4 account returns :seat_cap_reached" do
+      owner =
+        user_with_memberships(
+          %{email: "cap-owner@example.com"},
+          [
+            {%{plan: :family_4, name: "F"}, :owner}
+          ]
+        )
+
+      [owner_membership] = owner.memberships
+      account = Repo.get!(PersistenceAccount, owner_membership.account_id)
+
+      # Owner (1) + 3 active members = 4; new invite would push to 5 → cap.
+      insert_member(account.id, "m1@example.com", :active)
+      insert_member(account.id, "m2@example.com", :active)
+      insert_member(account.id, "m3@example.com", :active)
+
+      assert {:error, :seat_cap_reached} =
+               AccountsMembership.invite(account, owner_membership, "fifth@example.com")
+    end
+
+    test "inviting an email that already has an :invited row returns :already_invited" do
+      owner =
+        user_with_memberships(
+          %{email: "dup-owner@example.com"},
+          [
+            {%{plan: :family_4, name: "F"}, :owner}
+          ]
+        )
+
+      [owner_membership] = owner.memberships
+      account = Repo.get!(PersistenceAccount, owner_membership.account_id)
+
+      assert {:ok, _} =
+               AccountsMembership.invite(account, owner_membership, "dup@example.com")
+
+      assert {:error, :already_invited} =
+               AccountsMembership.invite(account, owner_membership, "dup@example.com")
+    end
+
+    test "inviting an email that already has an :active row returns :already_a_member" do
+      owner =
+        user_with_memberships(
+          %{email: "active-owner@example.com"},
+          [
+            {%{plan: :family_4, name: "F"}, :owner}
+          ]
+        )
+
+      [owner_membership] = owner.memberships
+      account = Repo.get!(PersistenceAccount, owner_membership.account_id)
+
+      # Already an active member.
+      insert_member(account.id, "alreadymember@example.com", :active)
+
+      assert {:error, :already_a_member} =
+               AccountsMembership.invite(account, owner_membership, "alreadymember@example.com")
+    end
+  end
+
   # ---- test helpers ----------------------------------------------------------
 
   defp insert_member(account_id, email, status) do

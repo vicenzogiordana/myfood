@@ -16,6 +16,7 @@ defmodule MealPlannerApi.AccountsMembership do
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
   alias MealPlannerApi.Repo
+  alias MealPlannerApi.Services.InviteService
 
   import Ecto.Query
 
@@ -104,6 +105,89 @@ defmodule MealPlannerApi.AccountsMembership do
       {:error, :seat_cap_reached}
     else
       :ok
+    end
+  end
+
+  @doc """
+  Invites a new email to an Account. Owner-only. Wraps
+  `InviteService.create_invite_row/2` and `enforce_seat_cap/2` so the
+  seat cap is checked atomically with the row insert.
+
+  Refuses with:
+    * `:not_owner` — `actor.role != :owner`
+    * `:seat_cap_reached` — Account has reached the plan's seat cap
+    * `:already_invited` — an `:invited` row already exists for the email
+    * `:already_a_member` — an `:active` row already exists for the email
+
+  On success returns `{:ok, %{token, expires_at, membership_id, email}}`
+  where `token` is the plaintext (returned exactly once — caller is
+  responsible for never logging or persisting it).
+  """
+  @spec invite(Account.t(), AccountMembership.t(), String.t()) ::
+          {:ok, %{token: String.t(), expires_at: DateTime.t(), membership_id: String.t(), email: String.t()}}
+          | {:error, atom()}
+  def invite(%Account{} = account, %AccountMembership{role: role} = actor, email)
+      when role == :owner and is_binary(email) do
+    case Repo.transaction(fn ->
+           with :ok <- lock_account_for_invite(account),
+                :ok <- enforce_seat_cap(account, 1),
+                :ok <- check_existing_membership(account, email),
+                {:ok, %{membership: m, token: token}} <-
+                  InviteService.create_invite_row(actor, email) do
+             {:ok,
+              %{
+                token: token,
+                expires_at: m.invite_expires_at,
+                membership_id: to_string(m.id),
+                email: email
+              }}
+           else
+             {:error, _} = err -> err
+           end
+         end) do
+      {:ok, {:ok, result}} -> {:ok, result}
+      {:ok, {:error, reason}} -> {:error, reason}
+      {:error, _} -> {:error, :unable_to_invite}
+    end
+  end
+
+  def invite(_account, %AccountMembership{}, _email), do: {:error, :not_owner}
+
+  # Per proposal §"Risks" (seat-cap race), we hold a row-level lock on
+  # the Account during the seat-cap check + invite insert. The lock is
+  # released when the transaction commits.
+  defp lock_account_for_invite(%Account{id: account_id}) do
+    case Ecto.UUID.cast(account_id) do
+      {:ok, uuid} ->
+        query =
+          from a in Account,
+            where: a.id == ^uuid,
+            lock: "FOR UPDATE"
+
+        case Repo.one(query) do
+          %Account{} -> :ok
+          _ -> {:error, :account_not_found}
+        end
+
+      _ ->
+        {:error, :account_not_found}
+    end
+  end
+
+  defp check_existing_membership(%Account{id: account_id}, email) do
+    query =
+      from m in AccountMembership,
+        join: u in PersistenceUser,
+        on: u.id == m.user_id,
+        where: m.account_id == ^account_id and u.email == ^email,
+        where: m.status in [:invited, :active],
+        limit: 1,
+        select: m.status
+
+    case Repo.one(query) do
+      nil -> :ok
+      :invited -> {:error, :already_invited}
+      :active -> {:error, :already_a_member}
     end
   end
 
