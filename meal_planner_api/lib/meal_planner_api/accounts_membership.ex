@@ -280,6 +280,69 @@ defmodule MealPlannerApi.AccountsMembership do
 
   def accept_invite(_plaintext, _args), do: {:error, :invalid_invitee}
 
+  @doc """
+  Multi-familia switch: re-issue the access_v2 claim set scoped to a
+  different `:active` membership that the User already holds. Returns
+  the auth payload ready for the controller to mint a fresh JWT.
+
+  Refuses:
+
+    * `:membership_not_found` — id doesn't resolve to any row
+    * `:not_your_membership` — the membership belongs to a different User
+    * `:membership_not_active` — the membership is `:invited`,
+      `:suspended`, or otherwise non-active
+
+  Per `specs/multi-familia-switch-account.md` this is the canonical
+  "switch account" flow.
+  """
+  @spec switch_account(PersistenceUser.t(), Ecto.UUID.t() | binary()) ::
+          {:ok, %{user: PersistenceUser.t(), account: Account.t(), membership: AccountMembership.t(), claims: map()}}
+          | {:error, :membership_not_found | :not_your_membership | :membership_not_active}
+  def switch_account(%PersistenceUser{id: user_id} = user, target_membership_id)
+      when is_binary(target_membership_id) do
+    with {:ok, uuid} <- cast_uuid(target_membership_id),
+         {:ok, membership} <- load_active_membership(uuid),
+         :ok <- assert_owner(user_id, membership),
+         {:ok, account} <- load_account(membership.account_id) do
+      membership = Repo.preload(membership, :account)
+      # Refetch the User so we get the canonical email/name (not the
+      # one the caller passed in — switch_account is security-sensitive
+      # and should not trust caller-supplied identity fields).
+      fresh_user = Repo.get!(PersistenceUser, user_id)
+
+      {:ok,
+       %{
+         user: fresh_user,
+         account: account,
+         membership: membership,
+         claims: claims_for(fresh_user, membership)
+       }}
+    end
+  end
+
+  def switch_account(_user, _id), do: {:error, :membership_not_found}
+
+  defp load_active_membership(uuid) do
+    case Repo.get(AccountMembership, uuid) do
+      nil -> {:error, :membership_not_found}
+      %AccountMembership{status: status} = m when status != :active -> {:error, :membership_not_active}
+      %AccountMembership{} = m -> {:ok, m}
+    end
+  end
+
+  defp assert_owner(user_id, %AccountMembership{user_id: owner_id}) do
+    if user_id == owner_id, do: :ok, else: {:error, :not_your_membership}
+  end
+
+  defp cast_uuid(value) when is_binary(value) do
+    case Ecto.UUID.cast(value) do
+      {:ok, uuid} -> {:ok, uuid}
+      _ -> {:error, :membership_not_found}
+    end
+  end
+
+  defp cast_uuid(_), do: {:error, :membership_not_found}
+
   defp accept_invite_with_lookup(plaintext, resolve_user) when is_binary(plaintext) do
     hash = InviteService.hash_token(plaintext)
 

@@ -511,6 +511,90 @@ defmodule MealPlannerApi.AccountsMembershipTest do
     end
   end
 
+  describe "switch_account/2" do
+    test "multi-familia User can switch to a second :active membership and yield fresh claims" do
+      user =
+        user_with_memberships(
+          %{email: "switch@example.com", name: "Switch User"},
+          [
+            {%{plan: :individual, name: "Personal"}, :owner},
+            {%{plan: :family_4, name: "Family"}, :member}
+          ]
+        )
+
+      [personal, family] = user.memberships
+
+      assert {:ok, result} =
+               AccountsMembership.switch_account(user, family.id)
+
+      assert result.membership.id == family.id
+      assert result.membership.account_id == family.account_id
+      assert result.claims["typ"] == "access_v2"
+      assert result.claims["membership_id"] == to_string(family.id)
+      assert result.claims["account_id"] == to_string(family.account_id)
+      assert result.claims["plan"] == "family_4"
+      assert result.claims["role"] == "member"
+      assert result.claims["email"] == "switch@example.com"
+      assert result.claims["name"] == "Switch User"
+    end
+
+    test "switch to another User's membership returns :not_your_membership" do
+      user =
+        user_with_memberships(
+          %{email: "switch-self@example.com"},
+          [
+            {%{plan: :individual, name: "Mine"}, :owner}
+          ]
+        )
+
+      other =
+        user_with_memberships(
+          %{email: "switch-other@example.com"},
+          [
+            {%{plan: :family_4, name: "Theirs"}, :owner}
+          ]
+        )
+
+      [other_membership] = other.memberships
+
+      assert {:error, :not_your_membership} =
+               AccountsMembership.switch_account(user, other_membership.id)
+    end
+
+    test "switch to a :suspended membership returns :membership_not_active" do
+      user =
+        user_with_memberships(
+          %{email: "suspended@example.com"},
+          [
+            {%{plan: :individual, name: "Solo"}, :owner}
+          ]
+        )
+
+      [membership] = user.memberships
+
+      # Force the membership into :suspended status directly.
+      membership
+      |> AccountMembership.changeset(%{status: :suspended})
+      |> Repo.update!()
+
+      assert {:error, :membership_not_active} =
+               AccountsMembership.switch_account(user, membership.id)
+    end
+
+    test "switch to a non-existent membership returns :membership_not_found" do
+      user =
+        user_with_memberships(
+          %{email: "no-mem@example.com"},
+          [
+            {%{plan: :individual, name: "Solo"}, :owner}
+          ]
+        )
+
+      assert {:error, :membership_not_found} =
+               AccountsMembership.switch_account(user, Ecto.UUID.generate())
+    end
+  end
+
   describe "current_membership/2" do
     test "returns the real membership for an access_v2 claim" do
       user =
