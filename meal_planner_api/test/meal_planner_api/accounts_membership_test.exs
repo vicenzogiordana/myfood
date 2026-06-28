@@ -383,6 +383,198 @@ defmodule MealPlannerApi.AccountsMembershipTest do
     end
   end
 
+  describe "list_memberships/1" do
+    test "returns :active + :invited rows ordered role ASC (owner first), then joined_at ASC" do
+      owner =
+        user_with_memberships(
+          %{email: "list-owner@example.com"},
+          [
+            {%{plan: :family_4, name: "List"}, :owner}
+          ]
+        )
+
+      [owner_membership] = owner.memberships
+      account = Repo.get!(PersistenceAccount, owner_membership.account_id)
+
+      m1 = insert_member(account.id, "first@example.com", :active)
+      m2 = insert_member(account.id, "second@example.com", :active)
+      _m3 = insert_member(account.id, "third@example.com", :invited)
+
+      rows = AccountsMembership.list_memberships(account)
+
+      assert length(rows) == 4
+      # First row is the owner.
+      [first_row | rest] = rows
+      assert first_row.role == :owner
+      assert first_row.user_id == owner.id
+      # Remaining rows are members sorted by joined_at ASC.
+      member_rows = Enum.filter(rest, &(&1.role == :member))
+      assert length(member_rows) == 3
+      assert Enum.at(member_rows, 0).user_id == m1.user_id
+      assert Enum.at(member_rows, 1).user_id == m2.user_id
+    end
+
+    test "preloads :user on each row" do
+      owner =
+        user_with_memberships(
+          %{email: "preload-owner@example.com"},
+          [
+            {%{plan: :family_4, name: "Preload"}, :owner}
+          ]
+        )
+
+      [owner_membership] = owner.memberships
+      account = Repo.get!(PersistenceAccount, owner_membership.account_id)
+
+      insert_member(account.id, "preload-m@example.com", :active)
+
+      [row | _] = AccountsMembership.list_memberships(account)
+
+      assert Ecto.assoc_loaded?(row.user)
+      assert is_binary(row.user.email)
+    end
+  end
+
+  describe "remove_member/3" do
+    test "owner hard-deletes a :member" do
+      owner =
+        user_with_memberships(
+          %{email: "rm-owner@example.com"},
+          [
+            {%{plan: :family_4, name: "RM"}, :owner}
+          ]
+        )
+
+      [owner_membership] = owner.memberships
+      account = Repo.get!(PersistenceAccount, owner_membership.account_id)
+      target = insert_member(account.id, "rm-target@example.com", :active)
+
+      assert :ok =
+               AccountsMembership.remove_member(account, target.user_id, owner_membership)
+
+      assert Repo.get(AccountMembership, target.id) == nil
+    end
+
+    test "non-owner actor returns :not_owner" do
+      member =
+        user_with_memberships(
+          %{email: "rm-non-owner@example.com"},
+          [
+            {%{plan: :family_4, name: "RM2"}, :member}
+          ]
+        )
+
+      [member_membership] = member.memberships
+      account = Repo.get!(PersistenceAccount, member_membership.account_id)
+
+      target = insert_member(account.id, "rm-target2@example.com", :active)
+
+      assert {:error, :not_owner} =
+               AccountsMembership.remove_member(account, target.user_id, member_membership)
+    end
+
+    test "owner cannot remove themselves — :cannot_remove_owner" do
+      owner =
+        user_with_memberships(
+          %{email: "rm-self@example.com"},
+          [
+            {%{plan: :family_4, name: "RM3"}, :owner}
+          ]
+        )
+
+      [owner_membership] = owner.memberships
+      account = Repo.get!(PersistenceAccount, owner_membership.account_id)
+
+      assert {:error, :cannot_remove_owner} =
+               AccountsMembership.remove_member(account, owner.id, owner_membership)
+
+      # Row still exists.
+      assert Repo.get!(AccountMembership, owner_membership.id).status == :active
+    end
+
+    test "removing an unknown user_id returns :membership_not_found" do
+      owner =
+        user_with_memberships(
+          %{email: "rm-unknown@example.com"},
+          [
+            {%{plan: :family_4, name: "RM4"}, :owner}
+          ]
+        )
+
+      [owner_membership] = owner.memberships
+      account = Repo.get!(PersistenceAccount, owner_membership.account_id)
+
+      unknown_id = Ecto.UUID.generate()
+
+      assert {:error, :membership_not_found} =
+               AccountsMembership.remove_member(account, unknown_id, owner_membership)
+    end
+  end
+
+  describe "leave/2" do
+    test "a :member can leave the Account" do
+      member =
+        user_with_memberships(
+          %{email: "leave-member@example.com"},
+          [
+            {%{plan: :family_4, name: "Leave"}, :member}
+          ]
+        )
+
+      [member_membership] = member.memberships
+      account = Repo.get!(PersistenceAccount, member_membership.account_id)
+
+      assert :ok = AccountsMembership.leave(account, member_membership)
+      assert Repo.get(AccountMembership, member_membership.id) == nil
+    end
+
+    test "owner cannot leave — :cannot_leave_owned_account" do
+      owner =
+        user_with_memberships(
+          %{email: "leave-owner@example.com"},
+          [
+            {%{plan: :family_4, name: "Leave Owner"}, :owner}
+          ]
+        )
+
+      [owner_membership] = owner.memberships
+      account = Repo.get!(PersistenceAccount, owner_membership.account_id)
+
+      assert {:error, :cannot_leave_owned_account} =
+               AccountsMembership.leave(account, owner_membership)
+
+      # Row still exists.
+      assert Repo.get!(AccountMembership, owner_membership.id).status == :active
+    end
+
+    test "a non-member actor (no membership row on this Account) returns :not_a_member" do
+      stranger =
+        user_with_memberships(
+          %{email: "leave-stranger@example.com"},
+          [
+            {%{plan: :individual, name: "Stranger"}, :owner}
+          ]
+        )
+
+      [stranger_membership] = stranger.memberships
+
+      # Create a different Account with no link to the stranger.
+      other_account =
+        %PersistenceAccount{}
+        |> PersistenceAccount.changeset(%{
+          name: "Other",
+          plan: :family_4,
+          default_budget_cents: 0,
+          subscription_plan_id: fetch_subscription_plan_id(:family_4)
+        })
+        |> Repo.insert!()
+
+      # The stranger's membership is on a different account.
+      assert {:error, :not_a_member} =
+               AccountsMembership.leave(other_account, stranger_membership)
+    end
+  end
+
   # ---- test helpers ----------------------------------------------------------
 
   defp insert_member(account_id, email, status) do
@@ -400,5 +592,14 @@ defmodule MealPlannerApi.AccountsMembershipTest do
       joined_at: if(status == :active, do: DateTime.utc_now(), else: nil)
     })
     |> Repo.insert!()
+  end
+
+  defp fetch_subscription_plan_id(plan) do
+    {:ok, row} =
+      plan
+      |> Atom.to_string()
+      |> MealPlannerApi.Subscriptions.get_plan_by_name()
+
+    row.id
   end
 end

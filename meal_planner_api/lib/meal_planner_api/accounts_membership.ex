@@ -266,6 +266,97 @@ defmodule MealPlannerApi.AccountsMembership do
     end
   end
 
+  @doc """
+  Lists the membership roster for an Account, ordered owner-first then
+  by `joined_at ASC`. Preloads `:user` for the controller layer to
+  render `email`, `name`, etc.
+
+  Per `specs/invite-and-accept.md` §"Membership roster" the response
+  MUST include `:active` and `:invited` rows; `:suspended` is excluded
+  in practice (no API path mints a `:suspended` row in Phase A — that
+  status is reserved for the future re-invitation flow).
+
+  Owner-first is achieved by a `CASE` over the role enum (`:owner <
+  :member` alphabetically is the opposite of what the spec wants).
+  """
+  @spec list_memberships(Account.t()) :: [AccountMembership.t()]
+  def list_memberships(%Account{} = account) do
+    query =
+      from m in AccountMembership,
+        where: m.account_id == ^account.id,
+        where: m.status in [:active, :invited],
+        order_by:
+          [asc: fragment("CASE WHEN ? = 'owner' THEN 0 ELSE 1 END", m.role),
+           asc: m.joined_at,
+           asc: m.inserted_at],
+        preload: [:user]
+
+    Repo.all(query)
+  end
+
+  @doc """
+  Hard-deletes a `:member` membership. Owner-only. Refuses the owner
+  with `:cannot_remove_owner` (decision 5.7). Refuses unknown
+  `user_id` with `:membership_not_found`.
+
+  The seat cap is checked by `invite/3` on the next re-invitation —
+  per spec `account-membership.md` §"Seat cap per Account.plan",
+  reactivation re-checks the cap.
+  """
+  @spec remove_member(Account.t(), Ecto.UUID.t() | binary(), AccountMembership.t()) ::
+          :ok | {:error, :not_owner | :cannot_remove_owner | :membership_not_found}
+  def remove_member(%Account{} = account, target_user_id, %AccountMembership{role: :owner} = actor)
+      when is_binary(target_user_id) do
+    if actor.user_id == target_user_id do
+      {:error, :cannot_remove_owner}
+    else
+      case Repo.get_by(AccountMembership, account_id: account.id, user_id: target_user_id) do
+        nil ->
+          {:error, :membership_not_found}
+
+        %AccountMembership{id: id} ->
+          case Repo.delete_all(
+                 from m in AccountMembership, where: m.id == ^id
+               ) do
+            {1, _} -> :ok
+            _ -> {:error, :membership_not_found}
+          end
+      end
+    end
+  end
+
+  def remove_member(_account, _target_user_id, _actor), do: {:error, :not_owner}
+
+  @doc """
+  Self-removal for a `:member`. Owners cannot leave — return
+  `:cannot_leave_owned_account` (decision 5.7). Account transfer /
+  dissolve flows are deferred to a follow-up change.
+
+  Order of checks: first verify the actor has a row on THIS Account
+  (else `:not_a_member`); then verify the role is `:member` (else
+  `:cannot_leave_owned_account`). This ordering prevents a User who
+  is the owner of a *different* Account from triggering
+  `:cannot_leave_owned_account` against an Account they don't belong
+  to — they should get `:not_a_member` instead.
+  """
+  @spec leave(Account.t(), AccountMembership.t()) ::
+          :ok | {:error, :cannot_leave_owned_account | :not_a_member}
+  def leave(%Account{} = account, %AccountMembership{} = actor) do
+    case Repo.get_by(AccountMembership, id: actor.id, account_id: account.id) do
+      nil ->
+        {:error, :not_a_member}
+
+      %AccountMembership{role: :owner} ->
+        {:error, :cannot_leave_owned_account}
+
+      %AccountMembership{role: :member, id: id} ->
+        case Repo.delete_all(from m in AccountMembership, where: m.id == ^id) do
+          {1, _} -> :ok
+          _ -> {:error, :not_a_member}
+        end
+    end
+  end
+
   # Per proposal §"Risks" (seat-cap race), we hold a row-level lock on
   # the Account during the seat-cap check + invite insert. The lock is
   # released when the transaction commits.
