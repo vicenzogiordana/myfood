@@ -52,10 +52,10 @@ defmodule MealPlannerApi.Data.AccountRepo do
   returned.
   """
   @spec list_active_memberships_for_account(Ecto.UUID.t() | binary()) ::
-          [MealPlannerApi.Persistence.Accounts.AccountMembership.t()]
+          [AccountMembership.t()]
   def list_active_memberships_for_account(account_id) when is_binary(account_id) do
     query =
-      from(m in MealPlannerApi.Persistence.Accounts.AccountMembership,
+      from(m in AccountMembership,
         where: m.account_id == ^account_id and m.status == :active,
         order_by: [asc: m.inserted_at],
         preload: [:user]
