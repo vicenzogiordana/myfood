@@ -298,7 +298,7 @@ defmodule MealPlannerApi.AccountsMembership do
   @spec switch_account(PersistenceUser.t(), Ecto.UUID.t() | binary()) ::
           {:ok, %{user: PersistenceUser.t(), account: Account.t(), membership: AccountMembership.t(), claims: map()}}
           | {:error, :membership_not_found | :not_your_membership | :membership_not_active}
-  def switch_account(%PersistenceUser{id: user_id} = user, target_membership_id)
+  def switch_account(%PersistenceUser{id: user_id}, target_membership_id)
       when is_binary(target_membership_id) do
     with {:ok, uuid} <- cast_uuid(target_membership_id),
          {:ok, membership} <- load_active_membership(uuid),
@@ -325,8 +325,11 @@ defmodule MealPlannerApi.AccountsMembership do
   defp load_active_membership(uuid) do
     case Repo.get(AccountMembership, uuid) do
       nil -> {:error, :membership_not_found}
-      %AccountMembership{status: status} = m when status != :active -> {:error, :membership_not_active}
-      %AccountMembership{} = m -> {:ok, m}
+      %AccountMembership{status: status} = m when status != :active ->
+        {:error, :membership_not_active}
+
+      %AccountMembership{} = m ->
+        {:ok, m}
     end
   end
 
