@@ -17,6 +17,10 @@ defmodule MealPlannerApi.AccountsMembership do
   alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
   alias MealPlannerApi.Repo
 
+  import Ecto.Query
+
+  @plan_capacities %{individual: 1, family_4: 4, family_6: 6, trial: 6}
+
   @doc """
   Builds the `access_v2` JWT claim map for the given user + membership
   pair. The result matches design §3.2 exactly (Guardian adds `iat` and
@@ -42,6 +46,65 @@ defmodule MealPlannerApi.AccountsMembership do
       "email" => user.email,
       "name" => user.name
     }
+  end
+
+  @doc """
+  Returns the seat usage for an Account:
+
+      %{active: N, invited: M, capacity: C}
+
+  where `active` is the count of `:active` memberships, `invited` is the
+  count of `:invited` memberships, and `capacity` is the plan's seat cap
+  (1 for `:individual`, 4 for `:family_4`, 6 for `:family_6` and `:trial`).
+
+  Per `specs/account-membership.md` §"Seat cap per Account.plan" the cap
+  applies to `:active + :invited` rows.
+  """
+  @spec seat_usage(Account.t()) :: %{
+          active: non_neg_integer(),
+          invited: non_neg_integer(),
+          capacity: pos_integer()
+        }
+  def seat_usage(%Account{plan: plan} = account) do
+    query =
+      from m in AccountMembership,
+        where: m.account_id == ^account.id,
+        where: m.status in [:active, :invited],
+        group_by: m.status,
+        select: {m.status, count(m.id)}
+
+    counts =
+      case Repo.all(query) do
+        rows when is_list(rows) -> Map.new(rows)
+        _ -> %{}
+      end
+
+    %{
+      active: Map.get(counts, :active, 0),
+      invited: Map.get(counts, :invited, 0),
+      capacity: Map.fetch!(@plan_capacities, plan)
+    }
+  end
+
+  @doc """
+  Enforces the seat cap for an Account. Returns `:ok` when
+  `active + invited + count_to_add` is at or below capacity, otherwise
+  `{:error, :seat_cap_reached}`.
+
+  Called inside the invite transaction (design §6.1) under
+  `SELECT … FOR UPDATE` on the Account row to prevent the seat-cap race
+  (proposal §"Risks").
+  """
+  @spec enforce_seat_cap(Account.t(), pos_integer()) ::
+          :ok | {:error, :seat_cap_reached}
+  def enforce_seat_cap(account, count_to_add \\ 1) when is_integer(count_to_add) and count_to_add >= 1 do
+    %{active: active, invited: invited, capacity: capacity} = seat_usage(account)
+
+    if active + invited + count_to_add > capacity do
+      {:error, :seat_cap_reached}
+    else
+      :ok
+    end
   end
 
   # Look up the Account.plan on the membership if `:account` is preloaded;
