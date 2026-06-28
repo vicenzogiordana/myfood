@@ -12,6 +12,8 @@ defmodule MealPlannerApi.Accounts do
   consumers continue to work without an app release.
   """
 
+  import Ecto.Query
+
   alias Ecto.Multi
   alias MealPlannerApi.Repo
   alias MealPlannerApi.Subscriptions
@@ -67,7 +69,12 @@ defmodule MealPlannerApi.Accounts do
   end
 
   @spec authenticate_with_password(map()) ::
-          {:ok, %{user: PersistenceUser.t(), account: PersistenceAccount.t()}}
+          {:ok,
+           %{
+             user: PersistenceUser.t(),
+             account: PersistenceAccount.t(),
+             membership: AccountMembership.t() | nil
+           }}
           | {:error, :invalid_email | :invalid_password | :invalid_credentials}
   def authenticate_with_password(params) when is_map(params) do
     with {:ok, email} <- fetch_email(params),
@@ -76,7 +83,9 @@ defmodule MealPlannerApi.Accounts do
          true <- is_binary(user.password_hash) and user.password_hash != "",
          true <- Bcrypt.verify_pass(password, user.password_hash),
          %PersistenceAccount{} = account <- Repo.get(PersistenceAccount, user.account_id) do
-      {:ok, %{user: user, account: account}}
+      membership = first_active_membership_for(user)
+
+      {:ok, %{user: user, account: account, membership: membership}}
     else
       nil ->
         Bcrypt.no_user_verify()
@@ -133,6 +142,7 @@ defmodule MealPlannerApi.Accounts do
     subscription_tier = subscription_tier_from(user)
 
     %{
+      "typ" => "access",
       "account_id" => account.id,
       "account_type" => legacy_account_type,
       "subscription_tier" => Atom.to_string(subscription_tier),
@@ -259,6 +269,25 @@ defmodule MealPlannerApi.Accounts do
 
   defp user_by_email(email) when is_binary(email),
     do: Repo.get_by(PersistenceUser, email: email)
+
+  # Look up the first :active AccountMembership for a User. Used by
+  # authenticate_with_password/1 when the MEAL_PLANNER_TENANCY_V2 flag
+  # is on, so the PR 3 auth_controller layer has the membership row it
+  # needs to mint an `access_v2` JWT. Returns `nil` when the User has
+  # no membership (the controller should fall back to the synthesized
+  # `current_membership` path in that case).
+  defp first_active_membership_for(%PersistenceUser{id: user_id}) do
+    query =
+      from(m in AccountMembership,
+        where: m.user_id == ^user_id and m.status == :active,
+        order_by: [asc: m.inserted_at],
+        limit: 1
+      )
+
+    Repo.one(query)
+  end
+
+  defp first_active_membership_for(_), do: nil
 
   defp normalize_email(value) when is_binary(value) do
     value = value |> String.trim() |> String.downcase()
