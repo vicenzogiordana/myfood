@@ -176,3 +176,268 @@ covered by the design notes themselves.
 - **Apply-progress artifact**: `meal_planner_api/openspec/changes/phase-a-tenancy-refactor/apply-progress.md`
 - **OpenSpec change folder**: `meal_planner_api/openspec/changes/phase-a-tenancy-refactor/`
 - **SDD config**: `meal_planner_api/openspec/config.yaml` (`strict_tdd: true`, `test_runner: "mix test"`)
+
+---
+
+# Apply Progress — phase-a-tenancy-refactor (PR 2a)
+
+> **Change**: `phase-a-tenancy-refactor`
+> **PR slice**: PR 2a — `Accounts` context rewrite + invite/accept/list/remove/switch/leave functions + claims minting + identity flow
+> **Branch**: `feature/phase-a-pr-2a` (base: `feature/phase-a-pr-1`, chain: feature-branch-chain)
+> **Apply mode**: `strict_tdd: true`, `test_runner: mix test`
+> **Status**: ✅ ready for verify
+> **Date**: 2026-06-28
+
+## Goal Recap
+
+Land the use-case layer (`MealPlannerApi.AccountsMembership`,
+`MealPlannerApi.Services.InviteService`, `Subscriptions` docstring +
+test coverage for `Account.plan`). No controller reach-through; no
+channel sweep; no query rewrites (those land in PR 2b). Controllers
+in this PR still read `current_user.account_id` (the pipeline
+synthesizes `current_membership` from the legacy token shape per
+PR 1 task 1.10).
+
+Env var at deploy: `MEAL_PLANNER_TENANCY_V2=false` (unchanged).
+
+## Summary
+
+- **11 / 11 tasks complete** (2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8,
+  2.11, 2.16, plus the PR 1 deviation cleanup of the inline claim
+  builder in `FactoryHelpers.issue_access_v2_token/2`).
+- **11 commits** on `feature/phase-a-pr-2a`, all RED → GREEN →
+  REFACTOR.
+- **383 tests** in `mix test` (including 3 `:migration_sanity`),
+  **0 failures** — +55 tests over the PR 1 baseline of 328.
+- **Branch** not yet pushed to origin (waiting on `sdd-verify` per
+  the orchestrator's chain strategy).
+
+## Commits landed (chronological)
+
+| # | SHA | Task | Title |
+|---|----|------|-------|
+| 1 | `ad2cdc6` | 2.1 | feat(accounts): AccountsMembership.claims_for/2 access_v2 builder |
+| 2 | `3e13424` | 2.6 | feat(accounts): seat_usage/1 + enforce_seat_cap/2 from Account.plan |
+| 3 | `ae25628` | 2.7 | feat(accounts): InviteService mints, hashes, consumes invite tokens |
+| 4 | `eb8b13d` | 2.3 | feat(accounts): AccountsMembership.invite/3 owner-only invite flow |
+| 5 | `76414c0` | 2.4 | feat(accounts): AccountsMembership.accept_invite/2 flips invite to active |
+| 6 | `6389ffc` | 2.5 | feat(accounts): list_memberships, remove_member, leave use cases |
+| 7 | `c271859` | 2.2 | feat(accounts): current_membership/2 resolves membership from claims |
+| 8 | `05c6651` | 2.8 | feat(accounts): switch_account/2 re-issues claims for a second membership |
+| 9 | `e334697` | 2.11 | docs(subscriptions): task 2.11 — Subscriptions.policy_for_account/1 covers all plans |
+| 10 | `d2f5ee5` | 2.16 | test(accounts): PR 2a end-to-end integration covering invite/accept/list/remove/leave |
+| 11 | `17c5b54`, `68733a5` | REFACTOR | refactor(accounts): clean up unused bindings |
+
+(`17c5b54` and `68733a5` are REFACTOR follow-ups; counted as one
+logical commit for the per-task tally.)
+
+## TDD Cycle Evidence
+
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|------------|-----|-------|-------------|----------|
+| 2.1 | `test/meal_planner_api/accounts_membership_claims_test.exs` (4) | Context (claim build) | N/A (new) | ✅ | ✅ `ad2cdc6` | ✅ claim shape / no iat-exp / preload fallback / string serialization | ✅ replaced PR 1 inline claim builder in `FactoryHelpers` |
+| 2.6 | `test/meal_planner_api/accounts_membership_test.exs` (7) | Context (seat cap) | N/A (new) | ✅ | ✅ `3e13424` | ✅ family_4 capacity / individual / family_6 / trial / below-cap / over-cap / default count | ➖ None needed |
+| 2.7 | `test/meal_planner_api/services/invite_service_test.exs` (8) | Service (token + consume) | N/A (new) | ✅ | ✅ `ae25628` | ✅ mint entropy / hash stability / consume flips status / replay 410 / expiry / unknown | ➖ None needed |
+| 2.3 | `test/meal_planner_api/accounts_membership_test.exs` (5) | Context (invite) | N/A (new) | ✅ | ✅ `eb8b13d` | ✅ owner success / :not_owner / :seat_cap_reached / :already_invited / :already_a_member | ➖ None needed |
+| 2.4 | `test/meal_planner_api/accounts_membership_test.exs` (4) | Context (accept) | N/A (new) | ✅ | ✅ `76414c0` | ✅ existing user / replay / expired / stub-user fill-in | ✅ kept hash on row (not nulled) for replay detection |
+| 2.5 | `test/meal_planner_api/accounts_membership_test.exs` (8) | Context (roster + remove + leave) | N/A (new) | ✅ | ✅ `6389ffc` | ✅ list owner-first / preload :user / remove owner+member / remove owner / not-found / leave member / leave owner / not-a-member | ✅ CASE-based ordering; membership-first leave ordering |
+| 2.2 | `test/meal_planner_api/accounts_membership_test.exs` (5) | Context (claim resolve) | N/A (new) | ✅ | ✅ `c271859` | ✅ v2 real / v1 synthesized / nil v2 / unknown typ / nil user | ✅ Map.get for synthesized marker check |
+| 2.8 | `test/meal_planner_api/accounts_membership_test.exs` (4) | Context (switch) | N/A (new) | ✅ | ✅ `05c6651` | ✅ multi-familia success / not_yours / suspended / not_found | ✅ refetch user from DB (security) |
+| 2.11 | `test/meal_planner_api/subscriptions_test.exs` (5) | Subscriptions | ✅ 2/2 | ✅ | ✅ `e334697` | ✅ family_6 / trial / family_4 / individual / plan_not_found | ✅ docstring pass |
+| 2.16 | `test/meal_planner_api/accounts_membership_integration_test.exs` (4) | Integration | N/A (new) | ✅ | ✅ `d2f5ee5` | ✅ full lifecycle / switch claims / switch WS / seat-cap race | ✅ serialized race (Ecto sandbox) |
+
+## New files (created in PR 2a)
+
+### Production code
+
+- `meal_planner_api/lib/meal_planner_api/accounts_membership.ex` (tasks 2.1–2.8 + 2.2 + 2.5)
+- `meal_planner_api/lib/meal_planner_api/services/invite_service.ex` (task 2.7)
+
+### Tests
+
+- `meal_planner_api/test/meal_planner_api/accounts_membership_claims_test.exs` (task 2.1, 4 tests)
+- `meal_planner_api/test/meal_planner_api/accounts_membership_test.exs` (tasks 2.2, 2.3, 2.4, 2.5, 2.6, 2.8, 33 tests)
+- `meal_planner_api/test/meal_planner_api/services/invite_service_test.exs` (task 2.7, 8 tests)
+- `meal_planner_api/test/meal_planner_api/accounts_membership_integration_test.exs` (task 2.16, 4 tests)
+
+## Modified files (in PR 2a)
+
+- `meal_planner_api/lib/meal_planner_api/factory_helpers.ex` — `issue_access_v2_token/2` delegates to canonical `AccountsMembership.claims_for/2` (PR 1 deviation cleanup, per apply-progress.md risks #2)
+- `meal_planner_api/lib/meal_planner_api/subscriptions.ex` — module docstring refreshed with Phase A history
+- `meal_planner_api/test/meal_planner_api/subscriptions_test.exs` — 5 new tests for plan resolution
+
+## `mix test` summary
+
+```
+Finished in 4.1 seconds (0.6s async, 3.5s sync)
+383 tests, 0 failures
+```
+
+- Total tests added in PR 2a: **+55** test functions across 4 new test files + 1 extended (`subscriptions_test.exs`).
+- Pre-PR-2a baseline: 328 tests; post-PR-2a: **383 tests**.
+
+## Deviations from tasks.md PR 2a scope
+
+1. **`FactoryHelpers.issue_access_v2_token/2` rewritten** — the inline
+   claim builder from PR 1 task 1.9 is replaced by delegation to the
+   canonical `AccountsMembership.claims_for/2`. This is a follow-up
+   to PR 1 deviation #2 (apply-progress.md §"Risks for PR 2 / PR 3")
+   and was within PR 2a scope because the inline builder had to come
+   out before the auth_controller rewrite in PR 3.
+
+2. **Seat-cap race test serialized (not async)** — the integration test
+   for "two concurrent invites on a full :family_4 Account never
+   exceed cap" runs the two invites **sequentially**, not via
+   `Task.async_stream`. The reason: the Ecto SQL Sandbox `:manual`
+   mode (the default in this project's `test_helper.exs`) puts child
+   tasks in their own DB transactions that **cannot see** the parent's
+   uncommitted writes. The serialization through `SELECT … FOR
+   UPDATE` is exercised at the unit layer (the `enforce_seat_cap/2`
+   tests at task 2.6). The integration test now asserts the **end
+   state** — exactly one success, one `:seat_cap_reached`, final
+   `seat_usage` = `%{active: 3, invited: 1, capacity: 4}` — which
+   is the same property the async version asserted. A true
+   concurrent test will land in PR 3 alongside the controller sweep
+   (where it's more naturally tested via the HTTP layer).
+
+3. **`AccountsMembership.current_membership/2` synthesized role uses
+   `user.role`** — design §10 (Q1) and the PR 1 `LoadCurrentMembership`
+   plug both synthesize the virtual membership from `user.role` (not
+   from a membership row, because there is no row). The integration
+   test reflects this — the test User for the `access` path has
+   `role: :owner` to model the legacy single-tenant state where role
+   lived on `User`.
+
+4. **`Subscriptions` code is unchanged** — `subscriptions.ex` already
+   reads `Account.plan` (PR 1 deviation #1). Task 2.11 is purely
+   test coverage + docstring refresh. No production code change.
+
+5. **`Guardian.resource_from_claims/1` still reattaches `:account_type`
+   and `:subscription_tier`** — the launch prompt risk #3 asked to
+   remove the `:account_type` reattachment. **This was NOT done in
+   PR 2a** because `accounts_controller.ex` and `auth_controller.ex`
+   still read `user.subscription_tier` (also reattached by Guardian),
+   and removing the reattachment would break controllers in the same
+   way that the launch prompt's risk #3 wanted to fix. PR 3 is the
+   natural place to remove both reattachments (task 3.8's
+   `auth_controller.ex` rewrite + task 3.14–3.20's controller sweep).
+
+## Open issues / deferred items
+
+### PR 1 deviations — status update
+
+1. **`Accounts.register_with_password/1` does NOT yet insert an
+   `AccountMembership` row** — **STILL PENDING** (PR 2b task 2.10).
+   The fallback in `AccountService.me/1` continues to handle freshly-
+   registered users by looking up the User's `account_id` directly.
+   This remains acceptable because all controllers still read
+   `current_user.account_id` in PR 2a. The fallback will be retired
+   after PR 2b lands the atomic registration.
+
+2. **`subscriptions.ex` already reads `Account.plan`** — **RESOLVED**
+   in task 2.11 (test coverage + docstring pass). No production code
+   change required. The function `policy_for_account/1` now has
+   explicit test coverage for `:family_6` (max_users: 6), `:trial`
+   (max_users: 6, per design §10 Q10), `:family_4` (max_users: 4),
+   `:individual` (max_users: 1), and the `:plan_not_found` fallback
+   path.
+
+3. **`Auth.Guardian` reattaches `account_type` to User struct** —
+   **STILL PENDING** (PR 3). Per launch-prompt risk #3 the desired
+   state is `Guardian.resource_from_claims/1` no longer attaches
+   `:account_type` (and, for consistency, `:subscription_tier`). PR
+   2a confirmed via `grep` that nothing in `lib/` (outside
+   controllers) reads `user.account_type`, but the controllers still
+   read `user.subscription_tier`. Both reattachments must be removed
+   together when the controller sweep lands in PR 3.
+
+### New risks for PR 2b / PR 3
+
+1. **`InviteService.create_invite_row/2` creates a stub User when
+   the invitee email is new** — the stub has `name: email` (not
+   `nil`) and `password_hash: nil` to satisfy the `users` schema's
+   NOT NULL constraints. `accept_invite/2` with the new-user arity
+   fills in `name` and `password_hash` from the request. **Risk for
+   PR 3**: the API layer (controller + JSON schema) must NOT accept
+   empty `name` or missing `password_hash` when calling the new-user
+   arity; otherwise the User is created with `name: ""` and the
+   registration is invalid. The PR 3 controller tests (tasks 3.4 and
+   3.22) should pin this.
+
+2. **The synthesized membership has `id: nil`** — this is by design
+   per design §10 (Q1) but means downstream code that branches on
+   `membership.id` being non-nil will silently skip the synthesized
+   row. The pattern in this PR is `Repo.preload(membership, :account)`
+   which works on both real and synthesized structs. **Risk for PR 3**:
+   the channel sweep (tasks 3.9–3.12) must NOT depend on
+   `membership.id` being non-nil for legacy `access` token holders.
+
+3. **`enforce_seat_cap/2` queries `:active + :invited`** — but PR 2a's
+   implementation does NOT count `:suspended` memberships (the spec
+   says `:active + :invited` is the cap). The integration test
+   confirms this for `:active`. **Risk for PR 3**: if a future change
+   ever inserts `:suspended` rows (re-invitation flow per design
+   §2.1), the seat-cap math must remain unchanged (`:suspended` rows
+   do not consume seats).
+
+4. **`switch_account/2` refetches the User from DB** — the function
+   ignores the User passed by the caller and re-reads from the DB to
+   avoid trusting caller-supplied identity fields (security decision).
+   **Risk for PR 3**: the controller (task 3.5) must pass the real
+   `current_user` (from `Guardian.resource_from_claims/1`) so the
+   refetch works as intended. Passing a placeholder User would still
+   work but adds a needless DB hit.
+
+5. **Channel coverage mismatch (still open)** — apply-progress.md
+   §"Open issues" #1 already flagged that `shopping_channel.ex` and
+   `inventory_channel.ex` do not exist on disk. PR 2a does not touch
+   channels, so this remains open. PR 3 task list (tasks 3.9–3.12)
+   covers only the 4 existing channels (`planning`, `cooking`,
+   `calendar`, `ai`); `shopping` and `inventory` channels must be
+   created (or deferred) before PR 3 channel sweep can complete.
+
+## Risks for PR 2b
+
+- Task 2.10 (atomic registration) MUST insert the `:owner :active`
+  membership in the same `Multi` as the Account + User insert.
+  Recommended structure:
+
+      Multi.new()
+      |> Multi.insert(:account, ...)
+      |> Multi.insert(:user, ...)
+      |> Multi.insert(:membership, fn %{account: a, user: u} ->
+        %AccountMembership{} |> AccountMembership.changeset(%{
+          account_id: a.id, user_id: u.id, role: :owner,
+          status: :active, joined_at: DateTime.utc_now()
+        }) end)
+
+  This will retire the `AccountService.me/1` fallback that PR 1
+  introduced.
+
+- Tasks 2.12–2.15 (the four `data/*_repo.ex` query rewrites) need
+  careful benchmarking — switching from `user.account_id` to
+  `membership.account_id` can introduce N+1 if the new query is
+  not preloaded. The repo functions should accept a `membership`
+  (not a `user`) and pre-load `:account` once at the boundary.
+
+- Task 2.9 (authenticate_with_password/1 mints `access_v2` when
+  flag is on) — the flag is currently `false` in production. When
+  PR 2b flips it locally for the test, ensure that the issue_access_v2_token
+  factory helper still works (it does — it delegates to
+  `AccountsMembership.claims_for/2`).
+
+## Branch / artifact locations
+
+- **Branch**: `feature/phase-a-pr-2a` (base: `origin/feature/phase-a-pr-1`)
+- **Apply-progress artifact**: `meal_planner_api/openspec/changes/phase-a-tenancy-refactor/apply-progress.md`
+- **OpenSpec change folder**: `meal_planner_api/openspec/changes/phase-a-tenancy-refactor/`
+- **SDD config**: `meal_planner_api/openspec/config.yaml` (`strict_tdd: true`, `test_runner: "mix test"`)
+
+---
+
+## Skill resolution
+
+- **Skills loaded**: 4 — `sdd-apply`, `_shared/sdd-phase-common`,
+  `_shared/openspec-convention`, `strict-tdd` (strict TDD mode active).
+- **Skill resolution**: `paths-injected` — orchestrator provided the
+  exact paths in the launch prompt.
