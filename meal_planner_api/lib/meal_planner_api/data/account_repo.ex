@@ -10,6 +10,7 @@ defmodule MealPlannerApi.Data.AccountRepo do
 
   alias MealPlannerApi.Persistence.Accounts.{
     Account,
+    AccountMembership,
     User,
     UserDietaryProfile,
     UserExcludedIngredient
@@ -34,6 +35,33 @@ defmodule MealPlannerApi.Data.AccountRepo do
     Account
     |> Repo.get!(id)
     |> Repo.preload(memberships: :user)
+  end
+
+  @doc """
+  Lists the `:active` `AccountMembership` rows for an Account,
+  preloading `:user` so callers can read `email`, `name`, etc.
+  without a second query. Used by PR 3 controllers
+  (`MembershipController.index/2`) and by any caller that needs the
+  active roster of an Account.
+
+  Filters out `:invited` and `:suspended` rows per spec
+  `account-membership.md` §"Membership roster".
+
+  Multi-familia safe — when called with `account_id = A` and a User
+  has memberships in both `A` and `B`, only the `A` membership is
+  returned.
+  """
+  @spec list_active_memberships_for_account(Ecto.UUID.t() | binary()) ::
+          [MealPlannerApi.Persistence.Accounts.AccountMembership.t()]
+  def list_active_memberships_for_account(account_id) when is_binary(account_id) do
+    query =
+      from(m in MealPlannerApi.Persistence.Accounts.AccountMembership,
+        where: m.account_id == ^account_id and m.status == :active,
+        order_by: [asc: m.inserted_at],
+        preload: [:user]
+      )
+
+    Repo.all(query)
   end
 
   @spec update_account(Account.t(), map()) :: {:ok, Account.t()} | {:error, Ecto.Changeset.t()}
