@@ -663,3 +663,202 @@ Finished in 7.2 seconds (1.5s async, 5.7s sync)
   `_shared/openspec-convention`, `strict-tdd` (strict TDD mode active).
 - **Skill resolution**: `paths-injected` — orchestrator provided the
   exact paths in the launch prompt.
+
+---
+
+# PR 2b — post-review fix pass
+
+> **Change**: `phase-a-tenancy-refactor`
+> **Branch**: `feature/phase-a-pr-2b`
+> **Apply mode**: `strict_tdd: true`, `test_runner: mix test`
+> **Status**: ✅ 7 / 7 items complete
+> **Date**: 2026-07-08
+
+## Goal Recap
+
+A code review of PR 2b found 7 issues (1 critical security bug, 2 doc/
+observability gaps, 2 test-quality gaps, 1 dropped-coverage gap, 1
+already-fixed regression). This section documents the fix for each,
+following strict RED → GREEN → REFACTOR where a real code change was
+involved.
+
+## Summary
+
+- **7 / 7 items complete.**
+- **7 commits** on `feature/phase-a-pr-2b` (one per item, in order).
+- Baseline at session start: **399 tests, 0 failures**. Final: **405
+  tests, 0 failures** (+6 net — item 5 removed 0 tests while renaming,
+  items 2/4/7 added new tests).
+- This was a **resumed session**: item 1 was already committed by a
+  prior run that stalled on an infra timeout (not a real blocker); this
+  pass confirmed it and continued with items 2–7.
+
+## TDD Cycle Evidence
+
+| Item | RED | GREEN | REFACTOR | Notes |
+|---|---|---|---|---|
+| 1. `claims_for/2` hardcoded `typ` | ✅ (pre-existing, confirmed via `git show`) | ✅ | — | Already committed as `b928e03` by the prior stalled run; verified, not redone. |
+| 2. `first_active_membership_for/1` ignores `account_id` | ✅ new test failed (`membership.id` mismatch — wrong account's membership returned) | ✅ added `account_id` filter to the query + call site | — | Real tenancy-isolation bug fixed. |
+| 3. `list_active_memberships_for_account/1` docstring | N/A (doc-only) | ✅ | — | No test change required; full suite re-run to confirm no regression. |
+| 4. Registration Multi atomicity (real test) | N/A — standalone test of `Ecto.Multi`/`Repo.transaction` framework semantics, not a bug fix; passed immediately | ✅ | — | Constructs an equivalent 3-step `Multi` inline (same shape as `create_account_and_user/5`) with an intentionally invalid `:membership` changeset; asserts `{:error, :membership, _, _}` and zero rows for all 3 steps. |
+| 5. Tautological `MEAL_PLANNER_TENANCY_V2` flag tests | N/A (test-only rename/cleanup) | ✅ | — | Removed `Application.put_env` toggling and flag framing; kept the real assertions as plain behavior tests. |
+| 6. Registration failure observability | N/A (logging only, no test required per launch prompt) | ✅ | — | Added `require Logger` + `Logger.error/1` logging the failed step + reason. |
+| 7. Dropped `planning_repo_test.exs` coverage | ✅ new tests failed (3 failures — `SlotFavorite` bug) | ✅ fixed 2 real production bugs, tests pass | — | See below. |
+
+## Item-by-item detail
+
+### Item 1 — `claims_for/2` hardcoded `typ` (already done, confirmed)
+
+Committed as `b928e03` by the prior session. Verified via `git show
+b928e03` at the start of this session: `Accounts.claims_for/2` no
+longer sets `"typ"`, letting `Guardian.encode_and_sign/3`'s
+`token_type:` option control it (Guardian's `set_type/3` only overrides
+a claims map with no existing non-nil `"typ"` key). Two regression
+tests added in that commit (`refresh` mints `typ: "refresh"`, `access`
+mints `typ: "access"`). Not redone in this session.
+
+### Item 2 — `authenticate_with_password/1` returns the wrong Account's membership (CRITICAL security fix)
+
+- **Files**: `lib/meal_planner_api/accounts.ex`,
+  `test/meal_planner_api/accounts_test.exs`
+- **Bug**: `first_active_membership_for/1` queried `AccountMembership`
+  by `user_id` + `status: :active` only — no `account_id` filter. For a
+  multi-familia User with `:active` memberships in 2+ different
+  Accounts, `authenticate_with_password/1` could return a `membership`
+  belonging to a **different** Account than the `account` returned
+  alongside it in the same tuple.
+- **Fix**: `first_active_membership_for/2` now takes the `Account` and
+  filters `where: m.account_id == ^account_id` in addition to
+  `user_id`/`status`. Call site updated:
+  `first_active_membership_for(user, account)`.
+- **Test**: seeded a User with 2 `:active` memberships (Account B
+  inserted first, Account A second) so a query without the
+  `account_id` filter, ordered `asc: inserted_at limit: 1`, would
+  return B's membership — proving the bug pre-fix. Asserted
+  `membership.account_id == account.id` (the account tied to
+  `user.account_id`). RED confirmed pre-fix
+  (`membership.id` mismatch), GREEN after adding the filter.
+
+### Item 3 — `list_active_memberships_for_account/1` docstring fix (doc-only)
+
+- **File**: `lib/meal_planner_api/data/account_repo.ex`
+- The docstring previously implied this function is the roster data
+  source for PR 3's `MembershipController.index/2`, but it only returns
+  `:active` rows. Spec `account-membership.md` §"Membership roster"
+  requires `:active` + `:invited`, already correctly provided by
+  `AccountsMembership.list_memberships/1`. Updated the docstring to (a)
+  accurately describe this function as active-only, and (b) point
+  future readers at `AccountsMembership.list_memberships/1` for
+  roster/UI use cases needing invited members too. Did not delete or
+  otherwise change the function — it has real passing tests and
+  correct behavior for its actual (non-roster) callers.
+
+### Item 4 — Real atomicity test for `register_with_password/1`'s `Ecto.Multi`
+
+- **File**: `test/meal_planner_api/accounts_registration_test.exs`
+- The existing "rolls back the Account and the User" test only
+  exercised the pre-transaction `nil <- user_by_email(email)` duplicate
+  guard — it never actually made the `:membership` Multi step itself
+  fail, so it didn't prove `Ecto.Multi` rollback semantics for
+  `create_account_and_user/5`.
+- Since the `:membership` step's `unique_constraint` can't be
+  triggered from the public API (both ids are freshly Ecto-generated
+  inside the same Multi), added a standalone test that constructs an
+  equivalent 3-step `Multi` inline (insert `:account`, then `:user`,
+  then `:membership` with `role: :not_a_real_role` — rejected by
+  `AccountMembership.changeset/2`'s `validate_inclusion(:role, ...)`).
+  Ran via `Repo.transaction/1`, asserted `{:error, :membership,
+  changeset, _changes}`, and asserted **zero** `PersistenceAccount` /
+  `PersistenceUser` rows exist for the attempted email/name. No
+  production code touched — this tests `Ecto.Multi`/`Repo.transaction`
+  semantics directly, a legitimate substitute for an injection seam.
+
+### Item 5 — Removed tautological flag-toggling tests
+
+- **File**: `test/meal_planner_api/accounts_test.exs`
+- Both "flag OFF" and "flag ON" tests toggled
+  `Application.put_env(:meal_planner_api, :tenancy_v2_only, ...)`, but
+  nothing in `lib/` reads that config key — behavior was identical
+  regardless of the flag value, giving false confidence that
+  flag-gating already exists. Removed the `Application.put_env`
+  toggling (and its `setup`/`on_exit` restore block) and the "—
+  MEAL_PLANNER_TENANCY_V2 flag" framing from the describe block name
+  and both test names. Kept the real assertions (that
+  `authenticate_with_password/1` always returns a `membership` for a
+  User with an active membership) as plain tests of current behavior.
+  Added a moduledoc-adjacent comment noting no flag gates this function
+  today.
+
+### Item 6 — Registration transaction-failure observability
+
+- **File**: `lib/meal_planner_api/accounts.ex`
+- `create_account_and_user/5`'s error branch collapsed every
+  `Repo.transaction/1` failure to `{:error, :unable_to_issue_identity}`
+  without recording which step failed or why. Added `require Logger` +
+  a `Logger.error/1` call in the error branch logging
+  `step` and `reason` before returning the generic error tuple. No new
+  test added (a log line doesn't warrant one per the launch prompt);
+  full suite re-confirmed 0 regressions.
+
+### Item 7 — Restored dropped `planning_repo_test.exs` coverage (+ 2 bug fixes)
+
+- **Files**: `test/meal_planner_api/data/planning_repo_test.exs`,
+  `lib/meal_planner_api/data/planning_repo.ex`,
+  `lib/meal_planner_api/persistence/catalog/slot_favorite.ex`
+- The earlier rewrite of this test file dropped coverage for
+  `toggle_slot_favorite/1`, `is_slot_favorite?/4`, and
+  `list_slot_favorites/2` (still exported by `planning_repo.ex`) with
+  no replacement, and claimed (moduledoc) coverage of
+  `list_uncooked_scheduled_meals_with_recipe_ingredients/3` that didn't
+  exist.
+- Added back real multi-familia isolation tests (not arity smoke
+  tests) for all 4. Writing the slot-favorite tests with realistic
+  input (matching what `PlanningService.toggle_slot_favorite/2` — the
+  only real caller — actually passes) surfaced **two genuine
+  pre-existing production bugs**, confirmed RED before the fix:
+  1. `toggle_slot_favorite/1`'s create branch pattern-matched only
+     `account_id`/`user_id`/`date`/`slot` out of its input map, then
+     rebuilt `attrs` from only those 4 local variables — silently
+     dropping the caller-supplied `scheduled_meal_id` and `recipe_id`,
+     which `SlotFavorite.changeset/2` requires. The function could
+     never actually create a new favorite row.
+  2. `SlotFavorite.changeset/2` validated the `:string`-typed `:slot`
+     field against `@slot_values = ~w(breakfast lunch snack dinner)a`
+     (a list of **atoms**). Every real caller passes a string (`"lunch"`,
+     etc.), so `validate_inclusion` always failed.
+- **Fix**: `toggle_slot_favorite/1` now passes the full input map
+  through to the changeset instead of reconstructing a partial one;
+  `@slot_values` changed to a string list to match the field's actual
+  `:string` type.
+- Added a real test for
+  `list_uncooked_scheduled_meals_with_recipe_ingredients/3` (asserts
+  `account_id` scoping AND the `recipe -> recipe_ingredients ->
+  ingredient` preload chain) and updated the moduledoc to describe both
+  the restored coverage and the two bugs found.
+
+## Commits landed (chronological, this fix pass)
+
+| # | SHA | Item | Title |
+|---|-----|------|-------|
+| 1 | `b928e03` | 1 | fix(accounts): stop claims_for/2 from hardcoding typ, letting refresh tokens mint as access *(prior session)* |
+| 2 | `eb1ec69` | 2 | fix(accounts): scope first_active_membership_for/2 by account_id |
+| 3 | `b21a6fc` | 3 | docs(account_repo): clarify list_active_memberships_for_account/1 is active-only |
+| 4 | `624ef7e` | 4 | test(accounts_registration): prove the registration Multi rolls back all 3 steps |
+| 5 | `9d1d751` | 5 | test(accounts): remove tautological MEAL_PLANNER_TENANCY_V2 flag framing |
+| 6 | `09ff25a` | 6 | feat(accounts): log the failed step and reason on registration transaction failure |
+| 7 | `de36816` | 7 | fix(planning_repo): restore dropped slot-favorite + ingredients coverage, fix 2 pre-existing bugs |
+
+## Out of scope (explicitly not touched, per launch prompt)
+
+`register_with_password/1` not returning membership,
+`InventoryRepo.list_mutations/3` spec/guard mismatch, duplicated test
+fixtures across repo test files, `guardian_resource_from_claims_test.exs`
+missing invalid-claims coverage, `mix format` drift, dropped coverage
+in `inventory_repo_test.exs`.
+
+## Final verification
+
+- `mix test`: **405 tests, 0 failures** (baseline was 399 at session
+  start; +6 net new tests across items 2, 4, and 7).
+- Working tree clean aside from this progress-doc update; all 7 commits
+  pushed to `feature/phase-a-pr-2b`.
