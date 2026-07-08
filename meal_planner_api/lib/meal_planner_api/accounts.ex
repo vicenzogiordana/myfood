@@ -14,6 +14,8 @@ defmodule MealPlannerApi.Accounts do
 
   import Ecto.Query
 
+  require Logger
+
   alias Ecto.Multi
   alias MealPlannerApi.Repo
   alias MealPlannerApi.Subscriptions
@@ -274,8 +276,15 @@ defmodule MealPlannerApi.Accounts do
       end)
 
     case Repo.transaction(transaction) do
-      {:ok, %{account: account, user: user}} -> {:ok, %{account: account, user: user}}
-      {:error, _step, _reason, _changes} -> {:error, :unable_to_issue_identity}
+      {:ok, %{account: account, user: user}} ->
+        {:ok, %{account: account, user: user}}
+
+      {:error, step, reason, _changes} ->
+        Logger.error(
+          "registration transaction failed at step=#{inspect(step)} reason=#{inspect(reason)}"
+        )
+
+        {:error, :unable_to_issue_identity}
     end
   end
 
