@@ -161,23 +161,18 @@ defmodule MealPlannerApi.AccountsTest do
   end
 
   # ----------------------------------------------------------------------
-  # PR 2b task 2.9 — authenticate_with_password/1 flag-flip
+  # PR 2b task 2.9 — authenticate_with_password/1
   # ----------------------------------------------------------------------
+  #
+  # NOTE: nothing in `lib/` currently reads the
+  # `:meal_planner_api, :tenancy_v2_only` config key —
+  # `authenticate_with_password/1`'s behavior below is NOT gated by any
+  # flag today. These tests exercise current behavior only; do not read
+  # "flag ON / OFF" framing into them until a real flag check lands in
+  # `lib/meal_planner_api/accounts.ex`.
 
-  describe "authenticate_with_password/1 — MEAL_PLANNER_TENANCY_V2 flag" do
-    setup do
-      previous_flag = Application.get_env(:meal_planner_api, :tenancy_v2_only, false)
-
-      on_exit(fn ->
-        Application.put_env(:meal_planner_api, :tenancy_v2_only, previous_flag)
-      end)
-
-      :ok
-    end
-
-    test "with flag OFF (default), issues an access_v1 token via Accounts.claims_for/2" do
-      Application.put_env(:meal_planner_api, :tenancy_v2_only, false)
-
+  describe "authenticate_with_password/1" do
+    test "issues an access_v1 token via Accounts.claims_for/2" do
       # Register a User atomically (PR 2b task 2.10 makes registration atomic).
       {:ok, %{user: user}} =
         Accounts.register_with_password(%{
@@ -217,9 +212,7 @@ defmodule MealPlannerApi.AccountsTest do
              "access_v1 MUST NOT carry membership_id"
     end
 
-    test "with flag ON, authenticate_with_password/1 returns the User's first :active membership so a v2 token can be minted by callers" do
-      Application.put_env(:meal_planner_api, :tenancy_v2_only, true)
-
+    test "returns the User's first :active membership so a v2 token can be minted by callers" do
       {:ok, %{user: user, account: account}} =
         Accounts.register_with_password(%{
           "email" => "flag-on@example.com",
