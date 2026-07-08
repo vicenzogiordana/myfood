@@ -10,10 +10,22 @@ defmodule MealPlannerApi.Data.PlanningRepoTest do
       across the boundary.
     * `list_uncooked_scheduled_meals/3` and
       `list_uncooked_scheduled_meals_with_recipe_ingredients/3` apply
-      the same filter.
+      the same filter; the latter also asserts the
+      `recipe -> recipe_ingredients -> ingredient` preload chain.
     * `get_scheduled_meal_for_account/2` rejects a `meal_id` that
       belongs to another account even when the caller has access to
       both.
+    * `toggle_slot_favorite/1`, `is_slot_favorite?/4`, and
+      `list_slot_favorites/2` — create/remove round-trip plus
+      account_id scoping (PR 2b post-review fix pass item 7). This
+      surfaced and fixed two real pre-existing production bugs: (1)
+      `toggle_slot_favorite/1`'s create branch pattern-matched only
+      `account_id/user_id/date/slot` from its input map and silently
+      dropped the required `scheduled_meal_id`/`recipe_id` fields, so a
+      favorite could never actually be created; (2)
+      `SlotFavorite.changeset/2` validated the `:string` `:slot` field
+      against a list of atoms, so `validate_inclusion` always failed
+      for the string values every real caller passes.
 
   Pre-PR-2b the existing test only asserted function arity (smoke
   tests). This PR replaces them with real behavioral assertions.
@@ -29,7 +41,9 @@ defmodule MealPlannerApi.Data.PlanningRepoTest do
   alias MealPlannerApi.Persistence.Accounts.Account, as: PersistenceAccount
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
+  alias MealPlannerApi.Persistence.Catalog.Ingredient
   alias MealPlannerApi.Persistence.Catalog.Recipe
+  alias MealPlannerApi.Persistence.Catalog.RecipeIngredient
   alias MealPlannerApi.Persistence.Planning.ScheduledMeal
   alias MealPlannerApi.Repo
 
@@ -236,6 +250,194 @@ defmodule MealPlannerApi.Data.PlanningRepoTest do
     end
   end
 
+  describe "list_uncooked_scheduled_meals_with_recipe_ingredients/3 — account_id scoping" do
+    test "filters by account_id, is_cooked = false, and preloads recipe ingredients" do
+      account_a = insert_account("Ingredients A")
+      account_b = insert_account("Ingredients B")
+
+      user = insert_user_with_active_membership(account_a.id, "ingredients@example.com", :owner)
+      _family_membership = insert_active_membership_for(account_b.id, user, :member)
+
+      flour = insert_ingredient("Flour")
+      recipe = insert_recipe("Bread")
+      insert_recipe_ingredient(recipe, flour, 200)
+
+      {:ok, uncooked_a} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account_a.id,
+          recipe_id: recipe.id,
+          user_id: user.id,
+          date: ~D[2026-07-01],
+          slot: :lunch,
+          servings: 2,
+          is_cooked: false
+        })
+
+      {:ok, cooked_a} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account_a.id,
+          recipe_id: recipe.id,
+          user_id: user.id,
+          date: ~D[2026-07-02],
+          slot: :lunch,
+          servings: 2,
+          is_cooked: true
+        })
+
+      {:ok, _uncooked_b} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account_b.id,
+          recipe_id: recipe.id,
+          user_id: user.id,
+          date: ~D[2026-07-01],
+          slot: :lunch,
+          servings: 2,
+          is_cooked: false
+        })
+
+      list_a =
+        PlanningRepo.list_uncooked_scheduled_meals_with_recipe_ingredients(
+          account_a.id,
+          ~D[2026-07-01],
+          ~D[2026-07-31]
+        )
+
+      assert length(list_a) == 1
+      [meal] = list_a
+      assert meal.id == uncooked_a.id
+      refute Enum.any?(list_a, &(&1.id == cooked_a.id))
+      refute Enum.any?(list_a, &(&1.account_id == account_b.id))
+
+      # Preloaded recipe -> recipe_ingredients -> ingredient chain.
+      [recipe_ingredient] = meal.recipe.recipe_ingredients
+      assert recipe_ingredient.ingredient.name == "Flour"
+    end
+  end
+
+  describe "toggle_slot_favorite/1, is_slot_favorite?/4, list_slot_favorites/2 — account_id scoping" do
+    test "toggling a slot favorite creates it, toggling again removes it" do
+      account = insert_account("Favorite Toggle")
+      user = insert_user_with_active_membership(account.id, "toggle@example.com", :owner)
+      recipe = insert_recipe("Toggle Recipe")
+
+      {:ok, meal} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account.id,
+          recipe_id: recipe.id,
+          user_id: user.id,
+          date: ~D[2026-07-01],
+          slot: :lunch,
+          servings: 2
+        })
+
+      attrs = %{
+        account_id: account.id,
+        user_id: user.id,
+        date: ~D[2026-07-01],
+        slot: "lunch",
+        scheduled_meal_id: meal.id,
+        recipe_id: recipe.id
+      }
+
+      refute PlanningRepo.is_slot_favorite?(account.id, user.id, ~D[2026-07-01], "lunch")
+
+      assert {:ok, %{}} = PlanningRepo.toggle_slot_favorite(attrs)
+      assert PlanningRepo.is_slot_favorite?(account.id, user.id, ~D[2026-07-01], "lunch")
+
+      assert {:ok, %{status: :removed}} = PlanningRepo.toggle_slot_favorite(attrs)
+      refute PlanningRepo.is_slot_favorite?(account.id, user.id, ~D[2026-07-01], "lunch")
+    end
+
+    test "is_slot_favorite?/4 does not leak a favorite across accounts" do
+      account_a = insert_account("Slot Fav A")
+      account_b = insert_account("Slot Fav B")
+
+      user = insert_user_with_active_membership(account_a.id, "slotfav@example.com", :owner)
+      _family_membership = insert_active_membership_for(account_b.id, user, :member)
+
+      recipe = insert_recipe("Slot Fav Recipe")
+
+      {:ok, meal} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account_a.id,
+          recipe_id: recipe.id,
+          user_id: user.id,
+          date: ~D[2026-07-01],
+          slot: :dinner,
+          servings: 2
+        })
+
+      assert {:ok, %{}} =
+               PlanningRepo.toggle_slot_favorite(%{
+                 account_id: account_a.id,
+                 user_id: user.id,
+                 date: ~D[2026-07-01],
+                 slot: "dinner",
+                 scheduled_meal_id: meal.id,
+                 recipe_id: recipe.id
+               })
+
+      assert PlanningRepo.is_slot_favorite?(account_a.id, user.id, ~D[2026-07-01], "dinner")
+      refute PlanningRepo.is_slot_favorite?(account_b.id, user.id, ~D[2026-07-01], "dinner")
+    end
+
+    test "list_slot_favorites/2 does not leak another account's favorites" do
+      account_a = insert_account("List Fav A")
+      account_b = insert_account("List Fav B")
+
+      user = insert_user_with_active_membership(account_a.id, "listfav@example.com", :owner)
+      _family_membership = insert_active_membership_for(account_b.id, user, :member)
+
+      recipe = insert_recipe("List Fav Recipe")
+
+      {:ok, meal_a} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account_a.id,
+          recipe_id: recipe.id,
+          user_id: user.id,
+          date: ~D[2026-07-01],
+          slot: :breakfast,
+          servings: 2
+        })
+
+      {:ok, meal_b} =
+        PlanningRepo.schedule_meal(%{
+          account_id: account_b.id,
+          recipe_id: recipe.id,
+          user_id: user.id,
+          date: ~D[2026-07-01],
+          slot: :breakfast,
+          servings: 2
+        })
+
+      assert {:ok, %{}} =
+               PlanningRepo.toggle_slot_favorite(%{
+                 account_id: account_a.id,
+                 user_id: user.id,
+                 date: ~D[2026-07-01],
+                 slot: "breakfast",
+                 scheduled_meal_id: meal_a.id,
+                 recipe_id: recipe.id
+               })
+
+      assert {:ok, %{}} =
+               PlanningRepo.toggle_slot_favorite(%{
+                 account_id: account_b.id,
+                 user_id: user.id,
+                 date: ~D[2026-07-01],
+                 slot: "breakfast",
+                 scheduled_meal_id: meal_b.id,
+                 recipe_id: recipe.id
+               })
+
+      favorites_a = PlanningRepo.list_slot_favorites(account_a.id, user.id)
+
+      assert length(favorites_a) == 1
+      assert hd(favorites_a).account_id == account_a.id
+      refute Enum.any?(favorites_a, &(&1.account_id == account_b.id))
+    end
+  end
+
   # ---- helpers --------------------------------------------------------------
 
   defp insert_account(name) do
@@ -286,6 +488,23 @@ defmodule MealPlannerApi.Data.PlanningRepoTest do
       suitable_for_slots: ["lunch", "dinner"],
       source: :user_created,
       created_by_user_id: nil
+    })
+    |> Repo.insert!()
+  end
+
+  defp insert_ingredient(name) do
+    %Ingredient{}
+    |> Ingredient.changeset(%{name: name, category: :otros})
+    |> Repo.insert!()
+  end
+
+  defp insert_recipe_ingredient(recipe, ingredient, quantity_milli) do
+    %RecipeIngredient{}
+    |> RecipeIngredient.changeset(%{
+      recipe_id: recipe.id,
+      ingredient_id: ingredient.id,
+      quantity_milli: quantity_milli,
+      unit: :g
     })
     |> Repo.insert!()
   end
