@@ -9,6 +9,13 @@ defmodule MealPlannerApiWeb.Router do
     plug(MealPlannerApiWeb.AuthPipeline)
   end
 
+  # Phase A — Tenancy Refactor (PR 3a task 3.1, formalized in task 3.7):
+  # rejects `:account_id`-bearing routes when the URL id does not match
+  # `current_membership.account_id` (403 account_mismatch).
+  pipeline :enforce_account_scope do
+    plug(MealPlannerApiWeb.Plugs.EnforceAccountScope)
+  end
+
   scope "/api", MealPlannerApiWeb do
     pipe_through(:api)
 
@@ -72,5 +79,14 @@ defmodule MealPlannerApiWeb.Router do
     post("/inventory/voice/apply", InventoryController, :voice_apply)
     post("/planning/rescue", InventoryController, :rescue_plan)
     post("/billing/revenuecat/sync", RevenuecatController, :sync)
+  end
+
+  # Phase A — Tenancy Refactor (PR 3a): membership / invite / lifecycle
+  # endpoints scoped to an Account via the URL (design §5.2, §6).
+  scope "/api/accounts/:account_id", MealPlannerApiWeb do
+    pipe_through([:api, :auth, :enforce_account_scope])
+
+    get("/memberships", MembershipController, :index)
+    delete("/memberships/:user_id", MembershipController, :delete)
   end
 end
