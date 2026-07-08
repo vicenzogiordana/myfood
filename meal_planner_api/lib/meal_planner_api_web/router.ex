@@ -100,5 +100,6 @@ defmodule MealPlannerApiWeb.Router do
     get("/memberships", MembershipController, :index)
     delete("/memberships/:user_id", MembershipController, :delete)
     post("/invites", InviteController, :create)
+    post("/leave", AccountLifecycleController, :leave)
   end
 end
