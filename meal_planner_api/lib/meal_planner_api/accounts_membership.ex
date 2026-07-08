@@ -379,7 +379,8 @@ defmodule MealPlannerApi.AccountsMembership do
             {:error, :invite_token_expired}
 
           true ->
-            with {:ok, invitee} <- resolve_user.(:stub),
+            with {:ok, stub_user} <- fetch_membership_user(membership),
+                 {:ok, invitee} <- resolve_user.(stub_user),
                  {:ok, consumed} <-
                    Repo.update(
                      AccountMembership.changeset(membership, %{
@@ -402,6 +403,19 @@ defmodule MealPlannerApi.AccountsMembership do
               {:error, reason} -> {:error, reason}
             end
         end
+    end
+  end
+
+  # PR 3a task 3.4 fix: `resolve_user.()` must receive the actual stub
+  # `%PersistenceUser{}` row created by
+  # `InviteService.create_invite_row/2` (looked up by
+  # `membership.user_id`), not a placeholder atom — the "new User"
+  # arity's closure pattern-matches `%PersistenceUser{}` and always
+  # raised `FunctionClauseError` before this fix.
+  defp fetch_membership_user(%AccountMembership{user_id: user_id}) do
+    case Repo.get(PersistenceUser, user_id) do
+      %PersistenceUser{} = user -> {:ok, user}
+      nil -> {:error, :invite_token_unknown}
     end
   end
 

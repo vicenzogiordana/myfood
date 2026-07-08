@@ -370,6 +370,42 @@ defmodule MealPlannerApi.AccountsMembershipTest do
                AccountsMembership.accept_invite(plaintext, invitee)
     end
 
+    test "new User acceptance (map arity) fills in the stub User's name and password_hash" do
+      # PR 3a task 3.4 regression: the map-based accept_invite/2 arity
+      # (invitee has no User yet) previously called
+      # `resolve_user.(:stub)` with the literal atom `:stub` instead of
+      # the actual stub %User{} row created by
+      # `InviteService.create_invite_row/2` — the closure in this arity
+      # pattern-matches `%PersistenceUser{}`, so this always raised
+      # `FunctionClauseError` and the "new User accepts" flow could
+      # never have worked end-to-end.
+      owner =
+        user_with_memberships(
+          %{email: "new-user-owner@example.com"},
+          [
+            {%{plan: :family_4, name: "New User Family"}, :owner}
+          ]
+        )
+
+      [owner_membership] = owner.memberships
+      account = Repo.get!(PersistenceAccount, owner_membership.account_id)
+
+      {:ok, %{token: plaintext}} =
+        AccountsMembership.invite(account, owner_membership, "brand-new-invitee@example.com")
+
+      assert {:ok, result} =
+               AccountsMembership.accept_invite(plaintext, %{
+                 name: "Brand New Invitee",
+                 password_hash: "hashed-password"
+               })
+
+      assert result.user.email == "brand-new-invitee@example.com"
+      assert result.user.name == "Brand New Invitee"
+      assert result.user.password_hash == "hashed-password"
+      assert result.membership.status == :active
+      assert result.membership.user_id == result.user.id
+    end
+
     test "an :active User accepting an invite for an email they already own returns :already_a_member" do
       # Build the scenario: invite an existing User who is ALREADY an
       # :active member. This is a different case than replay — the

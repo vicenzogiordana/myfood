@@ -34,6 +34,13 @@ defmodule MealPlannerApiWeb.Router do
     post("/auth/logout", AuthController, :logout)
 
     post("/billing/revenuecat/webhook", RevenuecatController, :webhook)
+
+    # Phase A — Tenancy Refactor (PR 3a task 3.4): deliberately NOT behind
+    # `:auth` — the "new User accepts" case has no account/token yet
+    # (spec `invite-and-accept.md` §"New User accepts"). The controller
+    # manually decodes an optional Authorization header for the
+    # "existing User accepts" case instead of relying on the pipeline.
+    post("/invites/:token/accept", InviteController, :accept)
   end
 
   scope "/api", MealPlannerApiWeb do
