@@ -86,6 +86,10 @@ defmodule MealPlannerApiWeb.Router do
     post("/inventory/voice/apply", InventoryController, :voice_apply)
     post("/planning/rescue", InventoryController, :rescue_plan)
     post("/billing/revenuecat/sync", RevenuecatController, :sync)
+
+    # Phase A — Tenancy Refactor (PR 3a task 3.5): no `:account_id` in the
+    # URL, so `:enforce_account_scope` does not apply (design §5.2).
+    post("/auth/switch-account", AccountLifecycleController, :switch_account)
   end
 
   # Phase A — Tenancy Refactor (PR 3a): membership / invite / lifecycle
