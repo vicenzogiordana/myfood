@@ -83,7 +83,7 @@ defmodule MealPlannerApi.Accounts do
          true <- is_binary(user.password_hash) and user.password_hash != "",
          true <- Bcrypt.verify_pass(password, user.password_hash),
          %PersistenceAccount{} = account <- Repo.get(PersistenceAccount, user.account_id) do
-      membership = first_active_membership_for(user)
+      membership = first_active_membership_for(user, account)
 
       {:ok, %{user: user, account: account, membership: membership}}
     else
@@ -282,16 +282,25 @@ defmodule MealPlannerApi.Accounts do
   defp user_by_email(email) when is_binary(email),
     do: Repo.get_by(PersistenceUser, email: email)
 
-  # Look up the first :active AccountMembership for a User. Used by
-  # authenticate_with_password/1 when the MEAL_PLANNER_TENANCY_V2 flag
-  # is on, so the PR 3 auth_controller layer has the membership row it
-  # needs to mint an `access_v2` JWT. Returns `nil` when the User has
-  # no membership (the controller should fall back to the synthesized
-  # `current_membership` path in that case).
-  defp first_active_membership_for(%PersistenceUser{id: user_id}) do
+  # Look up the first :active AccountMembership for a User, SCOPED to the
+  # Account being authenticated into. Used by authenticate_with_password/1
+  # when the MEAL_PLANNER_TENANCY_V2 flag is on, so the PR 3 auth_controller
+  # layer has the membership row it needs to mint an `access_v2` JWT.
+  # Returns `nil` when the User has no membership on this Account (the
+  # controller should fall back to the synthesized `current_membership`
+  # path in that case).
+  #
+  # MUST filter by account_id: a multi-familia User can have :active
+  # memberships on 2+ different Accounts. Without this filter, the
+  # returned membership could belong to a different Account than the
+  # `account` returned alongside it by authenticate_with_password/1 —
+  # a tenancy-isolation bug (PR 2b post-review fix pass item 2).
+  defp first_active_membership_for(%PersistenceUser{id: user_id}, %PersistenceAccount{
+         id: account_id
+       }) do
     query =
       from(m in AccountMembership,
-        where: m.user_id == ^user_id and m.status == :active,
+        where: m.user_id == ^user_id and m.account_id == ^account_id and m.status == :active,
         order_by: [asc: m.inserted_at],
         limit: 1
       )
@@ -299,7 +308,7 @@ defmodule MealPlannerApi.Accounts do
     Repo.one(query)
   end
 
-  defp first_active_membership_for(_), do: nil
+  defp first_active_membership_for(_, _), do: nil
 
   defp normalize_email(value) when is_binary(value) do
     value = value |> String.trim() |> String.downcase()

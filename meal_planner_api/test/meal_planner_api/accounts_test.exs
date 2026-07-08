@@ -4,7 +4,9 @@ defmodule MealPlannerApi.AccountsTest do
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.Accounts.Account
   alias MealPlannerApi.Auth.Guardian
+  alias MealPlannerApi.Persistence.Accounts.Account, as: PersistenceAccount
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
+  alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
   alias MealPlannerApi.Repo
   alias Ecto.Adapters.SQL.Sandbox
 
@@ -111,6 +113,54 @@ defmodule MealPlannerApi.AccountsTest do
   end
 
   # ----------------------------------------------------------------------
+  # PR 2b post-review fix pass — item 2: authenticate_with_password/1 must
+  # scope the returned membership to the account being authenticated into
+  # ----------------------------------------------------------------------
+  #
+  # `first_active_membership_for/1` used to query AccountMembership by
+  # user_id + status: :active only, with no account_id filter. For a
+  # multi-familia User with :active memberships in 2+ different Accounts,
+  # the returned membership could belong to a different Account than the
+  # `account` returned alongside it — a tenancy-isolation bug.
+
+  describe "authenticate_with_password/1 scopes membership to the authenticated account" do
+    test "returns the membership tied to the user's account, not just any active membership" do
+      password = "supersecret123"
+      password_hash = Bcrypt.hash_pwd_salt(password)
+
+      account_a = insert_test_account(:family_4, "Account A")
+      account_b = insert_test_account(:individual, "Account B")
+
+      {:ok, user} =
+        %PersistenceUser{}
+        |> PersistenceUser.changeset(%{
+          email: "multi-familia@example.com",
+          name: "Multi Familia",
+          role: :owner,
+          password_hash: password_hash,
+          account_id: account_a.id
+        })
+        |> Repo.insert()
+
+      # Insert Account B's membership FIRST so a query without an
+      # account_id filter, ordered by inserted_at asc limit 1, would
+      # return it ahead of Account A's — proving the bug pre-fix.
+      insert_active_membership(account_b, user, :owner)
+      membership_a = insert_active_membership(account_a, user, :owner)
+
+      assert {:ok, %{account: account, membership: membership}} =
+               Accounts.authenticate_with_password(%{
+                 "email" => "multi-familia@example.com",
+                 "password" => password
+               })
+
+      assert account.id == account_a.id
+      assert membership.id == membership_a.id
+      assert membership.account_id == account.id
+    end
+  end
+
+  # ----------------------------------------------------------------------
   # PR 2b task 2.9 — authenticate_with_password/1 flag-flip
   # ----------------------------------------------------------------------
 
@@ -202,5 +252,32 @@ defmodule MealPlannerApi.AccountsTest do
       assert reloaded_account.id == account.id
       assert reloaded.id == user.id
     end
+  end
+
+  # ---- test helpers ----------------------------------------------------------
+
+  defp insert_test_account(plan, name) do
+    {:ok, plan_row} = MealPlannerApi.Subscriptions.get_plan_by_name(Atom.to_string(plan))
+
+    %PersistenceAccount{}
+    |> PersistenceAccount.changeset(%{
+      name: name,
+      plan: plan,
+      default_budget_cents: 0,
+      subscription_plan_id: plan_row.id
+    })
+    |> Repo.insert!()
+  end
+
+  defp insert_active_membership(account, user, role) do
+    %AccountMembership{}
+    |> AccountMembership.changeset(%{
+      account_id: account.id,
+      user_id: user.id,
+      role: role,
+      status: :active,
+      joined_at: DateTime.utc_now()
+    })
+    |> Repo.insert!()
   end
 end
