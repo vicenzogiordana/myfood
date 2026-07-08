@@ -26,6 +26,7 @@ defmodule MealPlannerApi.AccountsRegistrationTest do
   use ExUnit.Case, async: false
 
   alias Ecto.Adapters.SQL.Sandbox
+  alias Ecto.Multi
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
@@ -150,6 +151,79 @@ defmodule MealPlannerApi.AccountsRegistrationTest do
 
       assert length(rows) == 1
       assert hd(rows).role == :owner
+    end
+  end
+
+  # ----------------------------------------------------------------------
+  # PR 2b post-review fix pass — item 4: prove the Ecto.Multi itself rolls
+  # back Account + User when the :membership step fails.
+  # ----------------------------------------------------------------------
+  #
+  # The `create_account_and_user/5` private helper inside
+  # `Accounts.register_with_password/1` can't have its `:membership`
+  # step failure triggered from the public API — both `account.id` and
+  # `user.id` are freshly Ecto-generated inside the same Multi, so the
+  # `unique_constraint([:account_id, :user_id])` never actually fires
+  # from outside. Instead, this test builds an equivalent 3-step
+  # `Ecto.Multi` (same shape: insert :account, then :user, then
+  # :membership) with an intentionally invalid membership changeset
+  # (`role: :not_a_real_role`, rejected by
+  # `AccountMembership.changeset/2`'s `validate_inclusion(:role, ...)`)
+  # and runs it directly via `Repo.transaction/1`. This is a legitimate
+  # way to test Ecto.Multi/Repo.transaction rollback semantics without
+  # adding a test-only injection seam to the real function.
+  describe "Ecto.Multi rollback semantics (equivalent 3-step Multi)" do
+    test ":account and :user are rolled back when the :membership step fails" do
+      email = "multi-rollback@example.com"
+      name = "Multi Rollback"
+
+      {:ok, subscription_plan_id} = MealPlannerApi.Subscriptions.ensure_default_plan_id(:individual)
+
+      account_attrs = %{
+        name: name,
+        plan: :individual,
+        default_budget_cents: 0,
+        subscription_plan_id: subscription_plan_id
+      }
+
+      user_attrs = %{
+        email: email,
+        name: name,
+        role: :owner,
+        password_hash: "irrelevant-hash"
+      }
+
+      transaction =
+        Multi.new()
+        |> Multi.insert(
+          :account,
+          PersistenceAccount.changeset(%PersistenceAccount{}, account_attrs)
+        )
+        |> Multi.insert(:user, fn %{account: account} ->
+          attrs = Map.put(user_attrs, :account_id, account.id)
+          PersistenceUser.changeset(%PersistenceUser{}, attrs)
+        end)
+        |> Multi.insert(:membership, fn %{account: account, user: user} ->
+          # Intentionally invalid — rejected by
+          # validate_inclusion(:role, [:owner, :member]).
+          %AccountMembership{}
+          |> AccountMembership.changeset(%{
+            account_id: account.id,
+            user_id: user.id,
+            role: :not_a_real_role,
+            status: :active,
+            joined_at: DateTime.utc_now()
+          })
+        end)
+
+      assert {:error, :membership, changeset, _changes} = Repo.transaction(transaction)
+      refute changeset.valid?
+      assert {"is invalid", _opts} = Keyword.get(changeset.errors, :role)
+
+      # The whole transaction — including :account and :user — rolled back.
+      assert Repo.get_by(PersistenceUser, email: email) == nil
+      assert Repo.get_by(PersistenceAccount, name: name) == nil
+      assert Repo.all(AccountMembership) == []
     end
   end
 end
