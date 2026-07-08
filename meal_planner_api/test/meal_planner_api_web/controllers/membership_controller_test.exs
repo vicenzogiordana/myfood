@@ -102,4 +102,105 @@ defmodule MealPlannerApiWeb.MembershipControllerTest do
       assert json_response(conn, 403)["error"] == "account_mismatch"
     end
   end
+
+  describe "DELETE /api/accounts/:account_id/memberships/:user_id (task 3.2)" do
+    test "owner removes a :member and the row is hard-deleted", %{conn: conn} do
+      owner =
+        user_with_memberships(%{email: "owner_c@example.com"}, [
+          {%{plan: :family_4, name: "Family C"}, :owner}
+        ])
+
+      [owner_membership] = owner.memberships
+      account = owner_membership.account
+
+      member_user =
+        %PersistenceUser{}
+        |> PersistenceUser.changeset(%{
+          email: "member_c@example.com",
+          name: "Member C",
+          role: :member
+        })
+        |> Repo.insert!()
+
+      member_membership =
+        %AccountMembership{}
+        |> AccountMembership.changeset(%{
+          account_id: account.id,
+          user_id: member_user.id,
+          role: :member,
+          status: :active,
+          joined_at: DateTime.utc_now()
+        })
+        |> Repo.insert!()
+
+      token = issue_access_v2_token(owner, owner_membership)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> delete("/api/accounts/#{account.id}/memberships/#{member_user.id}")
+
+      assert response(conn, 204)
+      refute Repo.get(AccountMembership, member_membership.id)
+    end
+
+    test "owner cannot remove themselves", %{conn: conn} do
+      owner =
+        user_with_memberships(%{email: "owner_d@example.com"}, [
+          {%{plan: :family_4, name: "Family D"}, :owner}
+        ])
+
+      [owner_membership] = owner.memberships
+      account = owner_membership.account
+      token = issue_access_v2_token(owner, owner_membership)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> delete("/api/accounts/#{account.id}/memberships/#{owner.id}")
+
+      assert json_response(conn, 403)["error"] == "cannot_remove_owner"
+      assert Repo.get(AccountMembership, owner_membership.id)
+    end
+
+    test "non-owner actor returns 403 not_owner", %{conn: conn} do
+      owner =
+        user_with_memberships(%{email: "owner_e@example.com"}, [
+          {%{plan: :family_4, name: "Family E"}, :owner}
+        ])
+
+      [owner_membership] = owner.memberships
+      account = owner_membership.account
+
+      member_user =
+        %PersistenceUser{}
+        |> PersistenceUser.changeset(%{
+          email: "member_e@example.com",
+          name: "Member E",
+          role: :member
+        })
+        |> Repo.insert!()
+
+      member_membership =
+        %AccountMembership{}
+        |> AccountMembership.changeset(%{
+          account_id: account.id,
+          user_id: member_user.id,
+          role: :member,
+          status: :active,
+          joined_at: DateTime.utc_now()
+        })
+        |> Repo.insert!()
+
+      token = issue_access_v2_token(member_user, member_membership)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> delete("/api/accounts/#{account.id}/memberships/#{owner.id}")
+
+      assert json_response(conn, 403)["error"] == "not_owner"
+      assert Repo.get(AccountMembership, member_membership.id)
+    end
+  end
 end
