@@ -136,13 +136,25 @@ defmodule MealPlannerApi.Accounts do
 
   def seat_usage(_), do: %{active: 0, invited: 0, capacity: 1}
 
+  @doc """
+  Builds the legacy `access_v1` JWT claim map for the given user/account
+  pair.
+
+  Deliberately does NOT set a `"typ"` key. `Guardian.encode_and_sign/3`'s
+  `token_type:` option only controls the minted `typ` claim when the
+  claims map passed in has no (non-nil) `"typ"` key already — Guardian's
+  `set_type/3` skips overriding an existing one. Every call site
+  (`auth_controller.ex`) passes `token_type: "access"` or
+  `token_type: "refresh"` explicitly; hardcoding `"typ" => "access"` here
+  used to force every refresh token to carry `typ: "access"`, letting
+  refresh tokens pass as access tokens anywhere behind `VerifyTokenType`.
+  """
   @spec claims_for(map(), map()) :: map()
   def claims_for(user, account) when is_map(user) and is_map(account) do
     legacy_account_type = legacy_account_type_from_plan(plan_from(account))
     subscription_tier = subscription_tier_from(user)
 
     %{
-      "typ" => "access",
       "account_id" => account.id,
       "account_type" => legacy_account_type,
       "subscription_tier" => Atom.to_string(subscription_tier),

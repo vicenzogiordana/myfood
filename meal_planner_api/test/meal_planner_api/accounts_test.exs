@@ -65,6 +65,52 @@ defmodule MealPlannerApi.AccountsTest do
   end
 
   # ----------------------------------------------------------------------
+  # PR 2b post-review fix pass — item 1: claims_for/2 must not hardcode typ
+  # ----------------------------------------------------------------------
+  #
+  # Guardian's `set_type/3` only applies the `token_type:` option passed to
+  # `encode_and_sign/3` when the claims map does NOT already carry a
+  # non-nil "typ" key. `Accounts.claims_for/2` used to hardcode
+  # `"typ" => "access"`, which meant every `token_type: "refresh"` call
+  # site (auth_controller.ex `password/2`, `refresh/2`) silently minted a
+  # refresh token whose `typ` claim read `"access"` — letting a refresh
+  # token pass `VerifyTokenType`'s `access` / `access_v2` allowlist
+  # anywhere in the API.
+
+  describe "claims_for/2 does not hardcode typ (Guardian's token_type: option controls it)" do
+    test "token_type: refresh yields a token whose typ claim is refresh, not access" do
+      {:ok, %{user: user, account: account}} =
+        Accounts.find_or_create_identity(%{
+          "user_id" => "typ-regression-user",
+          "account_id" => "typ-regression-account"
+        })
+
+      claims = Accounts.claims_for(user, account)
+      refute Map.has_key?(claims, "typ"), "claims_for/2 must not set typ — Guardian sets it"
+
+      {:ok, token, _claims} = Guardian.encode_and_sign(user, claims, token_type: "refresh")
+      {:ok, decoded} = Guardian.decode_and_verify(token, %{}, token_type: "refresh")
+
+      assert decoded["typ"] == "refresh"
+    end
+
+    test "token_type: access still yields typ access" do
+      {:ok, %{user: user, account: account}} =
+        Accounts.find_or_create_identity(%{
+          "user_id" => "typ-regression-user-2",
+          "account_id" => "typ-regression-account-2"
+        })
+
+      claims = Accounts.claims_for(user, account)
+
+      {:ok, token, _claims} = Guardian.encode_and_sign(user, claims, token_type: "access")
+      {:ok, decoded} = Guardian.decode_and_verify(token)
+
+      assert decoded["typ"] == "access"
+    end
+  end
+
+  # ----------------------------------------------------------------------
   # PR 2b task 2.9 — authenticate_with_password/1 flag-flip
   # ----------------------------------------------------------------------
 
@@ -111,7 +157,6 @@ defmodule MealPlannerApi.AccountsTest do
 
       claims_map = Accounts.claims_for(%{user | account_id: account.id}, account)
 
-      assert claims_map["typ"] == "access"
       assert claims_map["account_id"] == account.id
 
       {:ok, token, _claims} = Guardian.encode_and_sign(user, claims_map, token_type: "access")
