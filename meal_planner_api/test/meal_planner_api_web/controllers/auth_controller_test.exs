@@ -264,4 +264,154 @@ defmodule MealPlannerApiWeb.AuthControllerTest do
     response = conn |> post("/api/auth/password", register_payload) |> json_response(200)
     response["access_token"]
   end
+
+  # ----------------------------------------------------------------------
+  # Phase A — Tenancy Refactor (PR 3a task 3.8)
+  # ----------------------------------------------------------------------
+  #
+  # `auth_controller.ex` consults `:meal_planner_api, :tenancy_v2_only` to
+  # decide whether `password/2` (register + login modes) mints `access_v2`
+  # (via `AccountsMembership.claims_for/2`) or the legacy `access_v1`
+  # (via `Accounts.claims_for/2`). `refresh/2` MUST preserve whichever
+  # `typ` the ORIGINAL token carried, independent of the flag's value at
+  # refresh time — no silent re-scoping in either direction.
+  describe "tenancy_v2_only flag (task 3.8)" do
+    setup do
+      previous = Application.get_env(:meal_planner_api, :tenancy_v2_only)
+
+      on_exit(fn ->
+        Application.put_env(:meal_planner_api, :tenancy_v2_only, previous)
+      end)
+
+      :ok
+    end
+
+    test "password register mints access_v2 with membership claims when the flag is on", %{
+      conn: conn
+    } do
+      Application.put_env(:meal_planner_api, :tenancy_v2_only, true)
+
+      conn =
+        post(conn, "/api/auth/password", %{
+          "mode" => "register",
+          "email" => "v2_register@myfood.local",
+          "password" => "supersecret123",
+          "name" => "V2 Register"
+        })
+
+      body = json_response(conn, 200)
+      {:ok, claims} = Guardian.decode_and_verify(body["access_token"])
+
+      assert claims["typ"] == "access_v2"
+      assert is_binary(claims["membership_id"])
+      assert claims["account_id"] == body["account"]["id"]
+      assert claims["role"] == "owner"
+    end
+
+    test "password login mints access_v2 with membership claims when the flag is on", %{
+      conn: conn
+    } do
+      _ =
+        post(conn, "/api/auth/password", %{
+          "mode" => "register",
+          "email" => "v2_login@myfood.local",
+          "password" => "supersecret123",
+          "name" => "V2 Login"
+        })
+
+      Application.put_env(:meal_planner_api, :tenancy_v2_only, true)
+
+      conn =
+        post(conn, "/api/auth/password", %{
+          "mode" => "login",
+          "email" => "v2_login@myfood.local",
+          "password" => "supersecret123"
+        })
+
+      body = json_response(conn, 200)
+      {:ok, claims} = Guardian.decode_and_verify(body["access_token"])
+
+      assert claims["typ"] == "access_v2"
+      assert is_binary(claims["membership_id"])
+    end
+
+    test "password register mints access_v1 when the flag is off (regression)", %{conn: conn} do
+      Application.put_env(:meal_planner_api, :tenancy_v2_only, false)
+
+      conn =
+        post(conn, "/api/auth/password", %{
+          "mode" => "register",
+          "email" => "v1_register_flagoff@myfood.local",
+          "password" => "supersecret123",
+          "name" => "V1 Register"
+        })
+
+      body = json_response(conn, 200)
+      {:ok, claims} = Guardian.decode_and_verify(body["access_token"])
+
+      assert claims["typ"] == "access"
+      refute Map.has_key?(claims, "membership_id")
+    end
+
+    test "refresh preserves access_v2 typ across rotation, regardless of the flag at refresh time",
+         %{conn: conn} do
+      Application.put_env(:meal_planner_api, :tenancy_v2_only, true)
+
+      register_body =
+        conn
+        |> post("/api/auth/password", %{
+          "mode" => "register",
+          "email" => "v2_refresh@myfood.local",
+          "password" => "supersecret123",
+          "name" => "V2 Refresh"
+        })
+        |> json_response(200)
+
+      {:ok, original_claims} = Guardian.decode_and_verify(register_body["access_token"])
+      original_membership_id = original_claims["membership_id"]
+
+      # Flip the flag OFF before refreshing — the refreshed access token
+      # must still be access_v2 because the ORIGINAL token was access_v2.
+      Application.put_env(:meal_planner_api, :tenancy_v2_only, false)
+
+      refresh_body =
+        conn
+        |> post("/api/auth/refresh", %{"refresh_token" => register_body["refresh_token"]})
+        |> json_response(200)
+
+      {:ok, refreshed_claims} = Guardian.decode_and_verify(refresh_body["access_token"])
+
+      assert refreshed_claims["typ"] == "access_v2"
+      assert refreshed_claims["membership_id"] == original_membership_id
+    end
+
+    test "refresh preserves access_v1 typ across rotation, regardless of the flag at refresh time",
+         %{conn: conn} do
+      Application.put_env(:meal_planner_api, :tenancy_v2_only, false)
+
+      register_body =
+        conn
+        |> post("/api/auth/password", %{
+          "mode" => "register",
+          "email" => "v1_refresh@myfood.local",
+          "password" => "supersecret123",
+          "name" => "V1 Refresh"
+        })
+        |> json_response(200)
+
+      # Flip the flag ON before refreshing — the refreshed access token
+      # must still be access_v1 because the ORIGINAL token was access_v1.
+      Application.put_env(:meal_planner_api, :tenancy_v2_only, true)
+
+      refresh_body =
+        conn
+        |> post("/api/auth/refresh", %{"refresh_token" => register_body["refresh_token"]})
+        |> json_response(200)
+
+      {:ok, refreshed_claims} = Guardian.decode_and_verify(refresh_body["access_token"])
+
+      assert refreshed_claims["typ"] == "access"
+      refute Map.has_key?(refreshed_claims, "membership_id")
+    end
+  end
 end

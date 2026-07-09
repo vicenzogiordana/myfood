@@ -12,7 +12,6 @@ defmodule MealPlannerApi.Services.AccountService do
 
   alias MealPlannerApi.Data.AccountRepo
   alias MealPlannerApi.Persistence.Identity
-  alias MealPlannerApi.Persistence.Accounts.AccountMembership
 
   @spec me(map()) :: {:ok, map()} | {:error, term()}
   def me(user) do

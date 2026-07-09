@@ -126,10 +126,6 @@ defmodule MealPlannerApiWeb.ShoppingController do
     end
   end
 
-  defp parse_bool(true), do: true
-  defp parse_bool("true"), do: true
-  defp parse_bool(_), do: false
-
   defp render_error(conn, reason) do
     conn
     |> put_status(:unprocessable_entity)

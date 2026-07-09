@@ -2,7 +2,9 @@ defmodule MealPlannerApiWeb.AuthController do
   use MealPlannerApiWeb, :controller
 
   alias MealPlannerApi.Accounts
+  alias MealPlannerApi.AccountsMembership
   alias MealPlannerApi.Auth.Guardian
+  alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Services.RevenuecatService
   alias MealPlannerApi.Services.SubscriptionService
 
@@ -56,8 +58,15 @@ defmodule MealPlannerApiWeb.AuthController do
       end
 
     case result do
-      {:ok, %{user: user, account: account}} ->
-        issue_auth_response(conn, user, account, requested_tier)
+      {:ok, %{user: user, account: account, membership: membership}} ->
+        issue_auth_response(
+          conn,
+          user,
+          account,
+          requested_tier,
+          issuance_typ(membership),
+          membership
+        )
 
       {:error, reason}
       when reason in [
@@ -87,36 +96,28 @@ defmodule MealPlannerApiWeb.AuthController do
   end
 
   # POST /auth/refresh
+  #
+  # Phase A — Tenancy Refactor (PR 3a task 3.8): re-issues WHATEVER `typ`
+  # the incoming refresh token carried — `access` or `access_v2` — no
+  # silent re-scoping in either direction, independent of the current
+  # `MEAL_PLANNER_TENANCY_V2` flag value at refresh time. The flag only
+  # controls issuance on `password/2`; `refresh/2` never consults it.
   def refresh(conn, %{"refresh_token" => refresh_token}) do
     case Guardian.decode_and_verify(refresh_token, %{}, token_type: "refresh") do
-      {:ok, %{"sub" => user_id, "account_id" => account_id}} ->
-        case load_user_and_account(user_id, account_id) do
-          {:ok, user, account} ->
-            requested_tier = Map.get(conn.params, "subscription_tier", "free")
-            resolved_tier = RevenuecatService.resolve_tier(account.id, requested_tier)
-            user = Map.put(user, :subscription_tier, resolved_tier)
-            account = Map.put(account, :subscription_tier, resolved_tier)
+      {:ok, claims} ->
+        case reissue_from_refresh_claims(conn, claims) do
+          {:ok, new_access_token, new_refresh_token} ->
+            json(conn, %{
+              access_token: new_access_token,
+              refresh_token: new_refresh_token
+            })
 
-            with {:ok, new_access_token, _} <-
-                   Guardian.encode_and_sign(user, Accounts.claims_for(user, account),
-                     token_type: "access"
-                   ),
-                 {:ok, new_refresh_token, _} <-
-                   Guardian.encode_and_sign(user, Accounts.claims_for(user, account),
-                     token_type: "refresh"
-                   ) do
-              json(conn, %{
-                access_token: new_access_token,
-                refresh_token: new_refresh_token
-              })
-            else
-              _ ->
-                conn
-                |> put_status(:unauthorized)
-                |> json(%{error: "token_refresh_failed"})
-            end
+          {:error, :token_refresh_failed} ->
+            conn
+            |> put_status(:unauthorized)
+            |> json(%{error: "token_refresh_failed"})
 
-          _ ->
+          {:error, _reason} ->
             conn
             |> put_status(:unauthorized)
             |> json(%{error: "invalid_refresh_token"})
@@ -149,7 +150,49 @@ defmodule MealPlannerApiWeb.AuthController do
     if user && account, do: {:ok, user, account}, else: {:error, :not_found}
   end
 
-  defp issue_auth_response(conn, user, account, requested_tier) do
+  # Phase A — Tenancy Refactor (PR 3a task 3.8): `password/2` (register +
+  # login modes) picks `:access_v2` only when the flag is on AND a real
+  # `AccountMembership` row came back from `Accounts.register_with_password/1`
+  # / `Accounts.authenticate_with_password/1`. Without a membership row
+  # (e.g. a legacy User with no matching membership on this Account yet)
+  # falls back to `:access` rather than crashing `AccountsMembership.claims_for/2`.
+  defp issuance_typ(%AccountMembership{}) do
+    if tenancy_v2_only?(), do: :access_v2, else: :access
+  end
+
+  defp issuance_typ(_membership), do: :access
+
+  defp tenancy_v2_only? do
+    Application.get_env(:meal_planner_api, :tenancy_v2_only, false)
+  end
+
+  # `issue_auth_response/6` — the `typ:`-and-`membership` arguments control
+  # which claim builder mints the token pair. `social/2` still calls the
+  # 4-arg form (defaults to `:access`, `nil` membership) — social auth is
+  # out of Phase A scope (design.md does not mention it).
+  defp issue_auth_response(conn, user, account, requested_tier, typ \\ :access, membership \\ nil)
+
+  defp issue_auth_response(
+         conn,
+         user,
+         account,
+         requested_tier,
+         :access_v2,
+         %AccountMembership{} = membership
+       ) do
+    with resolved_tier <- RevenuecatService.resolve_tier(account.id, requested_tier),
+         user <- Map.put(user, :subscription_tier, resolved_tier),
+         account <- Map.put(account, :subscription_tier, resolved_tier),
+         claims <- AccountsMembership.claims_for(user, membership),
+         {:ok, access_token, _access_claims} <-
+           Guardian.encode_and_sign(user, claims, token_type: "access"),
+         {:ok, refresh_token, _refresh_claims} <-
+           Guardian.encode_and_sign(user, Map.delete(claims, "typ"), token_type: "refresh") do
+      render_auth_json(conn, user, account, resolved_tier, access_token, refresh_token)
+    end
+  end
+
+  defp issue_auth_response(conn, user, account, requested_tier, _typ, _membership) do
     with resolved_tier <- RevenuecatService.resolve_tier(account.id, requested_tier),
          user <- Map.put(user, :subscription_tier, resolved_tier),
          account <- Map.put(account, :subscription_tier, resolved_tier),
@@ -161,23 +204,77 @@ defmodule MealPlannerApiWeb.AuthController do
            Guardian.encode_and_sign(user, Accounts.claims_for(user, account),
              token_type: "refresh"
            ) do
-      subscription =
-        account.id
-        |> SubscriptionService.policy_for_account()
-        |> Map.put(:tier, Atom.to_string(resolved_tier))
+      render_auth_json(conn, user, account, resolved_tier, access_token, refresh_token)
+    end
+  end
 
-      json(conn, %{
-        access_token: access_token,
-        refresh_token: refresh_token,
-        token_type: "Bearer",
-        user: Accounts.serialize_user(user),
-        account: Accounts.serialize_account(account),
-        subscription: subscription,
-        websocket: %{
-          path: "/socket/websocket",
-          params: %{token: access_token}
-        }
-      })
+  defp render_auth_json(conn, user, account, resolved_tier, access_token, refresh_token) do
+    subscription =
+      account.id
+      |> SubscriptionService.policy_for_account()
+      |> Map.put(:tier, Atom.to_string(resolved_tier))
+
+    json(conn, %{
+      access_token: access_token,
+      refresh_token: refresh_token,
+      token_type: "Bearer",
+      user: Accounts.serialize_user(user),
+      account: Accounts.serialize_account(account),
+      subscription: subscription,
+      websocket: %{
+        path: "/socket/websocket",
+        params: %{token: access_token}
+      }
+    })
+  end
+
+  # Phase A — Tenancy Refactor (PR 3a task 3.8): dispatches on the
+  # INCOMING refresh token's claims to decide which claim builder
+  # re-mints the pair — `membership_id` present means the original
+  # access token was `access_v2`; its absence means legacy `access`.
+  # This is independent of the CURRENT `tenancy_v2_only?/0` flag value —
+  # that is what "no silent re-scoping on refresh" (design §3, §5.2)
+  # means in practice.
+  defp reissue_from_refresh_claims(_conn, %{"sub" => user_id, "membership_id" => membership_id})
+       when is_binary(membership_id) and membership_id != "" do
+    with %MealPlannerApi.Persistence.Accounts.User{} = user <-
+           MealPlannerApi.Repo.get(MealPlannerApi.Persistence.Accounts.User, user_id),
+         {:ok, uuid} <- Ecto.UUID.cast(membership_id),
+         %AccountMembership{} = membership <- MealPlannerApi.Repo.get(AccountMembership, uuid) do
+      claims = AccountsMembership.claims_for(user, membership)
+      mint_token_pair(user, claims)
+    else
+      _ -> {:error, :invalid_refresh_token}
+    end
+  end
+
+  defp reissue_from_refresh_claims(conn, %{"sub" => user_id, "account_id" => account_id}) do
+    case load_user_and_account(user_id, account_id) do
+      {:ok, user, account} ->
+        requested_tier =
+          SubscriptionService.normalize_tier(Map.get(conn.params, "subscription_tier", "free"))
+
+        resolved_tier = RevenuecatService.resolve_tier(account.id, requested_tier)
+        user = Map.put(user, :subscription_tier, resolved_tier)
+        account = Map.put(account, :subscription_tier, resolved_tier)
+
+        mint_token_pair(user, Accounts.claims_for(user, account))
+
+      _ ->
+        {:error, :invalid_refresh_token}
+    end
+  end
+
+  defp reissue_from_refresh_claims(_conn, _claims), do: {:error, :invalid_refresh_token}
+
+  defp mint_token_pair(user, claims) do
+    with {:ok, access_token, _access_claims} <-
+           Guardian.encode_and_sign(user, claims, token_type: "access"),
+         {:ok, refresh_token, _refresh_claims} <-
+           Guardian.encode_and_sign(user, Map.delete(claims, "typ"), token_type: "refresh") do
+      {:ok, access_token, refresh_token}
+    else
+      _ -> {:error, :token_refresh_failed}
     end
   end
 
