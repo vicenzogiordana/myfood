@@ -9,6 +9,7 @@ defmodule MealPlannerApiWeb.AuthController do
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Services.RevenuecatService
   alias MealPlannerApi.Services.SubscriptionService
+  alias MealPlannerApiWeb.Controllers.AccountScopeHelpers
 
   def social(conn, %{"provider" => provider, "id_token" => id_token} = params) do
     requested_tier =
@@ -177,7 +178,9 @@ defmodule MealPlannerApiWeb.AuthController do
   # `issue_auth_response/6` — the `typ:`-and-`membership` arguments control
   # which claim builder mints the token pair. `social/2` still calls the
   # 4-arg form (defaults to `:access`, `nil` membership) — social auth is
-  # out of Phase A scope (design.md does not mention it).
+  # out of Phase A scope (design.md does not mention it). Both clauses
+  # delegate the actual mint to `AccountScopeHelpers.mint_token_pair/2`
+  # (post-review fix pass item 4 — single canonical implementation).
   defp issue_auth_response(conn, user, account, requested_tier, typ \\ :access, membership \\ nil)
 
   defp issue_auth_response(
@@ -192,10 +195,7 @@ defmodule MealPlannerApiWeb.AuthController do
          user <- Map.put(user, :subscription_tier, resolved_tier),
          account <- Map.put(account, :subscription_tier, resolved_tier),
          claims <- AccountsMembership.claims_for(user, membership),
-         {:ok, access_token, _access_claims} <-
-           Guardian.encode_and_sign(user, claims, token_type: "access"),
-         {:ok, refresh_token, _refresh_claims} <-
-           Guardian.encode_and_sign(user, Map.delete(claims, "typ"), token_type: "refresh") do
+         {:ok, access_token, refresh_token} <- mint_token_pair(user, claims) do
       render_auth_json(conn, user, account, resolved_tier, access_token, refresh_token)
     end
   end
@@ -204,14 +204,8 @@ defmodule MealPlannerApiWeb.AuthController do
     with resolved_tier <- RevenuecatService.resolve_tier(account.id, requested_tier),
          user <- Map.put(user, :subscription_tier, resolved_tier),
          account <- Map.put(account, :subscription_tier, resolved_tier),
-         {:ok, access_token, _access_claims} <-
-           Guardian.encode_and_sign(user, Accounts.claims_for(user, account),
-             token_type: "access"
-           ),
-         {:ok, refresh_token, _refresh_claims} <-
-           Guardian.encode_and_sign(user, Accounts.claims_for(user, account),
-             token_type: "refresh"
-           ) do
+         claims <- Accounts.claims_for(user, account),
+         {:ok, access_token, refresh_token} <- mint_token_pair(user, claims) do
       render_auth_json(conn, user, account, resolved_tier, access_token, refresh_token)
     end
   end
@@ -275,16 +269,11 @@ defmodule MealPlannerApiWeb.AuthController do
 
   defp reissue_from_refresh_claims(_conn, _claims), do: {:error, :invalid_refresh_token}
 
-  defp mint_token_pair(user, claims) do
-    with {:ok, access_token, _access_claims} <-
-           Guardian.encode_and_sign(user, claims, token_type: "access"),
-         {:ok, refresh_token, _refresh_claims} <-
-           Guardian.encode_and_sign(user, Map.delete(claims, "typ"), token_type: "refresh") do
-      {:ok, access_token, refresh_token}
-    else
-      _ -> {:error, :token_refresh_failed}
-    end
-  end
+  # Post-review fix pass item 4: delegates to the single canonical
+  # implementation in `AccountScopeHelpers`, shared with
+  # `render_membership_auth_response/5`, instead of reimplementing
+  # "mint access + mint refresh with typ stripped, else :error" here.
+  defp mint_token_pair(user, claims), do: AccountScopeHelpers.mint_token_pair(user, claims)
 
   defp social_identity_to_params(identity, params) do
     provider = Map.get(identity, :provider)

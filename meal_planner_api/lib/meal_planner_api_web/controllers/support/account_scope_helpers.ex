@@ -59,17 +59,13 @@ defmodule MealPlannerApiWeb.Controllers.AccountScopeHelpers do
   end
 
   @doc """
-  Mints `access_token` + `refresh_token` from a full `access_v2` claim
-  map (`AccountsMembership.claims_for/2`'s output) and renders the
-  standard auth payload (`access_token`, `refresh_token`, `user`,
-  `account`, `membership`, `subscription`, `websocket`).
+  Mints `access_token` + `refresh_token` from a full claim map and
+  renders the standard auth payload (`access_token`, `refresh_token`,
+  `user`, `account`, `membership`, `subscription`, `websocket`).
 
-  The refresh token strips `"typ"` from the claim map before minting so
-  `Guardian.encode_and_sign/3`'s `token_type: "refresh"` option can set
-  it — the claim map coming from `claims_for/2` always carries
-  `"typ" => "access_v2"`, and Guardian's `set_type/3` does not override
-  an existing non-nil `"typ"` key (the same class of bug fixed in PR 2b
-  for `Accounts.claims_for/2` — see `accounts.ex`).
+  Delegates the actual minting to `mint_token_pair/2` (post-review fix
+  pass item 4 — the single canonical implementation, also used by
+  `AuthController`).
   """
   @spec render_membership_auth_response(
           Conn.t(),
@@ -79,10 +75,7 @@ defmodule MealPlannerApiWeb.Controllers.AccountScopeHelpers do
           map()
         ) :: Conn.t()
   def render_membership_auth_response(conn, user, account, membership, claims) do
-    with {:ok, access_token, _access_claims} <-
-           Guardian.encode_and_sign(user, claims, token_type: "access"),
-         {:ok, refresh_token, _refresh_claims} <-
-           Guardian.encode_and_sign(user, Map.delete(claims, "typ"), token_type: "refresh") do
+    with {:ok, access_token, refresh_token} <- mint_token_pair(user, claims) do
       subscription = SubscriptionService.policy_for_account(account.id)
 
       json(conn, %{
@@ -98,6 +91,32 @@ defmodule MealPlannerApiWeb.Controllers.AccountScopeHelpers do
           params: %{token: access_token}
         }
       })
+    end
+  end
+
+  @doc """
+  Mints `access_token` + `refresh_token` from a single claim map. The
+  refresh token strips `"typ"` from the claim map before minting so
+  `Guardian.encode_and_sign/3`'s `token_type: "refresh"` option can set
+  it — a claim map carrying an explicit `"typ"` (e.g. `access_v2`'s
+  `AccountsMembership.claims_for/2` output) is otherwise NOT overridden
+  by Guardian's `set_type/3` (the same class of bug fixed in PR 2b for
+  `Accounts.claims_for/2` — see `accounts.ex`). This is the single
+  canonical implementation of "mint access + mint refresh with typ
+  stripped, else :error" — post-review fix pass item 4 consolidates 3
+  duplicate reimplementations (`AuthController.issue_auth_response/6`'s
+  two clauses + this module's old inline version) down to this one.
+  """
+  @spec mint_token_pair(map(), map()) ::
+          {:ok, String.t(), String.t()} | {:error, :token_refresh_failed}
+  def mint_token_pair(user, claims) do
+    with {:ok, access_token, _access_claims} <-
+           Guardian.encode_and_sign(user, claims, token_type: "access"),
+         {:ok, refresh_token, _refresh_claims} <-
+           Guardian.encode_and_sign(user, Map.delete(claims, "typ"), token_type: "refresh") do
+      {:ok, access_token, refresh_token}
+    else
+      _ -> {:error, :token_refresh_failed}
     end
   end
 end
