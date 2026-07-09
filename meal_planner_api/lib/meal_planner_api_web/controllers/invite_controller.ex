@@ -6,6 +6,8 @@ defmodule MealPlannerApiWeb.InviteController do
 
   use MealPlannerApiWeb, :controller
 
+  require Logger
+
   alias MealPlannerApi.AccountsMembership
   alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApiWeb.Controllers.AccountScopeHelpers
@@ -61,6 +63,11 @@ defmodule MealPlannerApiWeb.InviteController do
               membership,
               claims
             )
+
+          {:error, reason}
+          when reason in [:invite_token_used, :invite_token_expired, :invite_token_unknown] ->
+            Logger.warning("invite accept rejected reason=#{reason}")
+            conn |> put_status(error_status(reason)) |> json(%{error: Atom.to_string(reason)})
 
           {:error, reason} ->
             conn |> put_status(error_status(reason)) |> json(%{error: Atom.to_string(reason)})

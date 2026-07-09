@@ -13,6 +13,8 @@ defmodule MealPlannerApiWeb.Plugs.EnforceAccountScope do
   `:account_id`-bearing routes.
   """
 
+  require Logger
+
   @behaviour Plug
 
   @impl true
@@ -30,6 +32,11 @@ defmodule MealPlannerApiWeb.Plugs.EnforceAccountScope do
         if membership_matches?(membership, path_account_id) do
           conn
         else
+          Logger.warning(
+            "EnforceAccountScope rejected request: path_account_id=#{path_account_id} " <>
+              "membership_account_id=#{inspect(membership_account_id(membership))}"
+          )
+
           conn
           |> Plug.Conn.put_resp_content_type("application/json")
           |> Plug.Conn.send_resp(403, ~s({"error":"account_mismatch"}))
@@ -37,6 +44,9 @@ defmodule MealPlannerApiWeb.Plugs.EnforceAccountScope do
         end
     end
   end
+
+  defp membership_account_id(%{account_id: account_id}), do: account_id
+  defp membership_account_id(_membership), do: nil
 
   defp membership_matches?(%{account_id: account_id}, path_account_id)
        when not is_nil(account_id) do

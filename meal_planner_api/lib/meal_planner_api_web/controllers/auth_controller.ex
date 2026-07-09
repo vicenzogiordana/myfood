@@ -1,6 +1,8 @@
 defmodule MealPlannerApiWeb.AuthController do
   use MealPlannerApiWeb, :controller
 
+  require Logger
+
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.AccountsMembership
   alias MealPlannerApi.Auth.Guardian
@@ -113,17 +115,23 @@ defmodule MealPlannerApiWeb.AuthController do
             })
 
           {:error, :token_refresh_failed} ->
+            Logger.warning("refresh token rotation failed reason=token_refresh_failed")
+
             conn
             |> put_status(:unauthorized)
             |> json(%{error: "token_refresh_failed"})
 
-          {:error, _reason} ->
+          {:error, reason} ->
+            Logger.warning("refresh token rotation failed reason=#{inspect(reason)}")
+
             conn
             |> put_status(:unauthorized)
             |> json(%{error: "invalid_refresh_token"})
         end
 
-      {:error, _reason} ->
+      {:error, reason} ->
+        Logger.warning("refresh token decode_and_verify failed reason=#{inspect(reason)}")
+
         conn
         |> put_status(:unauthorized)
         |> json(%{error: "invalid_refresh_token"})
