@@ -321,6 +321,31 @@ defmodule MealPlannerApi.AccountsMembershipTest do
       assert result.claims["status"] == "active"
     end
 
+    test "an invitee argument matching neither known shape returns :invalid_invitee" do
+      # Post-review fix pass, item 7: `error_status/1`'s `invalid_invitee`
+      # mapping (400) has no HTTP-level path that can trigger it —
+      # `InviteController.resolve_invitee/2` only ever produces a
+      # `%PersistenceUser{}` or a `%{name:, password_hash:}` map, both of
+      # which match `accept_invite/2`'s named clauses. The catch-all
+      # clause (`accept_invite(_plaintext, _args), do: {:error,
+      # :invalid_invitee}`) was previously untested at ANY layer — this
+      # pins its behavior directly against the application function.
+      owner =
+        user_with_memberships(
+          %{email: "invalid-invitee-owner@example.com"},
+          [{%{plan: :family_4, name: "Invalid Invitee Family"}, :owner}]
+        )
+
+      [owner_membership] = owner.memberships
+      account = Repo.get!(PersistenceAccount, owner_membership.account_id)
+
+      {:ok, %{token: plaintext}} =
+        AccountsMembership.invite(account, owner_membership, "invalid-invitee@example.com")
+
+      assert {:error, :invalid_invitee} =
+               AccountsMembership.accept_invite(plaintext, %{unexpected: "shape"})
+    end
+
     test "replay (second accept with same plaintext) returns :invite_token_used" do
       invitee =
         user_with_memberships(

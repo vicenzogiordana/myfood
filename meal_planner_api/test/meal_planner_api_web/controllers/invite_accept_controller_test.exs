@@ -168,6 +168,18 @@ defmodule MealPlannerApiWeb.InviteAcceptControllerTest do
 
       assert json_response(conn, 401)["error"] == "unauthorized"
     end
+
+    # Post-review fix pass, item 7: `error_status/1`'s `invite_token_unknown`
+    # mapping (404) had zero HTTP-level test coverage.
+    test "an unknown/bogus token returns 404 invite_token_unknown", %{conn: conn} do
+      conn =
+        post(conn, "/api/invites/#{Ecto.UUID.generate()}/accept", %{
+          "name" => "Nobody",
+          "password" => "supersecret123"
+        })
+
+      assert json_response(conn, 404)["error"] == "invite_token_unknown"
+    end
   end
 
   # Post-review fix pass, item 2: `accept_invite/2` must consult the same
