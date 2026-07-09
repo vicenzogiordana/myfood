@@ -131,6 +131,24 @@ defmodule MealPlannerApi.AccountsRegistrationTest do
       assert length(all_memberships) == 1
     end
 
+    test "the result map exposes the :owner :active membership directly (PR 3a task 3.8)" do
+      # auth_controller.ex's password/2 needs the membership to mint an
+      # access_v2 JWT without an extra query — mirrors the shape
+      # authenticate_with_password/1 already returns.
+      assert {:ok, %{user: user, account: account, membership: membership}} =
+               Accounts.register_with_password(%{
+                 "email" => "exposed-membership@example.com",
+                 "password" => "super_secret_123",
+                 "name" => "Exposed Membership"
+               })
+
+      assert %AccountMembership{} = membership
+      assert membership.user_id == user.id
+      assert membership.account_id == account.id
+      assert membership.role == :owner
+      assert membership.status == :active
+    end
+
     test "membership is queryable by account_id immediately after registration" do
       assert {:ok, %{account: account}} =
                Accounts.register_with_password(%{
