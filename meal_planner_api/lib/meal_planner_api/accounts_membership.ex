@@ -504,11 +504,20 @@ defmodule MealPlannerApi.AccountsMembership do
   is the owner of a *different* Account from triggering
   `:cannot_leave_owned_account` against an Account they don't belong
   to — they should get `:not_a_member` instead.
+
+  Looks the row up by `user_id` + `account_id`, NOT by `actor.id`.
+  `actor` may be a **synthesized** legacy membership (`__synthesized__:
+  true`, `id: nil` — see `LoadCurrentMembership.synthesize_v1_membership/2`)
+  for `access_v1` token holders; `id: nil` never matches a real primary
+  key, so an `id`-based lookup always returned `nil` for every legacy
+  User, making this function permanently broken for them. The
+  synthesized struct does carry the real `user_id`, which is what both
+  real and synthesized memberships have in common.
   """
   @spec leave(Account.t(), AccountMembership.t()) ::
           :ok | {:error, :cannot_leave_owned_account | :not_a_member}
   def leave(%Account{} = account, %AccountMembership{} = actor) do
-    case Repo.get_by(AccountMembership, id: actor.id, account_id: account.id) do
+    case Repo.get_by(AccountMembership, user_id: actor.user_id, account_id: account.id) do
       nil ->
         {:error, :not_a_member}
 
