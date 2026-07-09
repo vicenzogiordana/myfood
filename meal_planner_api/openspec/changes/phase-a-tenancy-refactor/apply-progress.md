@@ -862,3 +862,253 @@ in `inventory_repo_test.exs`.
   start; +6 net new tests across items 2, 4, and 7).
 - Working tree clean aside from this progress-doc update; all 7 commits
   pushed to `feature/phase-a-pr-2b`.
+
+---
+
+# PR 3a — controllers + router + `auth_controller.ex` `access_v2` cutover
+
+> **Change**: `phase-a-tenancy-refactor`
+> **Branch**: `feature/phase-a-pr-3a`
+> **Apply mode**: `strict_tdd: true`, `test_runner: mix test`
+> **Status**: ✅ 8 / 8 tasks complete (3.1–3.8)
+> **Date**: 2026-07-09
+
+## Goal recap
+
+Ship the tasks.md PR 3 "controllers + channels + services sweep" web
+layer, scoped to this branch's slice (tasks 3.1–3.8): `MembershipController`
+(index/delete), `InviteController` (create/accept),
+`AccountLifecycleController` (switch_account/leave), the router
+additions + `EnforceAccountScope` plug, and the `auth_controller.ex`
+rewrite that mints `access_v2` when `MEAL_PLANNER_TENANCY_V2` is on.
+Tasks 3.9–3.13 (channel sweep) are PR 3b scope and are **not** touched
+here.
+
+## Summary
+
+- **8 / 8 tasks complete** (3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8).
+- **This was a resumed session.** A prior `sdd-apply` run completed
+  tasks 3.1–3.7 (all committed) and started task 3.8's prerequisite —
+  `Accounts.register_with_password/1` not exposing the `membership` it
+  already inserted — but was cut off by an infrastructure error (session
+  limit, not a real blocker) before finishing 3.8 itself. The
+  orchestrator completed that one prerequisite commit
+  (`8765deb feat(accounts): register_with_password/1 exposes membership
+  in result`) directly. This session verified that commit (not redone)
+  and completed task 3.8 from a clean baseline of **430 tests, 0
+  failures**.
+- **Final**: **435 tests, 0 failures** (+5 net new tests, all from task
+  3.8's TDD cycle).
+- `mix compile --warnings-as-errors --force`: clean (0 warnings) after
+  this session's two incidental fixes (see "Deviations" below).
+
+## Commits landed (chronological, PR 3a)
+
+| # | SHA | Task(s) | Title |
+|---|-----|---------|-------|
+| 1 | `a2da4c3` | 3.1 | feat(membership_controller): index action lists account roster |
+| 2 | `7ee21f1` | 3.2 | test(membership_controller): delete action removes non-owner members, blocks owner removal |
+| 3 | `c3b6e4e` | 3.3 | feat(invite_controller): create action mints owner-only invite tokens |
+| 4 | `99c2c72` | 3.4 | feat(invite_controller): accept action supports existing and new-User acceptance |
+| 5 | `7f5c0cf` | 3.5 | feat(account_lifecycle_controller): switch_account action re-scopes the JWT |
+| 6 | `37d5ee2` | 3.6 | test(account_lifecycle_controller): leave action blocks owner self-removal |
+| 7 | `20110bf` | 3.7 | test(router): checkpoint coverage for all 6 tenancy routes + EnforceAccountScope plug |
+| 8 | `8765deb` | 3.8 (prerequisite) | feat(accounts): register_with_password/1 exposes membership in result *(landed by the orchestrator directly, not this session)* |
+| 9 | `a9ddcbd` | 3.8 | feat(auth_controller): mint access_v2 when tenancy_v2_only is on, preserve typ on refresh *(this session)* |
+
+## TDD Cycle Evidence — task 3.8 (this session's work)
+
+| Test | RED | GREEN | REFACTOR | Notes |
+|---|---|---|---|---|
+| `password register mints access_v2 with membership claims when the flag is on` | ✅ failed (`claims["typ"] == "access"`, expected `"access_v2"`) | ✅ | — | Confirms `password/2` register mode consults the flag. |
+| `password login mints access_v2 with membership claims when the flag is on` | ✅ failed (same assertion) | ✅ | — | Confirms the login (`authenticate_with_password/1`) path, not just register. |
+| `password register mints access_v1 when the flag is off (regression)` | passed immediately (pre-existing behavior) | ✅ | — | Regression guard — flag-off path unchanged. |
+| `refresh preserves access_v2 typ across rotation, regardless of the flag at refresh time` | ✅ failed (`ArgumentError: not an atom` — pre-existing `resolve_tier`/`Atom.to_string` bug, see below) | ✅ | ✅ | Flips the flag OFF between mint and refresh to prove refresh does not consult the CURRENT flag value. |
+| `refresh preserves access_v1 typ across rotation, regardless of the flag at refresh time` | ✅ failed (same `ArgumentError`) | ✅ | — | Flips the flag ON between mint and refresh; asserts the refreshed token stays `access_v1`. |
+
+All 5 tests + all 12 pre-existing `auth_controller_test.exs` tests green
+in the same file run (17 tests, 0 failures) before the full-suite
+re-run (435 tests, 0 failures).
+
+## Implementation detail — task 3.8
+
+- **Files**: `lib/meal_planner_api_web/controllers/auth_controller.ex`,
+  `test/meal_planner_api_web/controllers/auth_controller_test.exs`.
+- `password/2` now destructures `%{user:, account:, membership:}` from
+  both `Accounts.register_with_password/1` and
+  `Accounts.authenticate_with_password/1` (both already return
+  `membership` — the register-path fix landed in `8765deb`, the
+  authenticate-path fix landed earlier in PR 2b `eb1ec69`). A new
+  `issuance_typ/1` private helper picks `:access_v2` only when
+  `Application.get_env(:meal_planner_api, :tenancy_v2_only, false)` is
+  true **and** a real `%AccountMembership{}` came back; otherwise
+  `:access` (covers both flag-off and the "no membership row" edge
+  case, avoiding a `FunctionClauseError` in
+  `AccountsMembership.claims_for/2`).
+- `issue_auth_response/4` became a 6-arg private function (default
+  args `typ \\ :access, membership \\ nil` on the header clause) with
+  two concrete clauses: one for `:access_v2` (uses
+  `AccountsMembership.claims_for/2`, per the launch prompt's risk #2 —
+  built from `membership.account_id`, not `user.account_id`, so a
+  multi-familia User is scoped correctly), one for everything else
+  (unchanged `Accounts.claims_for/2` legacy path). `social/2` still
+  calls the 4-arg form and is unaffected (out of Phase A scope — design
+  doc does not mention social auth).
+- `refresh/2` no longer hardcodes the legacy claim builder. A new
+  `reissue_from_refresh_claims/2` dispatches on the **incoming refresh
+  token's own claims**: if `membership_id` is present (i.e., the
+  refresh token was minted from an `access_v2` session — see below for
+  why the refresh token still carries this key even though its own
+  `typ` is `"refresh"`), it reloads the `User` + `AccountMembership` by
+  id and calls `AccountsMembership.claims_for/2` again; otherwise it
+  falls back to the pre-existing `Accounts.claims_for/2` legacy path.
+  This is dispatched from the **token being refreshed**, not from the
+  current `tenancy_v2_only?/0` flag value — verified by both new
+  refresh tests deliberately flipping the flag to the opposite value
+  between mint and refresh.
+
+### Why checking for `membership_id` (not `typ`) on the refresh token
+
+The refresh token's own `"typ"` claim is always `"refresh"` (Guardian
+sets it via the `token_type: "refresh"` option, and the refresh-minting
+code path strips any pre-existing `"typ"` key from the claims map
+before minting — this is the same `set_type/3` non-override behavior
+documented in PR 2b's `claims_for/2` fix, applied to the `access_v2`
+map here too). Only `"typ"` is stripped; every other `access_v2` claim
+(`membership_id`, `account_id`, `role`, `plan`, `status`) survives into
+the refresh token untouched. So `membership_id` presence on the
+DECODED refresh claims is the correct (and only available) signal for
+"this refresh token descends from an `access_v2` access token."
+
+## Deviations from design
+
+1. **Fixed a pre-existing bug in `refresh/2`'s tier resolution,
+   surfaced by real TDD.** The original `refresh/2` passed the raw,
+   unnormalized `Map.get(conn.params, "subscription_tier", "free")`
+   (a string) straight into `RevenuecatService.resolve_tier/2`, whose
+   `fallback_tier` argument is returned as-is when the Account has no
+   active RevenueCat entitlements. `Accounts.claims_for/2` then calls
+   `Atom.to_string/1` on that value and raised `ArgumentError: not an
+   atom`. This path had **zero test coverage before this session** — no
+   test exercised `/api/auth/refresh` at all. Fixed by normalizing with
+   `SubscriptionService.normalize_tier/1`, the same helper `password/2`
+   already uses. In scope because it directly blocked task 3.8's
+   required refresh tests and the fix is a one-line change to the exact
+   function being rewritten (same class of "confirmed pre-existing bug
+   found via real TDD, fixed within task scope" precedent as PR 2b item
+   7).
+2. **Cleaned up the two pre-existing `--warnings-as-errors` warnings**
+   flagged in this file's "New risks for PR 3a/3b/3c" §5 as PR 3
+   cleanup candidates: removed the unused `AccountMembership` alias in
+   `lib/meal_planner_api/services/account_service.ex` and the unused
+   `parse_bool/1` in `lib/meal_planner_api_web/controllers/shopping_controller.ex`.
+   Both predate this change; fixing them here keeps `mix compile
+   --warnings-as-errors` clean without touching any other file.
+3. **`issue_auth_response`'s response body shape is unchanged** for
+   both `:access` and `:access_v2` (no `"membership"` key added to the
+   `password`/`refresh` JSON payload). Task 3.8's acceptance criteria
+   only require the minted `access_token`'s claims to reflect
+   `access_v2`/`access_v1` correctly — unlike
+   `AccountScopeHelpers.render_membership_auth_response/5` (used by the
+   new PR 3a controllers), `auth_controller.ex` was deliberately left
+   with its existing response shape to avoid an unscoped frontend
+   contract change on the pre-existing `/api/auth/password` and
+   `/api/auth/refresh` endpoints.
+
+## Known pre-existing flakiness (not introduced by this session)
+
+`mix test` is not 100% deterministic across runs: one `mix precommit`
+invocation this session hit **2 failures** out of 435 (both in the
+`accounts_membership_integration_test.exs` concurrent seat-cap race
+test, task 2.16 — `Task.async_stream`-based), but running the same
+file alone, and the full suite 5 more times (3 with a fixed `--seed
+0`), reproduced **0 failures** every time. This is scheduling-sensitive
+concurrency-test flakiness pre-dating this session's changes (nothing
+in `auth_controller.ex` involves concurrency) — flagged here, not
+fixed, per "do not fix pre-existing failures outside task scope."
+
+## Side effect: broad `mix format` from `mix precommit` (left uncommitted, not reverted)
+
+Running `mix precommit` (`compile --warnings-as-errors`, `deps.unlock
+--unused`, `format`, `test`) reformats the **entire** project, not just
+the files touched this session — this surfaced the `mix format` drift
+already flagged as an open, out-of-scope item in this file's PR 2b
+section ("Out of scope … mix format drift"). ~19 files unrelated to
+task 3.8 (`accounts.ex`, `accounts_membership.ex`,
+`persistence/accounts.ex`, `invite_service.ex`, `shopping_service.ex`,
+`user_socket.ex`, and ~13 test files) picked up pure whitespace/paren
+reformatting as a result. **Only the 4 files task 3.8 actually touches
+were staged and committed** (`a9ddcbd`); the incidental reformatting
+was intentionally left as **uncommitted, unstaged** working-tree
+changes rather than force-discarded, because bulk-reverting ~20 files
+never touched this session is a destructive action this environment's
+sandbox correctly blocked without explicit authorization. **The
+orchestrator/maintainer should decide** whether to commit that
+format-only diff as its own `style:` commit, discard it
+(`git checkout -- <paths>`), or leave it for a dedicated formatting
+pass — it is not part of this PR's reviewable diff either way.
+
+## Risks carried into PR 3b (channel sweep, tasks 3.9–3.13)
+
+1. **`EnforceAccountScope` (task 3.7) is HTTP-only** — it reads
+   `conn.path_params["account_id"]` and `conn.assigns.current_membership`.
+   It has no bearing on channels; PR 3b's channel sweep needs its own
+   guard using `socket.assigns.current_membership` (already populated
+   by PR 1's `LoadCurrentMembership.call_for_socket/2` /
+   `UserSocket.connect/3`). No shared code to reuse beyond the
+   `current_membership` shape itself.
+2. **`auth_controller.ex`'s `access_v2` minting has no direct
+   implication for channels** — channels authenticate via the
+   WebSocket connect token (`UserSocket.connect/3`, PR 1 task 1.12),
+   which already reads `claims["typ"]` independently of anything in
+   `auth_controller.ex`. The only shared surface is
+   `AccountsMembership.claims_for/2` (task 2.1), which task 3.8 now
+   exercises from two more call sites (`password/2` register+login,
+   `refresh/2` v2 branch) in addition to `switch_account`/`accept`
+   (PR 3a tasks 3.4/3.5). No new risk to `LoadCurrentMembership` or the
+   channel join guard — this task never touches
+   `lib/meal_planner_api_web/plugs/` or `lib/meal_planner_api_web/channels/`.
+3. **Refresh tokens minted via the `access_v2` path carry
+   `membership_id` but `typ: "refresh"`.** If PR 3b's channel sweep (or
+   any future code) ever needs to distinguish access_v2-derived refresh
+   tokens from legacy ones (e.g., for a channel-level refresh flow),
+   the correct signal is `membership_id` presence, **not** `claims["typ"]`
+   — this session's `reissue_from_refresh_claims/2` is the reference
+   implementation for that pattern.
+4. **Channel count mismatch (still open, carried from PR 1/PR 2a)** —
+   `shopping_channel.ex` and `inventory_channel.ex` still do not exist
+   on disk; PR 3b (tasks 3.9–3.12 per `tasks.md`) covers only the 4
+   channels that exist (`planning`, `cooking`, `calendar`, `ai`).
+   Unchanged by this session.
+5. **Broad `mix format` drift is now demonstrated to recur** whenever
+   `mix precommit` runs without scoping — PR 3b's apply session should
+   either format only the files it touches (`mix format <paths>`) or
+   accept and commit the full-project reformat as a deliberate, isolated
+   `style:` commit up front, to avoid repeating this same
+   uncommitted-side-effect situation.
+
+## Final verification (this session)
+
+- `mix test`: **435 tests, 0 failures** (baseline 430 at session start;
+  +5 net new tests, all in `auth_controller_test.exs`).
+- `mix compile --warnings-as-errors --force`: clean.
+- Working tree: `a9ddcbd` committed with exactly the 4 files task 3.8
+  (+ its 2 incidental warning fixes) touched; ~19 other files carry
+  uncommitted `mix format`-only drift (see above) — not committed, not
+  reverted, flagged for the orchestrator's decision.
+- Branch: `feature/phase-a-pr-3a`.
+
+## All PR 3a tasks (3.1–3.8) — final status
+
+| Task | Description | Status | Commit |
+|---|---|---|---|
+| 3.1 | `MembershipController` index action | ✅ | `a2da4c3` |
+| 3.2 | `MembershipController` delete action | ✅ | `7ee21f1` |
+| 3.3 | `InviteController` create action | ✅ | `c3b6e4e` |
+| 3.4 | `InviteController` accept action | ✅ | `99c2c72` |
+| 3.5 | `AccountLifecycleController` switch_account action | ✅ | `7f5c0cf` |
+| 3.6 | `AccountLifecycleController` leave action | ✅ | `37d5ee2` |
+| 3.7 | Router additions + `EnforceAccountScope` plug | ✅ | `20110bf` |
+| 3.8 | `auth_controller.ex` rewrite to mint `access_v2` | ✅ | `8765deb` (prerequisite) + `a9ddcbd` |
+
+**8 / 8 PR 3a tasks complete.**
