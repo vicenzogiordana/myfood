@@ -1112,3 +1112,259 @@ pass — it is not part of this PR's reviewable diff either way.
 | 3.8 | `auth_controller.ex` rewrite to mint `access_v2` | ✅ | `8765deb` (prerequisite) + `a9ddcbd` |
 
 **8 / 8 PR 3a tasks complete.**
+
+---
+
+# PR 3a — post-review fix pass
+
+> **Change**: `phase-a-tenancy-refactor`
+> **Branch**: `feature/phase-a-pr-3a`
+> **Apply mode**: `strict_tdd: true`, `test_runner: mix test`
+> **Status**: ✅ 8 / 8 items complete
+> **Date**: 2026-07-09
+
+## Goal recap
+
+A 5-agent review (`sdd-verify` + 4R) of PR 3a found 8 real defects: 1
+BLOCKER (a live production bug affecting every legacy-token user), 3
+CRITICAL security/consistency gaps, 2 CRITICAL duplication findings, 1
+missing auth-boundary test, and 1 missing-error-mapping coverage gap.
+This section documents the fix for each, following strict RED → GREEN
+→ REFACTOR where a real code change was involved.
+
+## Summary
+
+- **8 / 8 items complete.**
+- **9 commits** on `feature/phase-a-pr-3a` (one per item, plus one
+  follow-up formatting commit for item 8).
+- Baseline at session start: **435 tests, 0 failures** (matches PR 3a's
+  own final verification). Final: **446 tests, 0 failures** (+11 net
+  new tests across items 1, 2, 6, 7, 8).
+- `mix compile --warnings-as-errors --force`: clean throughout.
+- Ran the full suite 3× after the last commit — 446/0 every time (no
+  repeat of the pre-existing seat-cap race flake noted in PR 3a's
+  first pass).
+
+## TDD Cycle Evidence
+
+| Item | RED | GREEN | REFACTOR | Notes |
+|---|---|---|---|---|
+| 1. `leave/2` broken for synthesized memberships (BLOCKER) | ✅ new HTTP test raised `ArgumentError: nil given for :id` | ✅ query by `user_id` instead of `actor.id` | — | Confirmed via the legacy-claim-mint pattern from `membership_controller_test.exs`. |
+| 2. `switch_account/2` / `accept_invite/2` ignore the tenancy flag | ✅ 2 new HTTP tests asserted `typ == "access"` with flag off, got `"access_v2"` | ✅ added `build_response_claims/3` gating on `tenancy_v2_only?/0` | — | Also had to flip 3 pre-existing unit/integration tests to explicitly set the flag ON, since they asserted the old (buggy) unconditional `access_v2` behavior. |
+| 3. Zero observability | N/A (logging only, no test required per launch prompt) | ✅ `Logger.warning/1` in 3 files | — | Full suite re-confirmed 0 regressions; log lines visible in test output. |
+| 4. 4x duplicated token-minting logic | N/A (refactor of already-tested code) | ✅ consolidated into `AccountScopeHelpers.mint_token_pair/2` | — | `auth_controller.ex`'s `mint_token_pair/2` now delegates; full suite re-run confirmed 0 regressions. |
+| 5. `AccountScopeHelpers.load_account/1` duplicate | N/A (refactor of already-tested code) | ✅ `AccountsMembership.load_account/1` made public, `AccountScopeHelpers` delegates | — | Full suite re-run confirmed 0 regressions. |
+| 6. No auth-boundary test on invite accept | ✅/➖ (coverage-only — behavior was already correct) | ✅ 2 new tests (no header / malformed header) | — | Verified `resolve_invitee/2`'s existing behavior before writing — no bug found, pure coverage gap closed. |
+| 7. Untested `InviteController` error mappings | ✅ new tests written against real endpoints | ✅ 3 of 4 mappings covered at HTTP level | — | `invalid_invitee` (400) found to be **unreachable via HTTP** given `resolve_invitee/2`'s current wiring — covered at the application layer instead (see below). |
+| 8. Guardian never validates `typ` on decode (security) | ✅ both new tests reproduced the bug (200 instead of 401) | ✅ explicit `claims["typ"]` checks in both locations | ✅ 1 follow-up formatting commit | Confirmed via reading Guardian's own `deps/guardian` source — `token_type:` is only consumed by `set_type/3` at encode time, never checked by `decode_and_verify`/`verify_claims`. |
+
+## Item-by-item detail
+
+### Item 1 — `leave/2` broken for legacy/synthesized memberships (BLOCKER)
+
+- **Files**: `lib/meal_planner_api/accounts_membership.ex`,
+  `test/meal_planner_api_web/controllers/account_lifecycle_leave_test.exs`.
+- **Bug**: `leave/2` looked up the actor's row via `Repo.get_by(AccountMembership,
+  id: actor.id, account_id: account.id)`. For a synthesized legacy
+  (`access_v1`) membership — built by `LoadCurrentMembership.synthesize_legacy_membership/2`
+  — `actor.id` is always `nil` (no real row backs it), so `id: nil` never
+  matched any real primary key. `leave/2` returned `{:error, :not_a_member}`
+  for **every** legacy-token user, even genuine `:member`s. Since
+  `MEAL_PLANNER_TENANCY_V2` is off in production today, this made `POST
+  /api/accounts/:account_id/leave` broken for effectively all current users.
+- **Verification before assuming the fix**: read `load_current_membership.ex`'s
+  `synthesize_legacy_membership/2` — confirmed the synthesized struct carries
+  the REAL `user_id` (from the DB `User` row) but `id: nil`. Also confirmed
+  `Guardian.resource_from_claims/1` overwrites `current_user.account_id` from
+  the JWT claim (not the DB row), which is why a legacy claim's `account_id`
+  can point at any Account regardless of the User's own `account_id` column.
+- **Fix**: query by `user_id: actor.user_id, account_id: account.id` instead
+  of `id: actor.id`. Both real and synthesized memberships carry the real
+  `user_id`; only `id` differs.
+- **Test**: minted a legacy `access_v1` token manually (same pattern as
+  `membership_controller_test.exs`'s "dangling account" test — claims carry
+  `account_id`/`account_type`/`subscription_tier`/`email`/`name`, no
+  `membership_id`) for a User with a REAL `:member` `AccountMembership` row,
+  then asserted `POST /api/accounts/:account_id/leave` returns `204` (not
+  `404`). Confirmed RED (`ArgumentError: nil given for :id` — the same
+  underlying Ecto safety check that made the bug loud instead of silent),
+  GREEN after the fix.
+
+### Item 2 — `switch_account/2` and `accept_invite/2` ignore the tenancy flag (CRITICAL)
+
+- **Files**: `lib/meal_planner_api/accounts_membership.ex`,
+  `test/meal_planner_api_web/controllers/account_lifecycle_controller_test.exs`,
+  `test/meal_planner_api_web/controllers/invite_accept_controller_test.exs`,
+  `test/meal_planner_api/accounts_membership_test.exs`,
+  `test/meal_planner_api/accounts_membership_integration_test.exs`.
+- **Bug**: `AccountsMembership.claims_for/2` unconditionally sets
+  `"typ" => "access_v2"`; `switch_account/2` and `accept_invite/2` (via
+  `accept_invite_with_lookup/2`) called it directly with no flag check,
+  unlike `auth_controller.ex`'s `password/2`, which gates through
+  `issuance_typ/1`. `MEAL_PLANNER_TENANCY_V2` was not a real killswitch for
+  these two routes.
+- **Fix**: added `build_response_claims/3`, mirroring `auth_controller.ex`'s
+  `tenancy_v2_only?/0` check exactly (same config key,
+  `:meal_planner_api, :tenancy_v2_only`) — mints via `AccountsMembership.claims_for/2`
+  (`access_v2`) when the flag is on, `Accounts.claims_for/2` (legacy `access`)
+  when off. `switch_account/2` and the accept-invite success path both call
+  it now.
+- **Tests**: 2 new HTTP-level tests (flag off → `switch_account`/`accept_invite`
+  mint `access`, not `access_v2`) confirmed RED (`"access_v2"` returned with
+  the flag off) before the fix, GREEN after. Also had to update 3
+  **pre-existing** tests that asserted the OLD buggy behavior
+  (`claims["typ"] == "access_v2"` with no flag set, defaulting to `false`) —
+  these were testing the bug, not a spec; flipped them to explicitly set the
+  flag ON via the same `Application.put_env` + `on_exit` pattern already used
+  in `auth_controller_test.exs`'s task 3.8 tests.
+
+### Item 3 — Zero observability in the new auth surface (CRITICAL)
+
+- **Files**: `lib/meal_planner_api_web/controllers/auth_controller.ex`,
+  `lib/meal_planner_api_web/plugs/enforce_account_scope.ex`,
+  `lib/meal_planner_api_web/controllers/invite_controller.ex`.
+- Added `require Logger` + `Logger.warning/1` calls for: `refresh/2`
+  decode/rotation failures (auth_controller.ex, 3 branches), `EnforceAccountScope`
+  403 rejections (logs `path_account_id` + the membership's `account_id` —
+  never the token itself), and invite-accept token failures
+  (`invite_token_used` / `invite_token_expired` / `invite_token_unknown`).
+  No new tests added per the launch prompt ("no test strictly required for
+  log lines, don't over-engineer") — full suite re-confirmed 0 regressions
+  and the log lines are visible firing correctly in the test run output.
+- `membership_controller.ex` and `account_lifecycle_controller.ex` were not
+  touched — the launch prompt named 5 specific files and neither of those two
+  controllers was in that list; their error paths don't involve token
+  decode/verify failures the way the 3 touched files do.
+
+### Item 4 — Duplicated token-minting logic (4x) (CRITICAL)
+
+- **Files**: `lib/meal_planner_api_web/controllers/auth_controller.ex`,
+  `lib/meal_planner_api_web/controllers/support/account_scope_helpers.ex`.
+- Moved the canonical "mint access + mint refresh with typ stripped, else
+  `:error`" implementation to `AccountScopeHelpers.mint_token_pair/2` (public,
+  documented). `AuthController.issue_auth_response/6`'s two clauses and
+  `render_membership_auth_response/5` all delegate to it now.
+  `auth_controller.ex`'s own private `mint_token_pair/2` (used by
+  `reissue_from_refresh_claims/2`'s two clauses) is now a 1-line delegate to
+  the same function, so there is exactly one real implementation left.
+- No new tests — refactor of already-tested code per the launch prompt; full
+  suite re-run confirmed 0 regressions.
+
+### Item 5 — `AccountScopeHelpers.load_account/1` duplicates `AccountsMembership`'s private version (CRITICAL)
+
+- **Files**: `lib/meal_planner_api/accounts_membership.ex`,
+  `lib/meal_planner_api_web/controllers/support/account_scope_helpers.ex`.
+- Made `AccountsMembership.load_account/1` public with a `@spec`/`@doc`;
+  `AccountScopeHelpers.load_account/1` now delegates to it instead of
+  reimplementing the identical `Ecto.UUID.cast/1` → `Repo.get/2` →
+  `{:error, :account_not_found}` shape. Removed the now-unused `Repo` alias
+  from `account_scope_helpers.ex`.
+- No new tests — existing tests for both call sites cover this; full suite
+  re-run confirmed 0 regressions.
+
+### Item 6 — No test for the auth boundary on `POST /api/invites/:token/accept` (CRITICAL)
+
+- **File**: `test/meal_planner_api_web/controllers/invite_accept_controller_test.exs`.
+- Read `resolve_invitee/2`'s actual behavior first (per the launch prompt's
+  instruction not to assume): with no `Authorization` header, `get_req_header/2`
+  returns `[]`, which doesn't match the `with` chain's `[header] <- ...`
+  clause, falling to `:unauthenticated` → `401`. Same for a malformed
+  `"Bearer ..."` value that fails `Guardian.decode_and_verify/1`.
+- Added 2 tests (no header; malformed token) — both passed immediately
+  (behavior was already correct). This is a **coverage-only** addition, not a
+  bug fix, exactly as the launch prompt anticipated as a possible outcome.
+
+### Item 7 — Untested new `InviteController` error mappings (CRITICAL)
+
+- **Files**: `test/meal_planner_api_web/controllers/invite_controller_test.exs`,
+  `test/meal_planner_api_web/controllers/invite_accept_controller_test.exs`,
+  `test/meal_planner_api/accounts_membership_test.exs`.
+- Added real HTTP-level tests for 3 of the 4 named mappings:
+  - `already_invited` → `409` (invite the same email twice).
+  - `already_a_member` → `409` (invite an email that already has an `:active`
+    row on the Account).
+  - `invite_token_unknown` → `404` (accept with a random UUID as the token).
+- **`invalid_invitee` → `400` is unreachable via HTTP given the current
+  wiring** — traced this before writing a test, per the launch prompt's
+  instruction to verify rather than assume. `InviteController.resolve_invitee/2`
+  only ever returns `{:ok, %PersistenceUser{}}` (existing-User path) or
+  `{:ok, %{name:, password_hash:}}` (new-User path, both fields validated
+  non-empty strings first) — both shapes always match one of
+  `AccountsMembership.accept_invite/2`'s two named clauses. The catch-all
+  clause that returns `{:error, :invalid_invitee}` can never be reached from
+  the controller as currently wired. Rather than write a misleading HTTP test
+  that doesn't actually exercise the mapping, added a direct
+  application-layer unit test (`AccountsMembership.accept_invite(plaintext,
+  %{unexpected: "shape"})` → `{:error, :invalid_invitee}`) and flagged the
+  dead controller code path here for the maintainer's attention — this is
+  either intentional defensive coding (kept as a safety net for a future
+  `resolve_invitee/2` change) or removable dead code; not changed either way
+  since neither was in scope.
+
+### Item 8 — Guardian never validates incoming token `typ` (security) (CRITICAL)
+
+- **Files**: `lib/meal_planner_api_web/controllers/auth_controller.ex`,
+  `lib/meal_planner_api_web/controllers/invite_controller.ex`,
+  `lib/meal_planner_api_web/plugs/verify_token_type.ex`,
+  `test/meal_planner_api_web/controllers/auth_controller_test.exs`,
+  `test/meal_planner_api_web/controllers/invite_accept_controller_test.exs`.
+- **Verified the bug by reading Guardian's own source** (`deps/guardian/lib/guardian.ex`,
+  `deps/guardian/lib/guardian/token/jwt.ex`, `deps/guardian/lib/guardian/token/verify.ex`)
+  before assuming: the `token_type:` option passed to `decode_and_verify/3`
+  is consumed ONLY by `exchange/5` (a function this codebase never calls);
+  the default `verify_claims/2` (from `Guardian.Token.Verify`) has a no-op
+  `verify_claim/4` callback and never inspects `"typ"`. So `Guardian.decode_and_verify(token,
+  %{}, token_type: "refresh")` accepts ANY validly-signed token regardless of
+  its actual `typ`.
+- **Fix — `refresh/2`**: pattern-matches `{:ok, %{"typ" => "refresh"} = claims}`
+  explicitly, with a new `{:ok, %{"typ" => other_typ}}` branch that rejects
+  with `401 invalid_refresh_token` (and logs the mismatched `typ`, per item 3).
+- **Fix — `resolve_invitee/2`**: added `true <- Map.get(claims, "typ") in
+  MealPlannerApiWeb.Plugs.VerifyTokenType.supported_typs()` to the `with`
+  chain. `VerifyTokenType.supported_typs/0` is a new public accessor
+  exposing the plug's existing `@supported_typs` list (`~w(access
+  access_v2)`), reused instead of duplicating it.
+- **Tests**: (a) registered a User, POSTed the resulting `access_token` as
+  `refresh_token` to `/api/auth/refresh` — confirmed RED (accepted, `200`,
+  minted a fresh pair) before the fix, GREEN (`401 invalid_refresh_token`)
+  after; (b) registered a User, decoded their `refresh_token`, used it as a
+  Bearer header on `POST /api/invites/:token/accept` — confirmed RED
+  (accepted, `200`, full auth payload) before the fix, GREEN (`401
+  unauthorized`) after.
+- **Follow-up commit**: 1 `style:` commit wrapping 2 lines this item's fix
+  introduced that exceeded the project's line-length convention (verified via
+  `mix format --check-formatted` scoped to only the 2 files this item
+  touched, to avoid re-triggering the broad `mix format` drift flagged in PR
+  3a's first pass).
+
+## Commits landed (chronological, this fix pass)
+
+| # | SHA | Item | Title |
+|---|-----|------|-------|
+| 1 | `7306650` | 1 | fix(accounts_membership): leave/2 looks up by user_id, not actor.id |
+| 2 | `115dd51` | 2 | fix(accounts_membership): switch_account/2 and accept_invite/2 respect MEAL_PLANNER_TENANCY_V2 |
+| 3 | `a6cb3fb` | 3 | feat(auth): add observability logging to the tenancy auth surface |
+| 4 | `1cb1758` | 4 | refactor(auth): consolidate 4x duplicated token-minting logic into mint_token_pair/2 |
+| 5 | `d24b60d` | 5 | refactor(account_scope_helpers): delegate load_account/1 to AccountsMembership |
+| 6 | `ae3fa4e` | 6 | test(invite_accept_controller): cover unauthenticated access to the existing-User accept path |
+| 7 | `79cb3e9` | 7 | test(invite_controller): cover already_invited/already_a_member/invite_token_unknown error mappings |
+| 8 | `d7588ef` | 8 | fix(auth): explicitly validate JWT typ after decode_and_verify (security) |
+| 9 | `2300d97` | 8 (style follow-up) | style: wrap long lines introduced by the item-8 typ validation fix |
+
+## Out of scope (explicitly not touched, per launch prompt)
+
+The pre-existing `~19`-file `mix format` drift flagged in PR 3a's first
+pass (untouched, still uncommitted, still the orchestrator/maintainer's
+decision); `membership_controller.ex` / `account_lifecycle_controller.ex`
+Logger calls (not named in the item 3 launch prompt); the dead
+`:invalid_invitee` controller code path noted in item 7 (flagged, not
+removed — no instruction to remove it, and removing a defensive catch-all
+clause is a design decision, not a bug fix).
+
+## Final verification
+
+- `mix test`: **446 tests, 0 failures**, run 3× consecutively with no
+  flakiness (baseline 436 at session start, +10 net new tests).
+- `mix compile --warnings-as-errors --force`: clean.
+- Working tree: 9 commits landed on `feature/phase-a-pr-3a`, each scoped to
+  its item; no unrelated files touched.
