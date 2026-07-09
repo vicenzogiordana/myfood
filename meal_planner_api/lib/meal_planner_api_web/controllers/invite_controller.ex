@@ -101,7 +101,8 @@ defmodule MealPlannerApiWeb.InviteController do
     with [header] <- Plug.Conn.get_req_header(conn, "authorization"),
          "Bearer " <> raw_token <- header,
          {:ok, claims} <- Guardian.decode_and_verify(raw_token),
-         true <- Map.get(claims, "typ") in MealPlannerApiWeb.Plugs.VerifyTokenType.supported_typs(),
+         true <-
+           Map.get(claims, "typ") in MealPlannerApiWeb.Plugs.VerifyTokenType.supported_typs(),
          {:ok, user} <- Guardian.resource_from_claims(claims) do
       {:ok, user}
     else

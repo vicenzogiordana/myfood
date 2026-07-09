@@ -208,7 +208,10 @@ defmodule MealPlannerApiWeb.InviteAcceptControllerTest do
         |> json_response(200)
 
       refresh_token = register_body["refresh_token"]
-      {:ok, refresh_claims} = Guardian.decode_and_verify(refresh_token, %{}, token_type: "refresh")
+
+      {:ok, refresh_claims} =
+        Guardian.decode_and_verify(refresh_token, %{}, token_type: "refresh")
+
       assert refresh_claims["typ"] == "refresh"
 
       {:ok, %{token: plaintext}} =
