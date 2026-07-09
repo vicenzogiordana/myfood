@@ -13,10 +13,10 @@ defmodule MealPlannerApiWeb.Controllers.AccountScopeHelpers do
   import Phoenix.Controller, only: [json: 2]
 
   alias MealPlannerApi.Accounts, as: AccountsContext
+  alias MealPlannerApi.AccountsMembership
   alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Accounts.Account
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
-  alias MealPlannerApi.Repo
   alias MealPlannerApi.Services.SubscriptionService
   alias Plug.Conn
 
@@ -25,20 +25,14 @@ defmodule MealPlannerApiWeb.Controllers.AccountScopeHelpers do
   :account_not_found}` for a malformed id or a missing row — callers
   MUST render this as `404 account_not_found` (no existence leak, per
   `specs/invite-and-accept.md` §"Membership roster").
+
+  Delegates to `AccountsMembership.load_account/1` (post-review fix pass
+  item 5 — was a line-for-line duplicate of that pre-existing private
+  function).
   """
   @spec load_account(String.t()) :: {:ok, Account.t()} | {:error, :account_not_found}
-  def load_account(account_id) when is_binary(account_id) do
-    case Ecto.UUID.cast(account_id) do
-      {:ok, uuid} ->
-        case Repo.get(Account, uuid) do
-          %Account{} = account -> {:ok, account}
-          nil -> {:error, :account_not_found}
-        end
-
-      :error ->
-        {:error, :account_not_found}
-    end
-  end
+  def load_account(account_id) when is_binary(account_id),
+    do: AccountsMembership.load_account(account_id)
 
   def load_account(_), do: {:error, :account_not_found}
 

@@ -439,7 +439,17 @@ defmodule MealPlannerApi.AccountsMembership do
     end
   end
 
-  defp load_account(account_id) do
+  @doc """
+  Loads an `Account` by its (string) id. Returns `{:error,
+  :account_not_found}` for a malformed id or a missing row.
+
+  Public (post-review fix pass item 5) so
+  `MealPlannerApiWeb.Controllers.AccountScopeHelpers.load_account/1` can
+  delegate here instead of duplicating the same
+  `Ecto.UUID.cast/1` → `Repo.get/2` → error-tuple shape.
+  """
+  @spec load_account(String.t()) :: {:ok, Account.t()} | {:error, :account_not_found}
+  def load_account(account_id) do
     case Ecto.UUID.cast(account_id) do
       {:ok, uuid} ->
         case Repo.get(Account, uuid) do
