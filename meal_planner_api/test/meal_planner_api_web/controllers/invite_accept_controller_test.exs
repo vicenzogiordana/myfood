@@ -124,6 +124,50 @@ defmodule MealPlannerApiWeb.InviteAcceptControllerTest do
 
       assert json_response(conn, 410)["error"] == "invite_token_expired"
     end
+
+    # Post-review fix pass, item 6: this route is deliberately OUTSIDE the
+    # `:auth` pipeline (per its own moduledoc) — `resolve_invitee/2`'s own
+    # Bearer-header handling is the ONLY thing preventing unauthenticated
+    # access to the "existing User accepts" path. No test previously
+    # exercised a request with no/invalid Authorization header and an
+    # empty body.
+    test "no Authorization header and an empty body returns 401 unauthorized", %{conn: conn} do
+      owner =
+        user_with_memberships(%{email: "owner_accept_noauth@example.com"}, [
+          {%{plan: :family_4, name: "Family Accept NoAuth"}, :owner}
+        ])
+
+      [owner_membership] = owner.memberships
+      account = owner_membership.account
+
+      {:ok, %{token: plaintext}} =
+        AccountsMembership.invite(account, owner_membership, "noauth@example.com")
+
+      conn = post(conn, "/api/invites/#{plaintext}/accept", %{})
+
+      assert json_response(conn, 401)["error"] == "unauthorized"
+    end
+
+    test "an invalid (malformed) Authorization header and an empty body returns 401 unauthorized",
+         %{conn: conn} do
+      owner =
+        user_with_memberships(%{email: "owner_accept_badauth@example.com"}, [
+          {%{plan: :family_4, name: "Family Accept BadAuth"}, :owner}
+        ])
+
+      [owner_membership] = owner.memberships
+      account = owner_membership.account
+
+      {:ok, %{token: plaintext}} =
+        AccountsMembership.invite(account, owner_membership, "badauth@example.com")
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer not-a-real-token")
+        |> post("/api/invites/#{plaintext}/accept", %{})
+
+      assert json_response(conn, 401)["error"] == "unauthorized"
+    end
   end
 
   # Post-review fix pass, item 2: `accept_invite/2` must consult the same
