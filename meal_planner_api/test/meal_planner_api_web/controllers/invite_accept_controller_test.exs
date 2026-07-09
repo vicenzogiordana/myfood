@@ -182,6 +182,47 @@ defmodule MealPlannerApiWeb.InviteAcceptControllerTest do
     end
   end
 
+  # Post-review fix pass, item 8 (security): Guardian's `token_type:`
+  # option is never actually checked by Guardian at decode time — without
+  # an explicit `claims["typ"] in ["access", "access_v2"]` assertion in
+  # `resolve_invitee/2`, a `refresh` token presented as a Bearer header
+  # would authenticate the "existing User accepts" path.
+  describe "Bearer token typ validation (post-review fix, item 8)" do
+    test "a refresh token used as Bearer is treated as unauthenticated", %{conn: conn} do
+      owner =
+        user_with_memberships(%{email: "owner_accept_reftyp@example.com"}, [
+          {%{plan: :family_4, name: "Family Accept RefTyp"}, :owner}
+        ])
+
+      [owner_membership] = owner.memberships
+      account = owner_membership.account
+
+      register_body =
+        conn
+        |> post("/api/auth/password", %{
+          "mode" => "register",
+          "email" => "invitee_reftyp@example.com",
+          "password" => "supersecret123",
+          "name" => "Invitee RefTyp"
+        })
+        |> json_response(200)
+
+      refresh_token = register_body["refresh_token"]
+      {:ok, refresh_claims} = Guardian.decode_and_verify(refresh_token, %{}, token_type: "refresh")
+      assert refresh_claims["typ"] == "refresh"
+
+      {:ok, %{token: plaintext}} =
+        AccountsMembership.invite(account, owner_membership, "invitee_reftyp@example.com")
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> refresh_token)
+        |> post("/api/invites/#{plaintext}/accept", %{})
+
+      assert json_response(conn, 401)["error"] == "unauthorized"
+    end
+  end
+
   # Post-review fix pass, item 2: `accept_invite/2` must consult the same
   # `MEAL_PLANNER_TENANCY_V2` flag `auth_controller.ex` uses, instead of
   # unconditionally minting `access_v2` regardless of the flag.

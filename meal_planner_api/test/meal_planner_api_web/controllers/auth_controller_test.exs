@@ -414,4 +414,36 @@ defmodule MealPlannerApiWeb.AuthControllerTest do
       refute Map.has_key?(refreshed_claims, "membership_id")
     end
   end
+
+  # ----------------------------------------------------------------------
+  # Post-review fix pass, item 8 (security)
+  # ----------------------------------------------------------------------
+  #
+  # Guardian's `token_type:` option at `decode_and_verify` time is NEVER
+  # actually checked by Guardian itself — it is only consumed at ENCODE
+  # time. Without an explicit `claims["typ"] == "refresh"` assertion,
+  # any validly-signed `access` or `access_v2` token could be POSTed as
+  # `refresh_token` and would be accepted, minting a fresh long-lived
+  # refresh+access pair from a short-lived access token.
+  describe "refresh token typ validation (post-review fix, item 8)" do
+    test "an access token posted as refresh_token is rejected", %{conn: conn} do
+      register_body =
+        conn
+        |> post("/api/auth/password", %{
+          "mode" => "register",
+          "email" => "access_as_refresh@myfood.local",
+          "password" => "supersecret123",
+          "name" => "Access As Refresh"
+        })
+        |> json_response(200)
+
+      access_token = register_body["access_token"]
+      {:ok, access_claims} = Guardian.decode_and_verify(access_token)
+      assert access_claims["typ"] == "access"
+
+      conn = post(conn, "/api/auth/refresh", %{"refresh_token" => access_token})
+
+      assert json_response(conn, 401)["error"] == "invalid_refresh_token"
+    end
+  end
 end

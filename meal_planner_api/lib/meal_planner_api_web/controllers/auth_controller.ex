@@ -105,9 +105,18 @@ defmodule MealPlannerApiWeb.AuthController do
   # silent re-scoping in either direction, independent of the current
   # `MEAL_PLANNER_TENANCY_V2` flag value at refresh time. The flag only
   # controls issuance on `password/2`; `refresh/2` never consults it.
+  #
+  # Post-review fix pass, item 8 (security): Guardian's `token_type:`
+  # option passed to `decode_and_verify/3` is NEVER actually checked by
+  # Guardian itself — `token_type:` is only consumed at ENCODE time by
+  # `set_type/3`. Without the explicit `claims["typ"] == "refresh"`
+  # assertion below, any validly-signed `access`/`access_v2` token could
+  # be POSTed here as `refresh_token` and would be accepted, minting a
+  # fresh long-lived refresh+access pair from a leaked short-lived access
+  # token.
   def refresh(conn, %{"refresh_token" => refresh_token}) do
     case Guardian.decode_and_verify(refresh_token, %{}, token_type: "refresh") do
-      {:ok, claims} ->
+      {:ok, %{"typ" => "refresh"} = claims} ->
         case reissue_from_refresh_claims(conn, claims) do
           {:ok, new_access_token, new_refresh_token} ->
             json(conn, %{
@@ -129,6 +138,13 @@ defmodule MealPlannerApiWeb.AuthController do
             |> put_status(:unauthorized)
             |> json(%{error: "invalid_refresh_token"})
         end
+
+      {:ok, %{"typ" => other_typ}} ->
+        Logger.warning("refresh token rejected: wrong typ=#{inspect(other_typ)}")
+
+        conn
+        |> put_status(:unauthorized)
+        |> json(%{error: "invalid_refresh_token"})
 
       {:error, reason} ->
         Logger.warning("refresh token decode_and_verify failed reason=#{inspect(reason)}")

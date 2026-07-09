@@ -91,10 +91,17 @@ defmodule MealPlannerApiWeb.InviteController do
   # optional Authorization header (manual decode, NOT the `:auth`
   # pipeline, since this route must also serve unauthenticated new
   # Users).
+  #
+  # Post-review fix pass, item 8 (security): Guardian's
+  # `decode_and_verify/1` never checks `typ` on its own — without the
+  # explicit `claims["typ"] in supported_typs()` assertion below, a
+  # `refresh`-typed token presented as this Bearer header would
+  # authenticate the caller just like a real access token.
   defp resolve_invitee(conn, _params) do
     with [header] <- Plug.Conn.get_req_header(conn, "authorization"),
          "Bearer " <> raw_token <- header,
          {:ok, claims} <- Guardian.decode_and_verify(raw_token),
+         true <- Map.get(claims, "typ") in MealPlannerApiWeb.Plugs.VerifyTokenType.supported_typs(),
          {:ok, user} <- Guardian.resource_from_claims(claims) do
       {:ok, user}
     else

@@ -23,6 +23,16 @@ defmodule MealPlannerApiWeb.Plugs.VerifyTokenType do
 
   @supported_typs ~w(access access_v2)
 
+  @doc """
+  The list of `typ` claim values accepted as authenticated access tokens.
+  Exposed (post-review fix pass item 8) so other call sites that decode
+  a Bearer token OUTSIDE the `:auth` pipeline — e.g.
+  `InviteController.resolve_invitee/2` — can validate `typ` against the
+  same canonical list instead of duplicating it.
+  """
+  @spec supported_typs() :: [String.t()]
+  def supported_typs, do: @supported_typs
+
   @impl true
   def init(opts), do: opts
 
