@@ -4,6 +4,7 @@ defmodule MealPlannerApiWeb.InviteAcceptControllerTest do
   import MealPlannerApi.FactoryHelpers
 
   alias MealPlannerApi.AccountsMembership
+  alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Repo
 
@@ -122,6 +123,49 @@ defmodule MealPlannerApiWeb.InviteAcceptControllerTest do
         })
 
       assert json_response(conn, 410)["error"] == "invite_token_expired"
+    end
+  end
+
+  # Post-review fix pass, item 2: `accept_invite/2` must consult the same
+  # `MEAL_PLANNER_TENANCY_V2` flag `auth_controller.ex` uses, instead of
+  # unconditionally minting `access_v2` regardless of the flag.
+  describe "tenancy_v2_only flag (post-review fix)" do
+    setup do
+      previous = Application.get_env(:meal_planner_api, :tenancy_v2_only)
+
+      on_exit(fn ->
+        Application.put_env(:meal_planner_api, :tenancy_v2_only, previous)
+      end)
+
+      :ok
+    end
+
+    test "new User accept mints access (not access_v2) when the flag is off", %{conn: conn} do
+      owner =
+        user_with_memberships(%{email: "owner_accept_flagoff@example.com"}, [
+          {%{plan: :family_4, name: "Family Accept FlagOff"}, :owner}
+        ])
+
+      [owner_membership] = owner.memberships
+      account = owner_membership.account
+
+      {:ok, %{token: plaintext}} =
+        AccountsMembership.invite(account, owner_membership, "flagoff_new@example.com")
+
+      Application.put_env(:meal_planner_api, :tenancy_v2_only, false)
+
+      body =
+        conn
+        |> post("/api/invites/#{plaintext}/accept", %{
+          "name" => "Flag Off New",
+          "password" => "supersecret123"
+        })
+        |> json_response(200)
+
+      {:ok, claims} = Guardian.decode_and_verify(body["access_token"])
+
+      assert claims["typ"] == "access"
+      refute Map.has_key?(claims, "membership_id")
     end
   end
 end

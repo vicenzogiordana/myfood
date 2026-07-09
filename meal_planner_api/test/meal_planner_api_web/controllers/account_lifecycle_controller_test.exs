@@ -3,6 +3,7 @@ defmodule MealPlannerApiWeb.AccountLifecycleControllerTest do
 
   import MealPlannerApi.FactoryHelpers
 
+  alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Repo
 
@@ -90,6 +91,45 @@ defmodule MealPlannerApiWeb.AccountLifecycleControllerTest do
         |> post("/api/auth/switch-account", %{"membership_id" => suspended_membership.id})
 
       assert json_response(conn, 409)["error"] == "membership_not_active"
+    end
+  end
+
+  # Post-review fix pass, item 2: `switch_account/2` must consult the
+  # same `MEAL_PLANNER_TENANCY_V2` flag `auth_controller.ex` uses, instead
+  # of unconditionally minting `access_v2` regardless of the flag.
+  describe "tenancy_v2_only flag (post-review fix)" do
+    setup do
+      previous = Application.get_env(:meal_planner_api, :tenancy_v2_only)
+
+      on_exit(fn ->
+        Application.put_env(:meal_planner_api, :tenancy_v2_only, previous)
+      end)
+
+      :ok
+    end
+
+    test "switch_account mints access (not access_v2) when the flag is off", %{conn: conn} do
+      user =
+        user_with_memberships(%{email: "switcher_flagoff@example.com"}, [
+          {%{plan: :family_4, name: "Family Switch FlagOff 1"}, :owner},
+          {%{plan: :individual, name: "Family Switch FlagOff 2"}, :owner}
+        ])
+
+      [membership_1, membership_2] = user.memberships
+      token = issue_access_v2_token(user, membership_1)
+
+      Application.put_env(:meal_planner_api, :tenancy_v2_only, false)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> post("/api/auth/switch-account", %{"membership_id" => membership_2.id})
+
+      body = json_response(conn, 200)
+      {:ok, claims} = Guardian.decode_and_verify(body["access_token"])
+
+      assert claims["typ"] == "access"
+      refute Map.has_key?(claims, "membership_id")
     end
   end
 end

@@ -279,6 +279,14 @@ defmodule MealPlannerApi.AccountsMembershipTest do
 
   describe "accept_invite/2" do
     test "existing User acceptance flips :invited → :active and yields fresh claims" do
+      # Post-review fix pass, item 2: `build_response_claims/3` now
+      # consults `:meal_planner_api, :tenancy_v2_only` (same flag
+      # `auth_controller.ex` uses) before minting `access_v2` — flip it on
+      # for this test so the assertions below reflect the flag-on path.
+      previous = Application.get_env(:meal_planner_api, :tenancy_v2_only)
+      on_exit(fn -> Application.put_env(:meal_planner_api, :tenancy_v2_only, previous) end)
+      Application.put_env(:meal_planner_api, :tenancy_v2_only, true)
+
       invitee =
         user_with_memberships(
           %{email: "invitee@example.com", name: "Invitee"},
@@ -549,6 +557,14 @@ defmodule MealPlannerApi.AccountsMembershipTest do
 
   describe "switch_account/2" do
     test "multi-familia User can switch to a second :active membership and yield fresh claims" do
+      # Post-review fix pass, item 2: `build_response_claims/3` now
+      # consults `:meal_planner_api, :tenancy_v2_only` (same flag
+      # `auth_controller.ex` uses) before minting `access_v2` — flip it on
+      # for this test so the assertions below reflect the flag-on path.
+      previous = Application.get_env(:meal_planner_api, :tenancy_v2_only)
+      on_exit(fn -> Application.put_env(:meal_planner_api, :tenancy_v2_only, previous) end)
+      Application.put_env(:meal_planner_api, :tenancy_v2_only, true)
+
       user =
         user_with_memberships(
           %{email: "switch@example.com", name: "Switch User"},

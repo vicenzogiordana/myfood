@@ -12,6 +12,7 @@ defmodule MealPlannerApi.AccountsMembership do
   `multi-familia-switch-account.md`, and `guardian-jwt-claims.md`.
   """
 
+  alias MealPlannerApi.Accounts
   alias MealPlannerApi.Persistence.Accounts.Account
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
@@ -315,12 +316,31 @@ defmodule MealPlannerApi.AccountsMembership do
          user: fresh_user,
          account: account,
          membership: membership,
-         claims: claims_for(fresh_user, membership)
+         claims: build_response_claims(fresh_user, account, membership)
        }}
     end
   end
 
   def switch_account(_user, _id), do: {:error, :membership_not_found}
+
+  # Post-review fix pass, item 2: `switch_account/2` and `accept_invite/2`
+  # used to call `claims_for/2` directly, unconditionally minting
+  # `access_v2` regardless of `MEAL_PLANNER_TENANCY_V2` — unlike
+  # `auth_controller.ex`'s `password/2`, which gates issuance through the
+  # same flag (see its private `issuance_typ/1`). This made the flag not a
+  # real killswitch for these two flows. Mirrors `auth_controller.ex`'s
+  # `tenancy_v2_only?/0` check exactly (same config key).
+  defp build_response_claims(user, account, membership) do
+    if tenancy_v2_only?() do
+      claims_for(user, membership)
+    else
+      Accounts.claims_for(user, account)
+    end
+  end
+
+  defp tenancy_v2_only? do
+    Application.get_env(:meal_planner_api, :tenancy_v2_only, false)
+  end
 
   defp load_active_membership(uuid) do
     case Repo.get(AccountMembership, uuid) do
@@ -397,7 +417,7 @@ defmodule MealPlannerApi.AccountsMembership do
                  user: invitee,
                  account: account,
                  membership: consumed,
-                 claims: claims_for(invitee, consumed)
+                 claims: build_response_claims(invitee, account, consumed)
                }}
             else
               {:error, reason} -> {:error, reason}
