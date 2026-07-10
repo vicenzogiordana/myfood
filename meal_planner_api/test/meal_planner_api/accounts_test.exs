@@ -174,6 +174,143 @@ defmodule MealPlannerApi.AccountsTest do
   end
 
   # ----------------------------------------------------------------------
+  # Post-PR-3b second re-review — CRITICAL item 1: TOCTOU race in
+  # first_member_role/1 allows two :owner memberships on one Account.
+  #
+  # first_member_role/1 used to do an UNLOCKED `Repo.exists?` check
+  # ("does this Account have any membership yet?") and only afterwards,
+  # in a separate step, insert the new membership. Two concurrent
+  # find_or_create_identity/1 calls for two DISTINCT external users
+  # sharing the same (already-provisioned, e.g. a family account set up
+  # ahead of time with no members yet) `account_id` could both observe
+  # "no existing membership" before either committed, both getting
+  # inserted as :owner — a privilege-escalation bug, since remove_member/3
+  # and invite/3 both gate on actor.role == :owner.
+  #
+  # The fix takes a `FOR UPDATE` row lock on the Account row (same
+  # pattern as `AccountsMembership.lock_account_for_invite/1`) as the
+  # FIRST statement of the enclosing transaction — see
+  # `Accounts.upsert_identity_transaction/4`'s `:account_lock` step and
+  # its doc comment for why the lock must run BEFORE `:user`'s insert
+  # (taking it later, right at the `Repo.exists?` check, is provably
+  # correct in isolation but deadlocks — see apply-progress.md).
+  #
+  # Honesty note on this test's strength / why it needs real (non-sandboxed)
+  # connections: Ecto's SQL Sandbox isolates each test's writes inside a
+  # transaction that is rolled back at the end of the test (that's what
+  # makes `async: false`/`true` tests hermetic). Under the default
+  # sandboxed checkout, each spawned `Task` automatically gets its OWN
+  # per-process sandbox transaction (verified manually — see
+  # apply-progress.md) that can NEVER see another process's uncommitted
+  # writes, INCLUDING this test's own setup fixtures. That is a real
+  # concurrency (separate connections/backends genuinely racing), but it
+  # can never observe a REAL row-lock conflict between racers because
+  # nothing ever really commits.
+  #
+  # `Ecto.Adapters.SQL.Sandbox.allow/3` (the standard fix for sharing
+  # in-progress test data across processes) forces every process onto
+  # the SAME physical connection — which serializes all SQL onto one
+  # backend and makes it structurally impossible to reproduce two
+  # transactions racing on a `FOR UPDATE` lock, exactly the behavior this
+  # test exists to exercise.
+  #
+  # So this test explicitly checks out REAL, non-sandboxed connections
+  # (`sandbox: false`) for the setup phase AND for every racer task, so
+  # writes are genuinely committed and visible across connections, and
+  # manually cleans up every row it creates in `on_exit` (nothing here
+  # auto-rolls-back). This fires N (8) genuinely concurrent
+  # `find_or_create_identity/1` calls at an Account that already exists
+  # (so `upsert_account/3` takes its UPDATE branch, not INSERT — the
+  # INSERT branch is a distinct, out-of-scope race, see apply-progress.md)
+  # but has zero memberships, for N distinct new users.
+  #
+  # Because Postgres's `FOR UPDATE` lock is a hard serialization
+  # primitive (not a probabilistic mitigation), this test is expected to
+  # pass deterministically, every run, once the fix is in place. This is
+  # not a theoretical claim: while building this fix we ran this exact
+  # test against the UNFIXED code and it reliably reproduced ALL 8
+  # racers becoming `:owner` (not just "more than one" — every run we
+  # tried); against the fixed code, we ran it 30+ times across different
+  # `--seed` values with zero failures. See apply-progress.md for the
+  # full RED/GREEN log, including a genuine deadlock (Postgres 40P01)
+  # this same investigation surfaced and fixed (lock ordering relative
+  # to the `:user` step's FK-triggered `FOR KEY SHARE`).
+  # ----------------------------------------------------------------------
+  describe "find_or_create_identity/1 concurrent membership race (first_member_role/1)" do
+    test "at most one concurrent joiner becomes :owner when N distinct users race to join the same account" do
+      # This test uses REAL (non-sandboxed) connections — see the
+      # module-doc comment above for why. Nothing here auto-rolls-back,
+      # so every row is cleaned up manually below. The module `setup`
+      # already checked out a sandboxed connection for this process; swap
+      # it for a real one.
+      :ok = Sandbox.checkin(Repo)
+      :ok = Sandbox.checkout(Repo, sandbox: false)
+      # The plan fixtures inserted by this file's module-level `setup`
+      # only committed inside the (now abandoned) sandboxed connection —
+      # re-run it for real so the new non-sandboxed connection (and every
+      # racer's own non-sandboxed connection below) can see them.
+      :ok = MealPlannerApi.SubscriptionPlanFixtures.ensure_plans!()
+
+      shared_external_account_id = "acct_concurrency_race_#{Ecto.UUID.generate()}"
+
+      # Seed the Account row via one synchronous call (so upsert_account/3
+      # hits the UPDATE branch, not the INSERT branch, for every racer
+      # below), then delete the seed membership so the Account exists but
+      # has ZERO memberships when the race starts — mirrors a
+      # pre-provisioned family account whose members all log in for the
+      # first time around the same moment.
+      {:ok, %{account: account}} =
+        Accounts.find_or_create_identity(%{
+          "user_id" => "u_race_seed_throwaway",
+          "account_id" => shared_external_account_id
+        })
+
+      Repo.delete_all(from(m in AccountMembership, where: m.account_id == ^account.id))
+
+      on_exit(fn ->
+        :ok = Sandbox.checkout(Repo, sandbox: false)
+        Repo.delete_all(from(m in AccountMembership, where: m.account_id == ^account.id))
+        Repo.delete_all(from(u in PersistenceUser, where: u.account_id == ^account.id))
+        Repo.delete_all(from(a in PersistenceAccount, where: a.id == ^account.id))
+        Sandbox.checkin(Repo)
+      end)
+
+      racer_user_ids = for n <- 1..8, do: "u_race_#{n}"
+
+      tasks =
+        Enum.map(racer_user_ids, fn user_id ->
+          Task.async(fn ->
+            :ok = Sandbox.checkout(Repo, sandbox: false)
+
+            try do
+              Accounts.find_or_create_identity(%{
+                "user_id" => user_id,
+                "account_id" => shared_external_account_id
+              })
+            after
+              Sandbox.checkin(Repo)
+            end
+          end)
+        end)
+
+      results = Enum.map(tasks, &Task.await(&1, 10_000))
+
+      assert Enum.all?(results, &match?({:ok, _}, &1)),
+             "every racer should successfully obtain an identity: #{inspect(results)}"
+
+      memberships =
+        Repo.all(from(m in AccountMembership, where: m.account_id == ^account.id))
+
+      owners = Enum.filter(memberships, &(&1.role == :owner))
+      members = Enum.filter(memberships, &(&1.role == :member))
+
+      assert length(memberships) == length(racer_user_ids)
+      assert length(owners) == 1, "expected exactly one :owner, got: #{inspect(owners)}"
+      assert length(members) == length(racer_user_ids) - 1
+    end
+  end
+
+  # ----------------------------------------------------------------------
   # Post-PR-3b re-review — CRITICAL item 3: find_or_create_identity/1's 3
   # upserts (upsert_account/3, upsert_user/3, upsert_membership/2) must be
   # transactional.

@@ -59,6 +59,25 @@ defmodule MealPlannerApi.Accounts do
   defp upsert_identity_transaction(db_account_id, db_user_id, plan, params) do
     transaction_result =
       Multi.new()
+      # Post-second-review fix (CRITICAL item 1): the Account row lock
+      # (see `first_member_role/1` below) MUST be taken as the very FIRST
+      # statement in this transaction, before `:user`'s insert.
+      # `AccountMembership.changeset/2`'s `foreign_key_constraint(:account_id)`
+      # (and `User`'s own FK to `account_id`) make Postgres implicitly
+      # take a weak `FOR KEY SHARE` lock on the referenced Account row
+      # whenever `:user` or `:membership` inserts a row pointing at it. If
+      # the exclusive `FOR UPDATE` lock were only taken later (inside
+      # `:membership`), two concurrent transactions could each already be
+      # holding the OTHER's needed `FOR KEY SHARE` (from their own `:user`
+      # insert) by the time both try to upgrade to `FOR UPDATE` — a
+      # textbook mutual lock-upgrade deadlock (Postgres error 40P01),
+      # verified empirically while building this fix (see
+      # apply-progress.md). Locking first avoids the upgrade entirely: a
+      # second transaction blocks on `FOR KEY SHARE` (its `:user` step)
+      # before it ever gets to request its own `FOR UPDATE`.
+      |> Multi.run(:account_lock, fn _repo, _changes ->
+        {:ok, lock_account_row(db_account_id)}
+      end)
       |> Multi.run(:account, fn _repo, _changes -> upsert_account(db_account_id, plan, params) end)
       |> Multi.run(:user, fn _repo, _changes -> upsert_user(db_user_id, db_account_id, params) end)
       |> Multi.run(:membership, fn _repo, _changes ->
@@ -465,11 +484,54 @@ defmodule MealPlannerApi.Accounts do
   # have. The first person to join an Account is its `:owner`; everyone
   # after that joins as a `:member` — mirrors the old (removed)
   # synthesized struct's `role: user.role || :member` default.
+  # Post-second-review fix (CRITICAL item 1): this used to do an
+  # UNLOCKED `Repo.exists?` check, then — in a separate step back in
+  # `upsert_membership/2` — insert the new membership. Under Postgres's
+  # default READ COMMITTED isolation, two concurrent transactions racing
+  # to join the SAME Account (two distinct users, e.g. a pre-provisioned
+  # family account whose members log in for the first time around the
+  # same moment — see `upsert_account/3`'s doc: `db_account_id` is a
+  # stable hash of the external `account_id`, so this Account already
+  # exists with the SAME id for every racer) could both observe "no
+  # existing membership" before either committed, both getting inserted
+  # as `:owner`.
+  #
+  # Fix: `upsert_identity_transaction/4` now takes a `FOR UPDATE` row lock
+  # on the Account row (see `lock_account_row/1`, same pattern as
+  # `AccountsMembership.lock_account_for_invite/1`) as the FIRST statement
+  # of the enclosing transaction — BEFORE this exists? check ever runs.
+  # The lock is held until that transaction commits or rolls back: a
+  # second concurrent transaction blocks on ITS OWN lock attempt until the
+  # first fully commits, and then correctly observes the first membership
+  # already exists.
+  #
+  # The lock is intentionally NOT (re-)acquired here, right before the
+  # exists? check, even though that reads as the more "obvious" place for
+  # it: `:user`'s insert (the Multi step immediately before this one) has
+  # a `foreign_key_constraint(:account_id)`, which makes Postgres take an
+  # implicit weak `FOR KEY SHARE` lock on this same Account row. Two
+  # concurrent transactions each already holding the OTHER's needed `FOR
+  # KEY SHARE` (from their own `:user` step) and only THEN both trying to
+  # upgrade to `FOR UPDATE` here is a textbook mutual lock-upgrade
+  # deadlock (Postgres error 40P01) — reproduced empirically while
+  # building this fix (see apply-progress.md). Locking first, before
+  # `:user` runs for anyone, avoids the upgrade entirely.
   defp first_member_role(db_account_id) do
     if Repo.exists?(from(m in AccountMembership, where: m.account_id == ^db_account_id)) do
       :member
     else
       :owner
+    end
+  end
+
+  defp lock_account_row(db_account_id) do
+    case Ecto.UUID.cast(db_account_id) do
+      {:ok, uuid} ->
+        from(a in PersistenceAccount, where: a.id == ^uuid, lock: "FOR UPDATE")
+        |> Repo.one()
+
+      _ ->
+        nil
     end
   end
 
