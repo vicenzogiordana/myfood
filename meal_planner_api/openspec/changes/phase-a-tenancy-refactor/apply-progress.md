@@ -1368,3 +1368,112 @@ clause is a design decision, not a bug fix).
 - `mix compile --warnings-as-errors --force`: clean.
 - Working tree: 9 commits landed on `feature/phase-a-pr-3a`, each scoped to
   its item; no unrelated files touched.
+
+---
+
+# PR 3a — post-review fix pass, second pass (2 new CRITICAL crash risks)
+
+> **Change**: `phase-a-tenancy-refactor`
+> **Branch**: `feature/phase-a-pr-3a`
+> **Apply mode**: `strict_tdd: true`, `test_runner: mix test`
+> **Status**: ✅ 2 / 2 items complete
+> **Date**: 2026-07-09
+
+## Goal recap
+
+A `review-resilience` pass on this branch's first post-review fix pass (9
+commits ending `7e06acb`) found 2 new CRITICAL crash risks introduced
+alongside otherwise-correct fixes. Both are fixed here, following strict
+RED → GREEN → REFACTOR.
+
+## Summary
+
+- **2 / 2 items complete.**
+- **2 commits** on `feature/phase-a-pr-3a` (one per item).
+- Baseline at session start: **446 tests, 0 failures**. Final: **448
+  tests, 0 failures** (+2 net new tests, one per item).
+- `mix compile --warnings-as-errors --force`: clean.
+- Full suite run 3× consecutively after the last commit — 448/0 every
+  time, no flakiness.
+
+## TDD Cycle Evidence
+
+| Item | RED | GREEN | REFACTOR | Notes |
+|---|---|---|---|---|
+| 1. `refresh/2` `CaseClauseError` on claims missing `typ` | ✅ new test raised `CaseClauseError` (`{:ok, %{"sub" => ...}}` matched none of the 3 clauses) | ✅ added catch-all `{:ok, claims} when is_map(claims)` clause → 401 | — | Minted a genuinely `typ`-less token via the lower-level `Guardian.Token.Jwt.create_token/3` (bypasses `build_claims/3`'s `set_type/3`, which always injects a `typ` on the normal `encode_and_sign/3` path). |
+| 2. `accept/2` crashes on non-atom `Ecto.Changeset` error reason | ✅ new HTTP test raised `ArgumentError: not an atom` from `Atom.to_string(%Ecto.Changeset{})` | ✅ added explicit `{:error, %Ecto.Changeset{}}` clause → 409 `already_a_member` | — | Reproduced via 2 independent `:invited` rows for the same `(account_id, user_id)` pair (created directly through `InviteService.create_invite_row/2`, bypassing `AccountsMembership.invite/3`'s app-layer `:already_invited` guard) — accepting the second after the first already flipped to `:active` fires the `account_memberships_active_account_user_unique_index` partial unique constraint. |
+
+## Item-by-item detail
+
+### Item 1 — `refresh/2` `CaseClauseError` on claims missing `typ` entirely
+
+- **Files**: `lib/meal_planner_api_web/controllers/auth_controller.ex`,
+  `test/meal_planner_api_web/controllers/auth_controller_test.exs`.
+- **Bug**: the `case Guardian.decode_and_verify(...) do` in `refresh/2` had
+  exactly 3 clauses — `{:ok, %{"typ" => "refresh"} = claims}`,
+  `{:ok, %{"typ" => other_typ}}`, `{:error, reason}`. `%{"typ" => other_typ}`
+  only matches a map that HAS a `"typ"` key (any value); a claims map with
+  NO `"typ"` key at all matches neither `:ok` clause, raising
+  `CaseClauseError` (500) instead of the intended fail-closed 401 — and
+  bypassing the `Logger.warning` observability the prior fix pass added
+  for exactly this kind of unexpected shape.
+- **Verified before assuming the gap**: confirmed via a failing test, not
+  just by reading — a normal `encode_and_sign/3` call can never produce
+  this shape because `Guardian.Token.Jwt.build_claims/3`'s `set_type/3`
+  always injects a `"typ"` claim if the caller's claims map doesn't
+  already carry one. To reproduce the gap, the test bypasses
+  `build_claims/3` entirely via the lower-level
+  `Guardian.Token.Jwt.create_token/3` (raw sign, no claim post-processing).
+- **Fix**: added a catch-all `{:ok, claims} when is_map(claims) -> ... 401
+  invalid_refresh_token` clause (with its own `Logger.warning`), matching
+  every other `typ`-reading site's `Map.get(claims, "typ", "access")`
+  fail-safe convention (`verify_token_type.ex`, `load_current_membership.ex`,
+  `load_current_membership_socket.ex`, `user_socket.ex`) instead of being
+  the sole crash-on-missing-key exception.
+
+### Item 2 — `accept/2` crashes on non-atom error reason from `Ecto.Changeset`
+
+- **Files**: `lib/meal_planner_api_web/controllers/invite_controller.ex`,
+  `test/meal_planner_api_web/controllers/invite_accept_controller_test.exs`.
+- **Bug**: the generic `{:error, reason} -> ... Atom.to_string(reason)`
+  clause in `accept/2` assumed `reason` is always an atom.
+  `AccountsMembership.accept_invite_with_lookup/2`'s `Repo.update/1` call
+  (flipping the membership to `:active`) can propagate
+  `{:error, %Ecto.Changeset{}}` from the
+  `account_memberships_active_account_user_unique_index` partial unique
+  constraint (`account_membership.ex:52-54`) — e.g. a retried/duplicate
+  invite, or a concurrent double-accept race. `Atom.to_string/1` on a
+  `%Ecto.Changeset{}` raises `ArgumentError`, turning a controlled 4xx
+  into an unhandled 500 that was also invisible to the observability
+  sweep (only the 3 known `:invite_token_*` reasons were logged).
+- **Test**: seeded 2 independent `:invited` `AccountMembership` rows for
+  the SAME `(account_id, user_id)` pair via `InviteService.create_invite_row/2`
+  called twice directly (the app-layer `AccountsMembership.invite/3`'s
+  `:already_invited` guard only stops a SECOND invite call — it does not
+  stop accepting two invites that were already both minted before either
+  was accepted). Accepted the first (200, flips to `:active`); accepted
+  the second — confirmed RED (`ArgumentError: not an atom` from
+  `Atom.to_string(%Ecto.Changeset{})`) before the fix, GREEN (`409
+  already_a_member`) after.
+- **Fix**: added an explicit `{:error, %Ecto.Changeset{} = changeset} ->`
+  clause before the generic atom-reason clause, logging
+  `changeset.errors` via `Logger.warning` and returning `409
+  already_a_member` — the same status code as the existing app-layer
+  `:already_a_member` check, since a duplicate accept is conceptually the
+  same outcome whether caught at the app layer or the DB constraint
+  layer.
+
+## Commits landed (chronological, this fix pass)
+
+| # | SHA | Item | Title |
+|---|-----|------|-------|
+| 1 | `fa1b453` | 1 | fix(auth): refresh/2 fails closed 401 on claims missing typ entirely |
+| 2 | `75e8218` | 2 | fix(invite_controller): handle Ecto.Changeset error reason in accept/2 |
+
+## Final verification
+
+- `mix test`: **448 tests, 0 failures**, run 3× consecutively with no
+  flakiness (baseline 446 at session start, +2 net new tests).
+- `mix compile --warnings-as-errors --force`: clean.
+- Working tree: 2 commits landed on `feature/phase-a-pr-3a`, each scoped to
+  its item; no unrelated files touched.
