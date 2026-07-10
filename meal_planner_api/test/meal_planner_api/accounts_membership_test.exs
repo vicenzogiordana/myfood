@@ -19,6 +19,7 @@ defmodule MealPlannerApi.AccountsMembershipTest do
   """
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
   import MealPlannerApi.FactoryHelpers
 
   alias Ecto.Adapters.SQL.Sandbox
@@ -741,7 +742,17 @@ defmodule MealPlannerApi.AccountsMembershipTest do
       [other_membership] = other_owner.memberships
       claims = %{"typ" => "access", "account_id" => to_string(other_membership.account_id)}
 
-      assert AccountsMembership.current_membership(user, claims) == nil
+      log =
+        capture_log(fn ->
+          assert AccountsMembership.current_membership(user, claims) == nil
+        end)
+
+      # Post-review fix (BLOCKER item 1): observability on the fail-closed
+      # denial path. Logs user_id + account_id for correlation, never the
+      # raw claims/token.
+      assert log =~ "legacy access token denied"
+      assert log =~ "user_id=#{user.id}"
+      assert log =~ "account_id=#{other_membership.account_id}"
     end
 
     test "returns nil for a legacy access claim after the membership row has been removed" do

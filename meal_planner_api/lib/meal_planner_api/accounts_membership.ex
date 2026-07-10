@@ -12,6 +12,8 @@ defmodule MealPlannerApi.AccountsMembership do
   `multi-familia-switch-account.md`, and `guardian-jwt-claims.md`.
   """
 
+  require Logger
+
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.Persistence.Accounts.Account
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
@@ -229,7 +231,21 @@ defmodule MealPlannerApi.AccountsMembership do
       account_id ->
         case Ecto.UUID.cast(account_id) do
           {:ok, uuid} ->
-            Repo.get_by(AccountMembership, user_id: user.id, account_id: uuid, status: :active)
+            case Repo.get_by(AccountMembership,
+                   user_id: user.id,
+                   account_id: uuid,
+                   status: :active
+                 ) do
+              nil ->
+                Logger.warning(
+                  "legacy access token denied: no active membership found user_id=#{user.id} account_id=#{uuid}"
+                )
+
+                nil
+
+              %AccountMembership{} = membership ->
+                membership
+            end
 
           _ ->
             nil

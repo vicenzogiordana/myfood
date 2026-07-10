@@ -22,6 +22,8 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
   The plug is read-only on the conn — it never mutates the User record.
   """
 
+  require Logger
+
   alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Repo
@@ -128,8 +130,15 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
   defp synthesize_legacy_membership(%{account_id: account_id, id: user_id}, _claims)
        when not is_nil(account_id) do
     case load_real_active_membership(user_id, account_id) do
-      %AccountMembership{} = membership -> {:ok, membership}
-      nil -> {:error, :membership_id_required}
+      %AccountMembership{} = membership ->
+        {:ok, membership}
+
+      nil ->
+        Logger.warning(
+          "legacy access token denied: no active membership found user_id=#{user_id} account_id=#{account_id}"
+        )
+
+        {:error, :membership_id_required}
     end
   end
 

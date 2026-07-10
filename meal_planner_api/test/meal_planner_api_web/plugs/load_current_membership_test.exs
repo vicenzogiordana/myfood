@@ -18,6 +18,7 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembershipTest do
   """
   use MealPlannerApiWeb.ConnCase, async: false
 
+  import ExUnit.CaptureLog
   import MealPlannerApi.FactoryHelpers
 
   alias MealPlannerApi.Auth.Guardian
@@ -110,15 +111,26 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembershipTest do
         "name" => user.name
       }
 
-      conn =
-        conn
-        |> Plug.Conn.put_private(:guardian_default_claims, legacy_claims)
-        |> Plug.Conn.assign(:default, user)
-        |> LoadCurrentMembership.call(%{})
+      log =
+        capture_log(fn ->
+          conn =
+            conn
+            |> Plug.Conn.put_private(:guardian_default_claims, legacy_claims)
+            |> Plug.Conn.assign(:default, user)
+            |> LoadCurrentMembership.call(%{})
 
-      assert conn.halted
-      assert conn.status == 401
-      assert json_response(conn, 401)["error"] == "membership_id_required"
+          assert conn.halted
+          assert conn.status == 401
+          assert json_response(conn, 401)["error"] == "membership_id_required"
+        end)
+
+      # Post-review fix (BLOCKER item 1): this fail-closed denial MUST be
+      # observable — without it, a mass lockout after a future regression
+      # would be undetectable until users complain. Asserts user_id +
+      # account_id are logged for correlation, NOT the raw token/claims.
+      assert log =~ "legacy access token denied"
+      assert log =~ "user_id=#{user.id}"
+      assert log =~ "account_id=#{account.id}"
     end
 
     test "access_v1 (legacy) token with a real active membership row returns the real row (no synthesis)",
@@ -342,7 +354,14 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembershipTest do
         }
       }
 
-      assert LoadCurrentMembershipSocket.membership_from_socket(socket) == nil
+      log =
+        capture_log(fn ->
+          assert LoadCurrentMembershipSocket.membership_from_socket(socket) == nil
+        end)
+
+      assert log =~ "legacy access token denied"
+      assert log =~ "user_id=#{user.id}"
+      assert log =~ "account_id=#{account.id}"
     end
 
     test "returns the real active membership row for an access_v1 socket (no synthesis)" do

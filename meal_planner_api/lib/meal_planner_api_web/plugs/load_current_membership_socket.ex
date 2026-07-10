@@ -20,6 +20,8 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket do
   `socket.assigns.current_membership` (Q8 — design §7).
   """
 
+  require Logger
+
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Repo
 
@@ -98,7 +100,17 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket do
   # `:active` row.
   defp synthesize_legacy_membership(%{account_id: account_id, id: user_id})
        when not is_nil(account_id) do
-    load_real_active_membership(user_id, account_id)
+    case load_real_active_membership(user_id, account_id) do
+      nil ->
+        Logger.warning(
+          "legacy access token denied: no active membership found user_id=#{user_id} account_id=#{account_id}"
+        )
+
+        nil
+
+      %AccountMembership{} = membership ->
+        membership
+    end
   end
 
   defp synthesize_legacy_membership(_), do: nil
