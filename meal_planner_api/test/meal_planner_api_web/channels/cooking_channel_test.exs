@@ -154,6 +154,18 @@ defmodule MealPlannerApiWeb.CookingChannelTest do
       assert_reply(ref, :error, %{reason: "missing_scheduled_meal_id"})
     end
 
+    test "malformed (non-UUID) scheduled_meal_id returns a clean error instead of crashing the channel",
+         %{account: account, token: token} do
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+      topic = "cooking:#{account.id}:malformed_meal_id_session"
+      {:ok, _reply, socket} = subscribe_and_join(socket, CookingChannel, topic)
+
+      ref = push(socket, "start_session", %{"scheduled_meal_id" => "not-a-uuid"})
+
+      assert_reply(ref, :error, %{reason: "invalid_meal_id"})
+    end
+
     test "cross-Account scheduled_meal_id is rejected with meal_not_in_account (task 3.11, RED per membership-scoped-channels spec)" do
       user =
         user_with_memberships(

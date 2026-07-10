@@ -1650,3 +1650,36 @@ before implementation.
   scope; no PR 3c is currently planned per the original 3-PR split, so
   whoever picks up tasks 3.14+ should re-read `tasks.md` §"PR strategy"
   and this section's "Risks / follow-ups" before starting.
+
+### PR 3b — post-review fix: CRITICAL crash bug in `CookingChannel.start_session`
+
+- **Found by**: a `review-resilience` pass over PR 3b's diff.
+- **Bug**: `handle_in("start_session", %{"scheduled_meal_id" => meal_id}, socket)`
+  guarded `meal_id` with `is_binary(meal_id)` only — no UUID-format check
+  — before calling
+  `PlanningRepo.get_scheduled_meal_for_account(membership.account_id, meal_id)`.
+  `ScheduledMeal.id` is `:binary_id`, so any well-formed-but-non-UUID string
+  (e.g. `"not-a-uuid"`) made Ecto raise `Ecto.Query.CastError` inside the
+  query, uncaught by the surrounding `case` — this crashed the channel
+  `GenServer` instead of replying `{:error, ...}` to the client.
+- **Fix**: wrapped the existing `case PlanningRepo.get_scheduled_meal_for_account/2 ...`
+  block in a `try/rescue`, matching the exact pattern already used by
+  `PlanningChannel.handle_in("confirm_proposal"/"reject_proposal", ...)`
+  (`rescue Ecto.Query.CastError -> {:reply, {:error, %{reason: ...}}, socket}`).
+  Reason string is `"invalid_meal_id"` — kept distinct from
+  `"meal_not_in_account"` (valid UUID, wrong Account) since they are
+  different failure modes a client needs to distinguish.
+- **TDD**: added
+  `test/meal_planner_api_web/channels/cooking_channel_test.exs` — "malformed
+  (non-UUID) scheduled_meal_id returns a clean error instead of crashing the
+  channel". Confirmed RED first: `mix test` on the new test alone reproduced
+  the exact crash (`** (Ecto.Query.CastError) ... value "not-a-uuid" cannot
+  be dumped to type :binary_id ...`, GenServer terminating). After the fix,
+  GREEN: `assert_reply(ref, :error, %{reason: "invalid_meal_id"})`.
+- **Files**: `lib/meal_planner_api_web/channels/cooking_channel.ex` (modified),
+  `test/meal_planner_api_web/channels/cooking_channel_test.exs` (extended,
+  +1 test).
+- **`mix test`**: 465 tests, 0 failures (was 464 before this fix; +1 new
+  test, no regressions).
+- **Commit**: `fix(channels): guard CookingChannel.start_session against
+  malformed scheduled_meal_id`.

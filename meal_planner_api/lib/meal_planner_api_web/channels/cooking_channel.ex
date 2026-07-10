@@ -41,19 +41,24 @@ defmodule MealPlannerApiWeb.CookingChannel do
     # Spec `membership-scoped-channels` §"handle_in with cross-Account entity
     # id": verify the entity id belongs to current_membership.account_id
     # BEFORE mutation/delegation.
-    case PlanningRepo.get_scheduled_meal_for_account(membership.account_id, meal_id) do
-      nil ->
-        {:reply, {:error, %{reason: "meal_not_in_account"}}, socket}
+    try do
+      case PlanningRepo.get_scheduled_meal_for_account(membership.account_id, meal_id) do
+        nil ->
+          {:reply, {:error, %{reason: "meal_not_in_account"}}, socket}
 
-      _meal ->
-        case CookingService.start_session(user, meal_id) do
-          {:ok, session} ->
-            push(socket, "session_started", session)
-            {:noreply, socket}
+        _meal ->
+          case CookingService.start_session(user, meal_id) do
+            {:ok, session} ->
+              push(socket, "session_started", session)
+              {:noreply, socket}
 
-          {:error, reason} ->
-            {:reply, {:error, %{reason: reason}}, socket}
-        end
+            {:error, reason} ->
+              {:reply, {:error, %{reason: reason}}, socket}
+          end
+      end
+    rescue
+      Ecto.Query.CastError ->
+        {:reply, {:error, %{reason: "invalid_meal_id"}}, socket}
     end
   end
 
