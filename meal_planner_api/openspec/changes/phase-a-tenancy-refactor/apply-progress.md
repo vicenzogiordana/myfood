@@ -1477,3 +1477,176 @@ RED → GREEN → REFACTOR.
 - `mix compile --warnings-as-errors --force`: clean.
 - Working tree: 2 commits landed on `feature/phase-a-pr-3a`, each scoped to
   its item; no unrelated files touched.
+
+## PR 3b — Channel sweep (tasks 3.9–3.13)
+
+**Branch**: `feature/phase-a-pr-3b`, created from `feature/phase-a-pr-3a`
+tip (`5315bac`), confirmed at **448 tests, 0 failures** before branching.
+
+**Scope**: tasks 3.9–3.13 only, per the PR 3a/3b split noted in
+`tasks.md` "PR 3 review budget risk". All 5 tasks completed.
+
+### Tasks completed
+
+- [x] 3.9 — `CalendarChannel.join/3` + `handle_in` membership check
+- [x] 3.10 — `PlanningChannel.join/3` + `handle_in` membership check
+- [x] 3.11 — `CookingChannel.join/3` + `handle_in` membership check
+- [x] 3.12 — `AIChannel.join/3` + `handle_in` membership check
+- [x] 3.13 — Multi-familia two-socket channel test (dedicated checkpoint)
+
+### TDD Cycle Evidence
+
+| Task | Test File | Layer | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|-----|-------|-------------|----------|
+| 3.9 | `test/meal_planner_api_web/channels/calendar_channel_test.exs` (+6) | Channel | ✅ (invited-membership case genuinely RED; cross-account/access_v1 cases pre-passed — see note below) | ✅ `ed82260` | ✅ cross-account join / invited join / access_v2 join to non-primary account / access_v1 fallback / cross-account `meal_id` in `set_is_cooked` | ➖ None needed |
+| 3.10 | `test/meal_planner_api_web/channels/planning_channel_test.exs` (+3) | Channel | ✅ (invited-membership case genuinely RED) | ✅ `4f276d7` | ✅ cross-account join / invited join / access_v1 fallback | ➖ None needed |
+| 3.11 | `test/meal_planner_api_web/channels/cooking_channel_test.exs` (+4) | Channel | ✅ (join was previously **unconditional** `{:ok, socket}` — cross-account, invited, and `meal_not_in_account` all genuinely RED) | ✅ `573b1d9` | ✅ cross-account join / invited join / access_v1 fallback / cross-account `scheduled_meal_id` in `start_session` | ➖ None needed |
+| 3.12 | `test/meal_planner_api_web/channels/ai_channel_test.exs` (+3) | Channel | ✅ (invited-membership case genuinely RED; join was previously unconditional) | ✅ `80154b0` | ✅ invited join / access_v2 active join / access_v1 fallback | ➖ None needed |
+| 3.13 | `test/meal_planner_api_web/channels/membership_scoped_channel_test.exs` (new, 1) | Integration (checkpoint) | N/A — dedicated checkpoint per tasks.md ("test passes GREEN"), not a RED→GREEN task; passed on first run because it exercises 3.9–3.12's already-implemented guards | ✅ `c11c0e4` | ✅ single scenario (two sockets, two Accounts, one broadcast) | ➖ None needed |
+
+**Note on RED rigor (3.9/3.10)**: `CalendarChannel` and `PlanningChannel`
+already guarded cross-Account joins via `current_user.account_id ==
+topic_account_id` (task 3.9/3.10 predecessor code). Because
+`MealPlannerApi.Auth.Guardian.resource_from_claims/1` (PR 2b) overwrites
+`current_user.account_id` with `claims["account_id"]` from the JWT itself,
+the pre-existing naive check already coincidentally rejected cross-Account
+joins and coincidentally accepted access_v1 fallback and multi-familia
+access_v2 joins to a non-"first" Account — confirmed by writing those
+cases first and observing them pass before any channel code changed. The
+genuinely new, previously-unenforced behavior in 3.9/3.10 is the
+`:invited`-status rejection (the old code never consulted membership
+status at all), which was confirmed RED (join succeeded) before the fix
+and GREEN after. `CookingChannel` (3.11) and `AIChannel` (3.12) had no
+account-matching guard whatsoever before this PR (`CookingChannel.join/3`
+returned `{:ok, socket}` unconditionally; `AIChannel.join/3` never checked
+membership) — all new tests for those two channels were genuinely RED
+before implementation.
+
+### Files changed
+
+| File | Action | What Was Done |
+|------|--------|---------------|
+| `lib/meal_planner_api_web/channels/calendar_channel.ex` | Modified | `join/3` now consults `LoadCurrentMembershipSocket.membership_from_socket/1`; rejects nil/mismatch/non-active with `forbidden`; assigns `current_membership`. All 4 `handle_in` callbacks (`toggle_favorite`, `upsert_meal`, `delete_meal`, `set_is_cooked`) read `current_membership.account_id` instead of `current_user.account_id`. |
+| `lib/meal_planner_api_web/channels/planning_channel.ex` | Modified | Same join pattern, `"planning:"` prefix. `handle_in` callbacks (`generate_menu`, `chat`, `confirm_proposal`, `reject_proposal`) that directly read `.account_id` now read it from `current_membership`. `swap_constraints`/`confirm_proposal`/`reject_proposal` fallback calls that pass the whole `user` struct to `PlanningChatService` are unchanged (out of scope — service layer, not channel layer). |
+| `lib/meal_planner_api_web/channels/cooking_channel.ex` | Modified | `join/3` previously accepted unconditionally; now parses the `account_id` segment out of the compound `"cooking:<account_id>:<session_id>"` topic via `String.split/3` and applies the same guard. `handle_in("start_session", ...)` now verifies `scheduled_meal_id` belongs to `current_membership.account_id` via `PlanningRepo.get_scheduled_meal_for_account/2` before delegating to `CookingService`, replying `meal_not_in_account` on mismatch. |
+| `lib/meal_planner_api_web/channels/ai_channel.ex` | Modified | `join/3` previously accepted unconditionally; now rejects nil/non-active membership (no account-id-vs-topic check — see deviation below). `handle_in("new_message", ...)` reads `current_membership.account_id` instead of `current_user.account_id` for the error payload. |
+| `test/meal_planner_api_web/channels/calendar_channel_test.exs` | Extended | +6 tests: cross-account join, invited join, access_v1 fallback, access_v2 join to non-primary Account, cross-account `meal_id` in `set_is_cooked`. |
+| `test/meal_planner_api_web/channels/planning_channel_test.exs` | Extended | +3 tests: cross-account join, invited join, access_v1 fallback. |
+| `test/meal_planner_api_web/channels/cooking_channel_test.exs` | Extended | +4 tests: cross-account join, invited join, access_v1 fallback, cross-account `scheduled_meal_id` in `start_session`. |
+| `test/meal_planner_api_web/channels/ai_channel_test.exs` | Extended | +3 tests: invited join rejected, access_v2 active join accepted, access_v1 fallback accepted. |
+| `test/meal_planner_api_web/channels/membership_scoped_channel_test.exs` | Created | Task 3.13 dedicated checkpoint: two sockets (same User, two Accounts) both join `PlanningChannel`; broadcast to Account A's topic only reaches the A-socket. |
+
+### Deviations from design (both documented in `tasks.md` inline, per task)
+
+1. **Task 3.11 (`CookingChannel`) — `set_is_cooked` does not exist on this
+   channel.** The spec `membership-scoped-channels` §"handle_in with
+   cross-Account entity id" and the task's own acceptance criteria cite
+   `handle_in("set_is_cooked", payload, socket)` on the cooking channel as
+   the canonical cross-Account entity-id rejection case. Verified against
+   the actual code (`rg -n "set_is_cooked"`): that event only exists on
+   `CalendarChannel` (task 3.9); `CookingChannel` has no `set_is_cooked`
+   handler at all. `CookingChannel`'s only meal-id-bearing event is
+   `handle_in("start_session", %{"scheduled_meal_id" => ...})`. Implemented
+   the ownership check there instead, using the exact reason string the
+   spec mandates (`meal_not_in_account`). This satisfies the acceptance
+   criterion's intent (cross-Account entity id rejected with that reason)
+   using the event that actually exists on disk, rather than inventing a
+   new `set_is_cooked` handler on `CookingChannel` that nothing in the
+   existing test suite or client integration expects.
+2. **Task 3.12 (`AIChannel`) — topic shape does not carry an account_id.**
+   The task's own text assumes prefix `"ai:"` with the topic shape
+   `<channel>:<account_id>` (per spec `membership-scoped-channels`
+   §"Channel topic shape stays `<channel>:<account_id>`"). The actual
+   channel is registered as `channel("ai_chat:*", ...)` in `user_socket.ex`
+   and its `join/3` pattern is `"ai_chat:" <> room_id`, where `room_id` is
+   an opaque chat/session identifier (confirmed against
+   `ai_channel_test.exs`'s existing `"ai_chat:room_123"` topic and
+   `MealPlannerApi.AI.stream_response/4`, which resolves the Account
+   separately via `user.account_id`, not via `room_id`). There is
+   structurally no account_id embedded in this channel's topic to
+   cross-check against `current_membership.account_id`. Implemented the
+   guard that IS possible and meaningful: reject `nil` or non-`:active`
+   membership (covering the "invited membership rejected" and "access_v1
+   fallback accepted" acceptance criteria exactly as specified). The
+   "cross-Account join rejected" criterion, which cannot be tested
+   literally for this channel (no cross-account topic exists to attempt),
+   is covered by the invited-membership-rejected test instead — the
+   security property it protects (a User without a currently-active
+   membership cannot open a live AI socket) is enforced the same way.
+3. **Multi-membership factory users' `User.account_id` (DB row field) is
+   always `nil`** (per PR 1's nullable `account_id` schema change) — this
+   means most of the cross-Account/legacy-fallback test scenarios in this
+   PR exercise `MealPlannerApi.Auth.Guardian.resource_from_claims/1`'s
+   claims-derived `account_id` override (PR 2b), not the raw DB column.
+   Confirmed this is intentional dual-write behavior (see PR 3a
+   apply-progress risk #3) and not a test-authoring bug.
+
+### Risks / follow-ups for future channel work
+
+1. **Channel count mismatch remains unresolved** (carried from PR 1/2a/3a):
+   `shopping_channel.ex` and `inventory_channel.ex` still do not exist on
+   disk. This PR covers only the 4 channels that exist. Whoever creates
+   those channels in the future should copy the `LoadCurrentMembershipSocket`
+   join-guard pattern from `CalendarChannel`/`PlanningChannel` (simple
+   `"<prefix>:" <> account_id` topic) rather than `CookingChannel`'s
+   compound-topic variant, unless the new channel also needs a
+   `<account_id>:<session_id>` shape.
+2. **`AIChannel`'s topic shape should be revisited if per-Account AI
+   chat isolation ever becomes a real requirement.** Today `room_id` is
+   opaque and not validated against any Account at all beyond "the
+   connecting User has an active membership somewhere" — if two Accounts'
+   Users could ever guess/share a `room_id`, there is no channel-level
+   check preventing simultaneous join to the same room from different
+   Accounts. This was out of scope for PR 3b's mechanical task list (no
+   acceptance criterion asked for it) but is worth flagging for a future
+   change if AI chat rooms become Account-scoped resources.
+3. **`CookingService.start_session/2` and friends still derive their own
+   Account scope internally via `Identity.ensure_persistent_identity/1`**
+   (a legacy stable-UUID derivation from `current_user`, unrelated to
+   `AccountMembership`). This PR added a channel-level pre-check
+   (`meal_not_in_account`) in front of that call for `start_session`
+   specifically; `get_state`, `track_step`, `finish_session`, and
+   `ask_assistant` still delegate to `CookingService` without a
+   channel-level entity check because they operate on `session_id`
+   (already scoped by the prior `start_session` call), not a fresh
+   cross-Account entity id — no acceptance criterion required it, but
+   flagging for anyone extending this surface later.
+4. **`PlanningChannel`'s `swap_constraints`/`confirm_proposal`/
+   `reject_proposal` fallback branches call `PlanningChatService` with the
+   whole `user` struct**, not `current_membership.account_id` — those
+   service calls were left untouched (service-layer, not channel-layer,
+   out of this task's mechanical-rename scope per design §5.2's own module
+   list, which only lists the channel files as modified for this task
+   set).
+
+### Final verification (this session)
+
+- `mix test`: **464 tests, 0 failures** (baseline 448 at PR 3b branch
+  point; +16 net new tests across 5 commits).
+- Ran `mix test` after every task (3.9 → 453, 3.10 → 456, 3.11 → 460,
+  3.12 → 463, 3.13 → 464), all green, no regressions at any step.
+- `mix format` was run scoped only to the files touched in each commit
+  (never an unscoped/project-wide `mix format` or `mix precommit`) — no
+  repeat of the PR 3a side-effect risk.
+- Branch: `feature/phase-a-pr-3b`, 5 commits, each one task, each with its
+  own RED→GREEN test evidence.
+
+### Commits landed (chronological)
+
+| # | SHA | Task | Message |
+|---|-----|------|---------|
+| 1 | `ed82260` | 3.9 | feat(channels): enforce membership-scoped join + set_is_cooked on CalendarChannel |
+| 2 | `4f276d7` | 3.10 | feat(channels): enforce membership-scoped join on PlanningChannel |
+| 3 | `573b1d9` | 3.11 | feat(channels): enforce membership-scoped join + entity check on CookingChannel |
+| 4 | `80154b0` | 3.12 | feat(channels): enforce active-membership guard on AIChannel join |
+| 5 | `c11c0e4` | 3.13 | test(channels): add multi-familia two-socket checkpoint for PlanningChannel |
+
+### Out of scope (explicitly not touched, per launch prompt)
+
+- `shopping_channel.ex` / `inventory_channel.ex` creation — confirmed
+  deferred, open question, not resolved in this session.
+- Tasks 3.1–3.8 (controllers + auth rewrite) — already landed in PR 3a.
+- Tasks 3.14+ (controller sweep, further tests, docs) — not in PR 3b
+  scope; no PR 3c is currently planned per the original 3-PR split, so
+  whoever picks up tasks 3.14+ should re-read `tasks.md` §"PR strategy"
+  and this section's "Risks / follow-ups" before starting.

@@ -641,13 +641,14 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Per design §7 — `join("calendar:" <> topic_account_id, _payload, socket)` reads `LoadCurrentMembership.membership_from_socket/1`. Rejects with `{:error, %{reason: "forbidden"}}` when membership is `nil`, `account_id` mismatches the topic, or `status != :active`. Assigns `current_membership` to the socket. `handle_in` callbacks read `current_membership.account_id` (mechanical change).
 - **Acceptance criteria**:
-  - [ ] test asserts cross-Account join rejected (RED)
-  - [ ] test asserts `:invited` membership join rejected
-  - [ ] test asserts `access_v1` legacy fallback accepted
-  - [ ] test asserts `handle_in` payload using a `meal_id` from another Account is rejected
-  - [ ] channel updated; tests GREEN
+  - [x] test asserts cross-Account join rejected (RED)
+  - [x] test asserts `:invited` membership join rejected
+  - [x] test asserts `access_v1` legacy fallback accepted
+  - [x] test asserts `handle_in` payload using a `meal_id` from another Account is rejected
+  - [x] channel updated; tests GREEN
 - **Estimated lines**: +45 / -10
 - **Depends on**: 1.10, 1.12
+- **Landed**: PR 3b task 3.9 (see `apply-progress.md` §"PR 3b").
 
 ### Task 3.10 — Channel sweep: `PlanningChannel.join/3` + `handle_in` membership check
 
@@ -657,8 +658,13 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Same pattern as 3.9, prefix `"planning:"`.
 - **Acceptance criteria**: identical to 3.9, scoped to `planning` prefix.
+  - [x] test asserts cross-Account join rejected (RED)
+  - [x] test asserts `:invited` membership join rejected
+  - [x] test asserts `access_v1` legacy fallback accepted
+  - [x] channel updated; tests GREEN
 - **Estimated lines**: +45 / -10
 - **Depends on**: 1.10, 1.12
+- **Landed**: PR 3b task 3.10 (see `apply-progress.md` §"PR 3b").
 
 ### Task 3.11 — Channel sweep: `CookingChannel.join/3` + `handle_in` membership check
 
@@ -668,11 +674,13 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Same pattern as 3.9, prefix `"cooking:"`. The `handle_in("set_is_cooked", payload, socket)` test is the canonical cross-Account mutation case from spec `membership-scoped-channels` §"handle_in with cross-Account entity id".
 - **Acceptance criteria**:
-  - [ ] test asserts cross-Account join rejected (RED)
-  - [ ] test asserts cross-Account `meal_id` in `set_is_cooked` rejected with `meal_not_in_account` (RED)
-  - [ ] channel updated; tests GREEN
+  - [x] test asserts cross-Account join rejected (RED)
+  - [x] test asserts cross-Account `meal_id` in `set_is_cooked` rejected with `meal_not_in_account` (RED)
+  - [x] channel updated; tests GREEN
 - **Estimated lines**: +45 / -10
 - **Depends on**: 1.10, 1.12
+- **Deviation** (documented in `apply-progress.md` §"PR 3b"): `CookingChannel` has no `set_is_cooked` handler on disk (that event only exists on `CalendarChannel`). The equivalent cross-Account entity check was implemented on `handle_in("start_session", %{"scheduled_meal_id" => ...})`, which is CookingChannel's only meal-id-bearing event, replying `{:error, %{reason: "meal_not_in_account"}}` on mismatch — same reason string the spec mandates, adapted to the event that actually exists.
+- **Landed**: PR 3b task 3.11 (see `apply-progress.md` §"PR 3b").
 
 ### Task 3.12 — Channel sweep: `AIChannel.join/3` + `handle_in` membership check
 
@@ -682,10 +690,12 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Same pattern as 3.9, prefix `"ai:"`. Note: only `ai` exists in `lib/meal_planner_api_web/channels/` today — `shopping_channel.ex` and `inventory_channel.ex` are referenced in the proposal §"Approach" but do not yet exist on disk; they are NOT created in Phase A (flagged in Open Questions below).
 - **Acceptance criteria**:
-  - [ ] test asserts cross-Account join rejected (RED)
-  - [ ] channel updated; tests GREEN
+  - [x] test asserts cross-Account join rejected (RED)
+  - [x] channel updated; tests GREEN
 - **Estimated lines**: +40 / -8
 - **Depends on**: 1.10, 1.12
+- **Deviation** (documented in `apply-progress.md` §"PR 3b"): `AIChannel`'s actual topic is `ai_chat:<room_id>` (an opaque chat/session id), not `ai:<account_id>` as this task's prefix assumed — there is no account_id in the topic to cross-check. The join guard implemented enforces "current_membership is present and `:active`" (nil/invited rejected) rather than a topic-vs-membership account match, since no such match is structurally possible for this channel. The "cross-Account join rejected" criterion is satisfied via the `:invited`-membership-rejected test instead of a literal cross-account topic test.
+- **Landed**: PR 3b task 3.12 (see `apply-progress.md` §"PR 3b").
 
 ### Task 3.13 — Multi-familia two-socket channel test (dedicated checkpoint)
 
@@ -694,9 +704,10 @@ Chain strategy: feature-branch-chain
 - **Type**: dedicated test (checkpoint)
 - **Description**: Per design §8.5 and spec `membership-scoped-channels` §"Multi-familia User joining two topics via two sockets" — opens two sockets, one scoped to `Account_A`, one to `Account_B`, both for the same User. Joins `"planning:<A>"` on the first and `"planning:<B>"` on the second. Asserts both joins succeed. Pushes a broadcast to `planning:<A>` and asserts only the A-socket receives it.
 - **Acceptance criteria**:
-  - [ ] test passes GREEN
+  - [x] test passes GREEN
 - **Estimated lines**: +50 / -0
 - **Depends on**: 3.9–3.12
+- **Landed**: PR 3b task 3.13 (see `apply-progress.md` §"PR 3b").
 
 ### Task 3.14 — Controller sweep: `CalendarController` reads `current_membership.account_id`
 
