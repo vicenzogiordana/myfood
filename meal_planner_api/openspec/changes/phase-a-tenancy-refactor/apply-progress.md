@@ -1683,3 +1683,218 @@ before implementation.
   test, no regressions).
 - **Commit**: `fix(channels): guard CookingChannel.start_session against
   malformed scheduled_meal_id`.
+
+---
+
+# Post-PR-3b review — BLOCKER fix: legacy membership synthesis (fail-open → fail-closed)
+
+> **Change**: `phase-a-tenancy-refactor`
+> **Branch**: `feature/phase-a-pr-3b`
+> **Apply mode**: `strict_tdd: true`, `test_runner: mix test`
+> **Status**: ✅ complete
+> **Date**: 2026-07-10
+
+## Goal recap
+
+Close the BLOCKER flagged by the PR 3b `review-risk` pass: for legacy
+`typ: "access"` (access_v1) JWTs, the codebase resolved
+`current_membership` by **synthesizing** an in-memory
+`%AccountMembership{status: :active}` struct straight from
+`user.account_id` — no database lookup, ever. `AccountsMembership.
+remove_member/3` and `.leave/2` hard-delete the real `AccountMembership`
+row without clearing `user.account_id`, and Guardian's `access` tokens
+carry a 4-week TTL with no server-side denylist — so a removed member's
+stale token retained full read/write access to every membership-scoped
+controller and channel (including PR 3b's own new channel guards, whose
+`status != :active` check was always vacuously false against a
+synthesized struct) for up to 4 weeks post-removal.
+
+**Fix**: before granting access via a legacy token, require a real,
+`:active` `AccountMembership` row for `(user_id, account_id)`. If found,
+use it directly (real `id`, `status`, `role`, `joined_at` — no
+`__synthesized__` flag, mirroring the `access_v2` path). If not found,
+deny — same treatment as "no membership" (`401
+membership_id_required` / `nil`, matching each call site's existing
+no-membership shape).
+
+## Functions changed (the 3 named duplicates + 1 discovered along the way)
+
+1. `MealPlannerApiWeb.Plugs.LoadCurrentMembership.synthesize_legacy_membership/2`
+   (HTTP conn plug) — now `Repo.get_by(AccountMembership, user_id:,
+   account_id:, status: :active)`; `nil` → `{:error,
+   :membership_id_required}` (halts 401, same shape as the existing
+   `access_v2` no-membership case).
+2. `MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket.synthesize_legacy_membership/1`
+   (channel socket sibling) — same real-row query; preloads `:account`
+   for parity with this module's own `access_v2` branch; `nil` on no
+   row.
+3. `MealPlannerApi.AccountsMembership.synthesize_v1_membership/2` →
+   renamed `load_real_legacy_membership/2` (application layer,
+   `current_membership/2`) — same real-row query, keyed off
+   `claims["account_id"]` (this module's pre-existing source of truth,
+   distinct from the two plugs which read `user.account_id` — left
+   unchanged to avoid widening this fix's blast radius).
+4. **Discovered while investigating, not in the original 3**:
+   `MealPlannerApiWeb.UserSocket`'s `connect/3` had its OWN, 4th,
+   independent copy of the exact same fabrication pattern (a private
+   `synthesize_legacy_membership/2` that never delegated to
+   `LoadCurrentMembershipSocket`, unlike its own `access_v2` branch).
+   Fixing only the 3 named functions would have left socket connections
+   (and therefore every channel join) still vulnerable through this
+   path. **Consolidated** rather than duplicated the fix: `connect/3`'s
+   `access` branch now delegates to `LoadCurrentMembershipSocket.
+   membership_from_socket/1` — the same function its `access_v2` branch
+   already used — eliminating the duplicate outright (net −35 lines in
+   `user_socket.ex`) instead of adding a 5th independent copy of the
+   query.
+
+## A 5th, pre-existing gap this fix would have broken without a prerequisite fix
+
+`MealPlannerApi.Accounts.find_or_create_identity/1` (the **social-login**
+production path, `AuthController.social/2`) sets `user.account_id`
+directly but — unlike `register_with_password/1` (PR 2b task 2.10) —
+**never inserted a real `AccountMembership` row**, ever. The launch
+prompt's premise ("PR 1's backfill + PR 2b's atomic registration
+guarantee every currently-valid member has a real row") does not cover
+social-login users, because that identity path predates and bypasses
+both guarantees. Confirmed by reading `find_or_create_identity/1` →
+`upsert_user/3` directly, and independently confirmed by the blast
+radius: `test/support/channel_helpers.ex`'s `issue_identity_and_token/2`
+(used by every test in `calendar_channel_test.exs`,
+`planning_channel_test.exs`, `cooking_channel_test.exs`, and
+`ai_channel_test.exs`) calls this exact function, so this gap was not a
+contrived edge case — it was the default legacy-token fixture for the
+entire channel test suite.
+
+Landing the 3(+1) synthesis fixes without also fixing this would have
+**locked out every social-login user** (a real functional regression,
+not just broken tests). Fixed by adding `Accounts.upsert_membership/2`
+(private, idempotent) to `find_or_create_identity/1`'s `with` chain —
+inserts an `:owner :active` `AccountMembership` row the first time an
+identity is seen, no-ops on subsequent calls. Because
+`find_or_create_identity/1` runs on every social login, this also
+**self-heals** any social-login user created before this fix, the next
+time they log in.
+
+## TDD Cycle Evidence
+
+| # | Scenario | Test File | RED | GREEN | TRIANGULATE | REFACTOR |
+|---|----------|-----------|-----|-------|-------------|----------|
+| 1 | `find_or_create_identity/1` upserts a real `:owner :active` membership (prerequisite) | `accounts_test.exs` | ✅ `Ecto.NoResultsError` / count 0 | ✅ | ✅ idempotency (2nd call, count stays 1) | ➖ None needed |
+| 2 | HTTP plug: no real row → 401; real row → real data; removed member → 401 | `load_current_membership_test.exs` (conn) | ✅ 3 failures (assert struct shape / halt) | ✅ | ✅ 3 scenarios (edge case / legitimate / removed) | ➖ None needed |
+| 3 | Socket plug: no real row → nil; real row → real data; removed member → nil | `load_current_membership_test.exs` (socket) | ✅ 3 failures | ✅ | ✅ 3 scenarios | ➖ None needed |
+| 4 | `AccountsMembership.current_membership/2`: real row wins over synthesis; no row / removed → nil | `accounts_membership_test.exs` | ✅ 3 failures | ✅ | ✅ 3 scenarios | ➖ None needed |
+| 5 | `UserSocket.connect/3` (end-to-end call site): no real row → `:error`; real row → populated; removed member → `:error` | `user_socket_test.exs` | ✅ 3 failures | ✅ | ✅ 3 scenarios | ✅ consolidated away the 4th duplicate |
+
+**Removed-member requirement (launch prompt item 1) — 3 independent proofs**:
+- End-to-end call site: `UserSocket.connect/3` — real membership minted into a token, row hard-deleted, stale token rejected (`:error`).
+- Focused unit test: `AccountsMembership.current_membership/2` — same pattern, `nil`.
+- Focused unit test: `LoadCurrentMembershipSocket.membership_from_socket/1` — same pattern, `nil`.
+- Plus a 4th (HTTP conn, `LoadCurrentMembership.call/2`) for full call-site parity.
+
+**Legitimate legacy member requirement (item 2)** — verified at all 4 call
+sites: real `id`, no `__synthesized__` flag, real `role`/`status` from
+the DB row.
+
+**Genuine edge case (item 3)** — "`user.account_id` set, no real row was
+ever created" — verified at all 4 call sites using the exact fixture
+pattern the pre-fix tests already used (bare `Account` + `User` insert,
+no `AccountMembership` row), which is also precisely what
+`find_or_create_identity/1` used to produce before the prerequisite fix.
+
+## Existing tests updated (with reason, not weakened)
+
+1. `load_current_membership_test.exs` — "access_v1 (legacy) token
+   synthesizes..." (no real row fixture) → renamed to assert 401
+   rejection. **Reason**: this fixture never had a real backing row —
+   under the old behavior it was silently trusted; under the fixed
+   (correct) behavior it must be denied. A separate NEW test covers the
+   "real row exists" case with the correct (non-synthesized) assertion.
+2. `load_current_membership_test.exs` — "synthesizes for an access_v1
+   socket" → same reason/treatment, socket variant.
+3. `user_socket_test.exs` — "synthesizes a current_membership from
+   user.account_id" → same reason/treatment, `connect/3` variant.
+4. `accounts_membership_test.exs` — "returns a synthesized membership
+   for a legacy access claim with `__synthesized__` = true" →
+   **opposite direction**: this fixture (via `user_with_memberships/2`)
+   *already* had a real backing row, so the old assertion
+   (`__synthesized__: true`) was actually pinning the OLD insecure
+   behavior even in a case where a real row existed and should have won.
+   Renamed and flipped to assert the real row's data.
+5. `membership_controller_test.exs` — "a dangling/unknown account
+   reference returns 404 account_not_found" → renamed/reworked. This
+   test proved the controller doesn't leak Account existence, by
+   relying on the plug synthesizing a virtual membership from a claim
+   alone so `EnforceAccountScope` would pass and the controller's own
+   404 check would run. Under the fix, a legacy token for a user with
+   zero real memberships anywhere is now rejected by the plug itself
+   (401) before `EnforceAccountScope` or the controller ever run — a
+   strictly earlier and stronger rejection. Updated to assert the new
+   (earlier, correct) 401, with a comment explaining the controller's
+   404 branch is not weakened, just no longer reachable via this probe.
+
+None of these were "weakened" — each assertion now matches the fixture's
+actual state (real row vs. no row) and the new fail-closed contract.
+
+## Consolidation note
+
+Per the launch prompt's guidance ("if you can cleanly consolidate...
+without adding excessive risk, do so — but correctness is the
+priority"): fully unifying all 4 call sites into one shared query
+function was judged higher-risk than necessary (the 2 HTTP/socket plugs
+read `user.account_id`, while `AccountsMembership.current_membership/2`
+reads `claims["account_id"]` — collapsing that difference would have
+been a separate, riskier refactor). The one consolidation that was both
+safe and high-value — `UserSocket.connect/3` delegating to
+`LoadCurrentMembershipSocket.membership_from_socket/1` instead of
+maintaining its own 4th copy — was done, since it was a straight
+duplicate with no behavioral divergence worth preserving.
+
+## `mix test` summary
+
+```
+465 tests, 0 failures   (baseline, start of this fix pass)
+467 tests, 0 failures   (+2 — find_or_create_identity/1 membership upsert)
+471 tests, 0 failures   (+4 — LoadCurrentMembership + LoadCurrentMembershipSocket)
+471 tests, 0 failures   (membership_controller_test.exs dangling-account fix, net 0)
+473 tests, 0 failures   (+2 — AccountsMembership.current_membership/2)
+475 tests, 0 failures   (+2 — UserSocket.connect/3 consolidation)
+```
+
+**Final: 475 tests, 0 failures** (+10 net over the 465 baseline; 0
+regressions; 0 skipped/weakened assertions — the 5 "updated" tests above
+each now assert something strictly more precise than before, not less).
+
+`mix compile --warnings-as-errors --force`: clean. `mix format
+--check-formatted` on all 10 touched files: clean (ran `mix format`
+scoped to exactly those files, per the PR 3a lesson about unscoped
+`mix format` side effects).
+
+## Files changed
+
+| File | Action |
+|------|--------|
+| `lib/meal_planner_api/accounts.ex` | Modified — `find_or_create_identity/1` upserts a real membership (prerequisite fix) |
+| `lib/meal_planner_api/accounts_membership.ex` | Modified — `current_membership/2`'s legacy path loads-or-denies |
+| `lib/meal_planner_api_web/plugs/load_current_membership.ex` | Modified — HTTP plug loads-or-denies |
+| `lib/meal_planner_api_web/plugs/load_current_membership_socket.ex` | Modified — socket plug loads-or-denies |
+| `lib/meal_planner_api_web/user_socket.ex` | Modified — `connect/3` consolidated onto the socket plug (4th duplicate removed) |
+| `test/meal_planner_api/accounts_test.exs` | Extended — prerequisite membership-upsert coverage |
+| `test/meal_planner_api/accounts_membership_test.exs` | Modified + extended |
+| `test/meal_planner_api_web/plugs/load_current_membership_test.exs` | Modified + extended (conn + socket) |
+| `test/meal_planner_api_web/user_socket_test.exs` | Modified + extended |
+| `test/meal_planner_api_web/controllers/membership_controller_test.exs` | Modified (dangling-account scenario now unreachable past the plug) |
+
+## Status
+
+**This closes the "legacy membership synthesis" BLOCKER flagged by the
+PR 3b `review-risk` pass.** Ready for `sdd-verify` / re-review. Branch
+`feature/phase-a-pr-3b` — not yet pushed at the time of writing this
+section (push is the next step after this artifact update).
+
+Not addressed by this fix pass (unchanged, still open, tracked
+separately per the existing "Phase A readiness" section above): tasks
+3.14–3.25 (controller/service sweep to read `current_membership` instead
+of `user.account_id`, and the cross-Account HTTP isolation checkpoint) —
+those govern `access_v2` multi-familia switching over HTTP, a distinct
+gap from this fix's legacy-token access-control BLOCKER.
