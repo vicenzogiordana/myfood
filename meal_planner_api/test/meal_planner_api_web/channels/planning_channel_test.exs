@@ -1,6 +1,8 @@
 defmodule MealPlannerApiWeb.PlanningChannelTest do
   use MealPlannerApiWeb.ChannelCase, async: false
 
+  import MealPlannerApi.FactoryHelpers
+
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApiWeb.{PlanningChannel, UserSocket}
 
@@ -31,6 +33,67 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
       # Try to join a different account's planning channel
       assert {:error, %{reason: "forbidden"}} =
                subscribe_and_join(socket, PlanningChannel, "planning:other_account_id")
+    end
+
+    test "cross-Account join is rejected (task 3.10)" do
+      user =
+        user_with_memberships(
+          %{email: "plan_cross@example.com"},
+          [
+            {%{plan: :family_4, name: "Plan Cross A"}, :owner},
+            {%{plan: :individual, name: "Plan Cross B"}, :member}
+          ]
+        )
+
+      membership_a = Enum.find(user.memberships, &(&1.account.name == "Plan Cross A"))
+      membership_b = Enum.find(user.memberships, &(&1.account.name == "Plan Cross B"))
+      token_a = issue_access_v2_token(user, membership_a)
+
+      {:ok, socket} = connect(UserSocket, %{"token" => token_a})
+
+      assert {:error, %{reason: "forbidden"}} =
+               subscribe_and_join(socket, PlanningChannel, "planning:#{membership_b.account_id}")
+    end
+
+    test "invited (non-active) membership join is rejected (task 3.10)" do
+      user =
+        user_with_memberships(
+          %{email: "plan_invited@example.com"},
+          [
+            {%{plan: :family_4, name: "Plan Invited Account"}, :owner}
+          ]
+        )
+
+      [membership] = user.memberships
+
+      {:ok, invited_membership} =
+        membership
+        |> MealPlannerApi.Persistence.Accounts.AccountMembership.changeset(%{status: :invited})
+        |> MealPlannerApi.Repo.update()
+
+      token = issue_access_v2_token(user, invited_membership)
+
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+      assert {:error, %{reason: "forbidden"}} =
+               subscribe_and_join(
+                 socket,
+                 PlanningChannel,
+                 "planning:#{invited_membership.account_id}"
+               )
+    end
+
+    test "access_v1 legacy token is accepted via fallback (task 3.10)", %{
+      account: account,
+      token: token
+    } do
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+      assert {:ok, _reply, socket} =
+               subscribe_and_join(socket, PlanningChannel, "planning:#{account.id}")
+
+      assert socket.assigns.current_membership.account_id == account.id
+      assert socket.assigns.current_membership.status == :active
     end
   end
 
