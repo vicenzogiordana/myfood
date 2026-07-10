@@ -9,16 +9,17 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket do
 
     * `typ: "access_v2"` → load the `AccountMembership` row by
       `claims["membership_id"]`
-    * `typ: "access"` (legacy fallback) → synthesize a virtual
-      membership struct with `__synthesized__: true` populated from
-      `current_user.account_id` + `current_user.role` + `Account.plan`
+    * `typ: "access"` (legacy fallback) → loads the real, `:active`
+      `AccountMembership` row for `(current_user.id,
+      current_user.account_id)`. Returns `nil` if no such row exists
+      (post-PR-3b review BLOCKER fix — see `synthesize_legacy_membership/1`
+      below; this module no longer fabricates an in-memory struct).
 
   Channels that need the membership call
   `LoadCurrentMembershipSocket.membership_from_socket(socket)` and read
   `socket.assigns.current_membership` (Q8 — design §7).
   """
 
-  alias MealPlannerApi.Persistence.Accounts.Account
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Repo
 
@@ -87,34 +88,35 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket do
     end
   end
 
-  defp synthesize_legacy_membership(%{account_id: account_id} = user)
+  # Post-PR-3b review — BLOCKER fix (legacy membership synthesis). See
+  # `MealPlannerApiWeb.Plugs.LoadCurrentMembership.synthesize_legacy_membership/2`
+  # for the full rationale — the short version: fabricating an
+  # `:active` membership from `user.account_id` alone let a removed
+  # member's stale legacy token keep working for up to Guardian's
+  # 4-week token TTL, since `remove_member/3`/`leave/2` hard-delete the
+  # real row without clearing `user.account_id`. We now require a real,
+  # `:active` row.
+  defp synthesize_legacy_membership(%{account_id: account_id, id: user_id})
        when not is_nil(account_id) do
-    plan = fetch_account_plan(account_id)
-
-    %AccountMembership{
-      id: nil,
-      account_id: account_id,
-      user_id: user.id,
-      role: user.role || :member,
-      status: :active,
-      joined_at: nil
-    }
-    |> Map.put(:plan, plan)
-    |> Map.put(:__synthesized__, true)
+    load_real_active_membership(user_id, account_id)
   end
 
   defp synthesize_legacy_membership(_), do: nil
 
-  defp fetch_account_plan(account_id) do
+  defp load_real_active_membership(user_id, account_id) do
     case Ecto.UUID.cast(account_id) do
-      {:ok, uuid} ->
-        case Repo.get(Account, uuid) do
-          %Account{plan: plan} -> plan
-          _ -> :individual
-        end
+      {:ok, account_uuid} ->
+        AccountMembership
+        |> Repo.get_by(user_id: user_id, account_id: account_uuid, status: :active)
+        |> maybe_preload_account()
 
       _ ->
-        :individual
+        nil
     end
   end
+
+  defp maybe_preload_account(nil), do: nil
+
+  defp maybe_preload_account(%AccountMembership{} = membership),
+    do: Repo.preload(membership, :account)
 end

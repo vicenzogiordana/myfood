@@ -50,22 +50,41 @@ defmodule MealPlannerApiWeb.MembershipControllerTest do
       memberships = body["memberships"]
 
       assert Enum.map(memberships, & &1["role"]) == ["owner", "member"]
-      assert Enum.map(memberships, & &1["email"]) == ["owner_a@example.com", "member_a@example.com"]
+
+      assert Enum.map(memberships, & &1["email"]) == [
+               "owner_a@example.com",
+               "member_a@example.com"
+             ]
+
       assert Enum.map(memberships, & &1["status"]) == ["active", "active"]
       assert Enum.all?(memberships, &Map.has_key?(&1, "joined_at"))
       assert Enum.all?(memberships, &Map.has_key?(&1, "user_id"))
     end
 
-    test "a dangling/unknown account reference returns 404 account_not_found (no existence leak)",
+    # Post-PR-3b review — BLOCKER fix (legacy membership synthesis)
+    # updated this test's expected status. It used to prove
+    # `MembershipController.index/2` doesn't leak Account existence for a
+    # dangling `account_id` claim, by relying on `LoadCurrentMembership`
+    # synthesizing a virtual `:active` membership from the claim alone
+    # (no real `AccountMembership` row required) so `EnforceAccountScope`
+    # would pass and the request would reach the controller's own
+    # `AccountScopeHelpers.load_account/1` 404 check.
+    #
+    # `LoadCurrentMembership` now REQUIRES a real, `:active`
+    # `AccountMembership` row before granting access via a legacy token
+    # (see its module doc). A user with zero real membership rows
+    # anywhere (as this fixture models) is rejected at the plug itself —
+    # 401, before `EnforceAccountScope` or the controller ever run. This
+    # is a strictly earlier, stronger rejection: the dangling-account
+    # probe this test modeled is no longer reachable past the plug, so
+    # there is nothing left for the controller's 404 branch to protect
+    # against via this path (existence is not leaked — the request never
+    # gets far enough to ask).
+    test "a dangling/unknown account reference is rejected at the membership check (fail-closed), before reaching the controller",
          %{conn: conn} do
       user = user_with_memberships(%{email: "dangling@example.com"}, [])
       bogus_account_id = Ecto.UUID.generate()
 
-      # Legacy access_v1 claim shape (design §3.1) minted manually so the
-      # `LoadCurrentMembership` plug synthesizes a virtual membership from
-      # `account_id` without requiring a real AccountMembership row —
-      # this is how EnforceAccountScope can pass (URL == claim account_id)
-      # while the Account itself genuinely does not exist.
       claims = %{
         "account_id" => bogus_account_id,
         "account_type" => "individual",
@@ -81,7 +100,7 @@ defmodule MealPlannerApiWeb.MembershipControllerTest do
         |> put_req_header("authorization", "Bearer " <> token)
         |> get("/api/accounts/#{bogus_account_id}/memberships")
 
-      assert json_response(conn, 404)["error"] == "account_not_found"
+      assert json_response(conn, 401)["error"] == "membership_id_required"
     end
 
     test "cross-Account URL/JWT mismatch returns 403 account_mismatch", %{conn: conn} do
