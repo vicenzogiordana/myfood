@@ -2,15 +2,27 @@ defmodule MealPlannerApiWeb.CalendarChannel do
   use MealPlannerApiWeb, :channel
 
   alias MealPlannerApi.Persistence.Calendar
+  alias MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket
 
   @impl true
-  def join("calendar:" <> account_id, _payload, socket) do
-    user = socket.assigns.current_user
+  def join("calendar:" <> topic_account_id, _payload, socket) do
+    membership = LoadCurrentMembershipSocket.membership_from_socket(socket)
 
-    if user.account_id == account_id do
-      {:ok, assign(socket, :account_id, account_id)}
-    else
-      {:error, %{reason: "forbidden"}}
+    cond do
+      is_nil(membership) ->
+        {:error, %{reason: "forbidden"}}
+
+      to_string(membership.account_id) != topic_account_id ->
+        {:error, %{reason: "forbidden"}}
+
+      membership.status != :active ->
+        {:error, %{reason: "forbidden"}}
+
+      true ->
+        {:ok,
+         socket
+         |> assign(:account_id, topic_account_id)
+         |> assign(:current_membership, membership)}
     end
   end
 
@@ -18,8 +30,9 @@ defmodule MealPlannerApiWeb.CalendarChannel do
   def handle_in("toggle_favorite", %{"recipe_id" => recipe_id}, socket)
       when is_binary(recipe_id) do
     user = socket.assigns.current_user
+    membership = socket.assigns.current_membership
 
-    case Calendar.toggle_favorite(user.account_id, user.id, recipe_id) do
+    case Calendar.toggle_favorite(membership.account_id, user.id, recipe_id) do
       {:ok, is_favorite} ->
         payload = %{user_id: user.id, recipe_id: recipe_id, is_favorite: is_favorite}
         broadcast!(socket, "favorite_toggled", payload)
@@ -31,12 +44,12 @@ defmodule MealPlannerApiWeb.CalendarChannel do
   end
 
   def handle_in("upsert_meal", payload, socket) do
-    user = socket.assigns.current_user
+    membership = socket.assigns.current_membership
 
     with {:ok, date} <- parse_date(Map.get(payload, "date")),
          {:ok, slot} <- parse_slot(Map.get(payload, "slot")),
          attrs <- upsert_attrs(payload, date, slot),
-         {:ok, meal} <- Calendar.upsert_scheduled_meal(user.account_id, attrs) do
+         {:ok, meal} <- Calendar.upsert_scheduled_meal(membership.account_id, attrs) do
       event = %{
         meal_id: meal.id,
         account_id: meal.account_id,
@@ -55,11 +68,11 @@ defmodule MealPlannerApiWeb.CalendarChannel do
   end
 
   def handle_in("delete_meal", payload, socket) do
-    user = socket.assigns.current_user
+    membership = socket.assigns.current_membership
 
     with {:ok, date} <- parse_date(Map.get(payload, "date")),
          {:ok, slot} <- parse_slot(Map.get(payload, "slot")),
-         {:ok, _meal} <- Calendar.delete_scheduled_meal(user.account_id, date, slot) do
+         {:ok, _meal} <- Calendar.delete_scheduled_meal(membership.account_id, date, slot) do
       event = %{date: Date.to_iso8601(date), slot: Atom.to_string(slot)}
       broadcast!(socket, "meal_deleted", event)
       {:reply, {:ok, event}, socket}
@@ -71,7 +84,7 @@ defmodule MealPlannerApiWeb.CalendarChannel do
   end
 
   def handle_in("set_is_cooked", payload, socket) do
-    user = socket.assigns.current_user
+    membership = socket.assigns.current_membership
 
     meal_id = Map.get(payload, "meal_id")
     is_cooked = Map.get(payload, "is_cooked")
@@ -84,7 +97,7 @@ defmodule MealPlannerApiWeb.CalendarChannel do
         {:reply, {:error, %{reason: "invalid_is_cooked"}}, socket}
 
       true ->
-        case Calendar.set_is_cooked(user.account_id, meal_id, is_cooked) do
+        case Calendar.set_is_cooked(membership.account_id, meal_id, is_cooked) do
           {:ok, meal} ->
             event = %{meal_id: meal.id, is_cooked: meal.is_cooked}
             broadcast!(socket, "meal_cooked_state_changed", event)
