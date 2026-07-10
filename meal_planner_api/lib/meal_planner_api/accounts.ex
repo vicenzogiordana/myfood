@@ -407,7 +407,7 @@ defmodule MealPlannerApi.Accounts do
         |> AccountMembership.changeset(%{
           user_id: db_user_id,
           account_id: db_account_id,
-          role: :owner,
+          role: first_member_role(db_account_id),
           status: :active,
           joined_at: DateTime.utc_now()
         })
@@ -415,6 +415,27 @@ defmodule MealPlannerApi.Accounts do
 
       %AccountMembership{} = membership ->
         {:ok, membership}
+    end
+  end
+
+  # Post-review fix (CRITICAL item 2): `db_account_id` is a stable UUID
+  # derived purely from hashing the external `account_id` string, so two
+  # DISTINCT external users authenticating against the same external
+  # `account_id` (this app's own account-linking/shared-account model —
+  # see `Account.linked_user_ids` / `link_user/2`) map to the same
+  # internal Account row. The lookup key above is (user_id, account_id),
+  # not "does this Account already have an owner" — so every distinct
+  # user who links to an already-owned Account used to be inserted as a
+  # NEW `:owner`, gaining full owner authority (`remove_member/3`,
+  # `invite/3` both gate on `actor.role == :owner`) they should never
+  # have. The first person to join an Account is its `:owner`; everyone
+  # after that joins as a `:member` — mirrors the old (removed)
+  # synthesized struct's `role: user.role || :member` default.
+  defp first_member_role(db_account_id) do
+    if Repo.exists?(from(m in AccountMembership, where: m.account_id == ^db_account_id)) do
+      :member
+    else
+      :owner
     end
   end
 

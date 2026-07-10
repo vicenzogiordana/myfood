@@ -126,6 +126,53 @@ defmodule MealPlannerApi.AccountsTest do
   end
 
   # ----------------------------------------------------------------------
+  # Post-PR-3b re-review — CRITICAL item 2: upsert_membership/2 hardcoded
+  # role: :owner (privilege escalation).
+  #
+  # `db_account_id` is a stable UUID derived purely from hashing the
+  # external `account_id` string, so two DISTINCT external users
+  # authenticating against the same external `account_id` (this app's
+  # own account-linking/shared-account model) map to the same internal
+  # Account row. `upsert_membership/2` used to always insert a NEW
+  # membership with `role: :owner` — the lookup key is (user_id,
+  # account_id), not "does this account already have an owner" — so
+  # every distinct user who links to an already-owned account got
+  # inserted as a NEW :owner, gaining full owner authority
+  # (remove_member/3, invite/3 both gate on actor.role == :owner) they
+  # should never have.
+  # ----------------------------------------------------------------------
+  describe "find_or_create_identity/1 only grants :owner to the FIRST member of an Account" do
+    test "a second, distinct user linking to an already-owned account is inserted as :member, not :owner" do
+      shared_external_account_id = "acct_shared_privilege_escalation"
+
+      {:ok, %{user: first_user, account: account}} =
+        Accounts.find_or_create_identity(%{
+          "user_id" => "u_first_owner",
+          "account_id" => shared_external_account_id
+        })
+
+      {:ok, %{user: second_user, account: second_account}} =
+        Accounts.find_or_create_identity(%{
+          "user_id" => "u_second_should_be_member",
+          "account_id" => shared_external_account_id
+        })
+
+      # Same external account_id => same stable db_account_id.
+      assert second_account.id == account.id
+      refute second_user.id == first_user.id
+
+      first_membership =
+        Repo.get_by!(AccountMembership, user_id: first_user.id, account_id: account.id)
+
+      second_membership =
+        Repo.get_by!(AccountMembership, user_id: second_user.id, account_id: account.id)
+
+      assert first_membership.role == :owner
+      assert second_membership.role == :member
+    end
+  end
+
+  # ----------------------------------------------------------------------
   # PR 2b post-review fix pass — item 1: claims_for/2 must not hardcode typ
   # ----------------------------------------------------------------------
   #
