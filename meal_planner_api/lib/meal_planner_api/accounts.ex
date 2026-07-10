@@ -67,9 +67,7 @@ defmodule MealPlannerApi.Accounts do
         {:ok, %{account: account, user: user}}
 
       {:error, step, reason, _changes} ->
-        Logger.error(
-          "find_or_create_identity transaction failed at step=#{inspect(step)} reason=#{inspect(reason)}"
-        )
+        log_transaction_failure(step, reason)
 
         {:error, :unable_to_issue_identity}
     end
@@ -112,6 +110,41 @@ defmodule MealPlannerApi.Accounts do
     |> Multi.run(:membership, fn _repo, _changes ->
       upsert_membership(db_user_id, db_account_id)
     end)
+  end
+
+  # Post-second-review fix (WARNING item 3): `reason` can be an
+  # `%Ecto.Changeset{}` (when :account or :user's upsert fails
+  # validation) whose default `Inspect` implementation prints the full
+  # `:changes` map — including PII (`email`, `name`) — into logs at
+  # `:error` level. Log only the changeset's `:errors` (validation atoms
+  # / messages, never the changed field values) for that case; fall back
+  # to logging the reason's shape (not raw `inspect/1`) for anything
+  # else, since arbitrary future failure reasons could also carry
+  # caller-supplied data.
+  defp log_transaction_failure(step, %Ecto.Changeset{errors: errors}) do
+    Logger.error(
+      "find_or_create_identity transaction failed at step=#{inspect(step)} changeset_errors=#{inspect(errors)}"
+    )
+  end
+
+  defp log_transaction_failure(step, reason) when is_struct(reason) do
+    Logger.error(
+      "find_or_create_identity transaction failed at step=#{inspect(step)} reason_struct=#{inspect(reason.__struct__)}"
+    )
+  end
+
+  defp log_transaction_failure(step, reason) when is_atom(reason) or is_binary(reason) do
+    Logger.error(
+      "find_or_create_identity transaction failed at step=#{inspect(step)} reason=#{inspect(reason)}"
+    )
+  end
+
+  defp log_transaction_failure(step, reason) do
+    kind = if is_tuple(reason), do: :tuple, else: :unstructured
+
+    Logger.error(
+      "find_or_create_identity transaction failed at step=#{inspect(step)} reason_kind=#{kind}"
+    )
   end
 
   @spec register_with_password(map()) ::

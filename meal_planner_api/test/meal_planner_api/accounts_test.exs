@@ -396,12 +396,27 @@ defmodule MealPlannerApi.AccountsTest do
       # WILL fail — `email` collides with the pre-existing User above,
       # tripping the real `unique_constraint(:email)` — a genuine DB
       # failure via the public API, not a fabrication.
-      assert {:error, :unable_to_issue_identity} =
-               Accounts.find_or_create_identity(%{
-                 "user_id" => new_external_user_id,
-                 "account_id" => new_external_account_id,
-                 "email" => conflicting_email
-               })
+      #
+      # Post-second-review fix (WARNING item 3): this same failure used
+      # to log the full `%Ecto.Changeset{}` reason via raw `inspect/1`,
+      # which prints `:changes` (including the PII `email` value above)
+      # at `:error` level. Capture the log and assert the PII value is
+      # NOT present, while the non-PII error shape still is.
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :unable_to_issue_identity} =
+                   Accounts.find_or_create_identity(%{
+                     "user_id" => new_external_user_id,
+                     "account_id" => new_external_account_id,
+                     "email" => conflicting_email
+                   })
+        end)
+
+      refute log =~ conflicting_email,
+             "log must not contain the raw PII email value: #{log}"
+
+      assert log =~ "step=:user"
+      assert log =~ "has already been taken"
 
       # The whole transaction rolled back — including the :account row
       # that was inserted earlier in the SAME transaction, before :user
