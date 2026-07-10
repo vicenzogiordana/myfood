@@ -445,5 +445,31 @@ defmodule MealPlannerApiWeb.AuthControllerTest do
 
       assert json_response(conn, 401)["error"] == "invalid_refresh_token"
     end
+
+    # Second post-review fix pass: `refresh/2`'s `case` only has 3 clauses —
+    # `{:ok, %{"typ" => "refresh"} = claims}`, `{:ok, %{"typ" => other_typ}}`,
+    # `{:error, reason}`. A claims map with NO `"typ"` key at all matches
+    # neither `:ok` clause, raising `CaseClauseError` (500) instead of the
+    # intended fail-closed 401. `Guardian.build_claims/3`'s `set_type/3`
+    # always injects a `"typ"` if the claims map passed to `encode_and_sign/3`
+    # doesn't already carry one, so a normal mint can never produce this
+    # shape — we bypass `build_claims/3` entirely via the lower-level
+    # `Guardian.Token.Jwt.create_token/3` (raw sign, no claim post-processing)
+    # to reproduce a token whose decoded claims genuinely lack `"typ"`.
+    test "a refresh token whose claims are missing typ entirely returns 401, not a crash", %{
+      conn: conn
+    } do
+      {:ok, typeless_token} =
+        Elixir.Guardian.Token.Jwt.create_token(Guardian, %{"sub" => Ecto.UUID.generate()}, [])
+
+      {:ok, decoded_claims} =
+        Guardian.decode_and_verify(typeless_token, %{}, token_type: "refresh")
+
+      refute Map.has_key?(decoded_claims, "typ")
+
+      conn = post(conn, "/api/auth/refresh", %{"refresh_token" => typeless_token})
+
+      assert json_response(conn, 401)["error"] == "invalid_refresh_token"
+    end
   end
 end

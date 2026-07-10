@@ -146,6 +146,19 @@ defmodule MealPlannerApiWeb.AuthController do
         |> put_status(:unauthorized)
         |> json(%{error: "invalid_refresh_token"})
 
+      # Second post-review fix pass: `%{"typ" => other_typ}` only matches
+      # a claims map that HAS a `"typ"` key (of any value) — a claims map
+      # missing `"typ"` entirely (e.g. a token minted outside the normal
+      # `encode_and_sign/3` + `set_type/3` path) matched none of the above
+      # clauses and raised `CaseClauseError` (500) instead of failing
+      # closed. Treat a missing `typ` the same as a wrong `typ`.
+      {:ok, claims} when is_map(claims) ->
+        Logger.warning("refresh token rejected: missing typ claim")
+
+        conn
+        |> put_status(:unauthorized)
+        |> json(%{error: "invalid_refresh_token"})
+
       {:error, reason} ->
         Logger.warning("refresh token decode_and_verify failed reason=#{inspect(reason)}")
 
