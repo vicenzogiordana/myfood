@@ -396,7 +396,9 @@ defmodule MealPlannerApi.AccountsMembershipTest do
       row = Repo.get!(AccountMembership, membership_id)
 
       row
-      |> AccountMembership.changeset(%{invite_expires_at: DateTime.add(DateTime.utc_now(), -1, :day)})
+      |> AccountMembership.changeset(%{
+        invite_expires_at: DateTime.add(DateTime.utc_now(), -1, :day)
+      })
       |> Repo.update!()
 
       assert {:error, :invite_token_expired} =
@@ -691,7 +693,18 @@ defmodule MealPlannerApi.AccountsMembershipTest do
       refute Map.get(result, :__synthesized__) == true
     end
 
-    test "returns a synthesized membership for a legacy access claim with __synthesized__ = true" do
+    # Post-PR-3b review — BLOCKER fix (legacy membership synthesis).
+    #
+    # This fixture (via `user_with_memberships/2`) already inserts a
+    # REAL, `:active` `AccountMembership` row — so under the fixed
+    # behavior the legacy claim must resolve to THAT real row (real
+    # `id`, no `__synthesized__` flag), not a fabricated struct. Fixing
+    # this assertion (not weakening it): the fixture always had a real
+    # backing row, so asserting `__synthesized__: true` was actually
+    # asserting the OLD, insecure "trust the claim, never check the
+    # database" behavior even in a case where a real row existed and
+    # should have been used.
+    test "returns the real active membership for a legacy access claim when a real row exists (no synthesis)" do
       owner =
         user_with_memberships(
           %{email: "current-v1@example.com", role: :owner},
@@ -702,17 +715,50 @@ defmodule MealPlannerApi.AccountsMembershipTest do
 
       [membership] = owner.memberships
 
-      # The legacy claim carries account_id; current_membership must
-      # synthesize from the user + account_id + Account.plan. In the
-      # legacy single-tenant model the role lived on User (not on a
-      # membership row), so the synthesis uses user.role.
       claims = %{"typ" => "access", "account_id" => to_string(membership.account_id)}
 
       result = AccountsMembership.current_membership(owner, claims)
-      assert Map.get(result, :__synthesized__) == true
+      refute Map.get(result, :__synthesized__) == true
+      assert result.id == membership.id
       assert result.account_id == membership.account_id
       assert result.role == :owner
       assert result.status == :active
+    end
+
+    test "returns nil for a legacy access claim when no real membership row exists (fail-closed genuine edge case)" do
+      # `user.account_id` is set nowhere here — this models a User whose
+      # legacy claim points at a real Account they were never actually
+      # linked to via a real AccountMembership row (e.g. a fixture that
+      # bypasses the normal registration/backfill path entirely).
+      user = user_with_memberships(%{email: "current-v1-no-row@example.com"}, [])
+
+      other_owner =
+        user_with_memberships(
+          %{email: "current-v1-no-row-owner@example.com"},
+          [{%{plan: :individual, name: "NoRowAccount"}, :owner}]
+        )
+
+      [other_membership] = other_owner.memberships
+      claims = %{"typ" => "access", "account_id" => to_string(other_membership.account_id)}
+
+      assert AccountsMembership.current_membership(user, claims) == nil
+    end
+
+    test "returns nil for a legacy access claim after the membership row has been removed" do
+      member =
+        user_with_memberships(
+          %{email: "current-v1-removed@example.com"},
+          [{%{plan: :family_4, name: "RemovedFamily"}, :member}]
+        )
+
+      [membership] = member.memberships
+      claims = %{"typ" => "access", "account_id" => to_string(membership.account_id)}
+
+      # Simulate remove_member/3's effect: hard-delete the row while the
+      # (stale) claim still names the account.
+      Repo.delete!(membership)
+
+      assert AccountsMembership.current_membership(member, claims) == nil
     end
 
     test "returns nil for an access_v2 claim whose membership_id doesn't exist" do

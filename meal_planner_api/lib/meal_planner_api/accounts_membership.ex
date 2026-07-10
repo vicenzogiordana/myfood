@@ -69,11 +69,12 @@ defmodule MealPlannerApi.AccountsMembership do
         }
   def seat_usage(%Account{plan: plan} = account) do
     query =
-      from m in AccountMembership,
+      from(m in AccountMembership,
         where: m.account_id == ^account.id,
         where: m.status in [:active, :invited],
         group_by: m.status,
         select: {m.status, count(m.id)}
+      )
 
     counts =
       case Repo.all(query) do
@@ -99,7 +100,8 @@ defmodule MealPlannerApi.AccountsMembership do
   """
   @spec enforce_seat_cap(Account.t(), pos_integer()) ::
           :ok | {:error, :seat_cap_reached}
-  def enforce_seat_cap(account, count_to_add \\ 1) when is_integer(count_to_add) and count_to_add >= 1 do
+  def enforce_seat_cap(account, count_to_add \\ 1)
+      when is_integer(count_to_add) and count_to_add >= 1 do
     %{active: active, invited: invited, capacity: capacity} = seat_usage(account)
 
     if active + invited + count_to_add > capacity do
@@ -125,7 +127,13 @@ defmodule MealPlannerApi.AccountsMembership do
   responsible for never logging or persisting it).
   """
   @spec invite(Account.t(), AccountMembership.t(), String.t()) ::
-          {:ok, %{token: String.t(), expires_at: DateTime.t(), membership_id: String.t(), email: String.t()}}
+          {:ok,
+           %{
+             token: String.t(),
+             expires_at: DateTime.t(),
+             membership_id: String.t(),
+             email: String.t()
+           }}
           | {:error, atom()}
   def invite(%Account{} = account, %AccountMembership{role: role} = actor, email)
       when role == :owner and is_binary(email) do
@@ -161,10 +169,19 @@ defmodule MealPlannerApi.AccountsMembership do
   truth for membership resolution — useful for tests, channels, and
   background jobs that need to bypass the conn pipeline.
 
-  Per design §10 (Q1) — when the JWT is `access_v1` (legacy) the
-  function **synthesizes** a virtual membership struct in memory, with
-  `__synthesized__: true` so callers can assert which path populated
-  it. No row is inserted.
+  Per design §10 (Q1), when the JWT is `access_v1` (legacy) the
+  function loads the real, `:active` `AccountMembership` row for
+  `(user.id, claims["account_id"])`.
+
+  Post-PR-3b review — BLOCKER fix (legacy membership synthesis): this
+  used to fabricate an in-memory `%AccountMembership{status: :active}`
+  struct straight from the claim, with `__synthesized__: true` and NO
+  database lookup at all. `remove_member/3` and `leave/2` hard-delete
+  the real row without ever clearing `user.account_id`, and legacy
+  tokens carry a 4-week TTL with no server-side revocation — so a
+  removed member's stale token retained full access for weeks. The
+  function now REQUIRES a real, `:active` row; if none exists it
+  returns `nil`, exactly like the `access_v2` no-membership case.
 
   Returns `nil` if `user` is `nil`, the membership can't be resolved,
   or the `typ` claim is unknown.
@@ -175,7 +192,7 @@ defmodule MealPlannerApi.AccountsMembership do
   def current_membership(%PersistenceUser{} = user, claims) when is_map(claims) do
     case Map.get(claims, "typ", "access") do
       "access_v2" -> load_v2_membership(claims)
-      "access" -> synthesize_v1_membership(user, claims)
+      "access" -> load_real_legacy_membership(user, claims)
       _ -> nil
     end
   end
@@ -201,7 +218,7 @@ defmodule MealPlannerApi.AccountsMembership do
     end
   end
 
-  defp synthesize_v1_membership(%PersistenceUser{} = user, claims) do
+  defp load_real_legacy_membership(%PersistenceUser{} = user, claims) do
     case Map.get(claims, "account_id") do
       nil ->
         nil
@@ -210,30 +227,12 @@ defmodule MealPlannerApi.AccountsMembership do
         nil
 
       account_id ->
-        uuid = case Ecto.UUID.cast(account_id) do
-          {:ok, u} -> u
-          _ -> nil
-        end
+        case Ecto.UUID.cast(account_id) do
+          {:ok, uuid} ->
+            Repo.get_by(AccountMembership, user_id: user.id, account_id: uuid, status: :active)
 
-        if uuid do
-          plan =
-            case Repo.get(Account, uuid) do
-              %Account{plan: plan} -> plan
-              _ -> :individual
-            end
-
-          %AccountMembership{
-            id: nil,
-            account_id: account_id,
-            user_id: user.id,
-            role: user.role || :member,
-            status: :active,
-            joined_at: nil
-          }
-          |> Map.put(:plan, plan)
-          |> Map.put(:__synthesized__, true)
-        else
-          nil
+          _ ->
+            nil
         end
     end
   end
@@ -259,7 +258,13 @@ defmodule MealPlannerApi.AccountsMembership do
   `access_v2` shape.
   """
   @spec accept_invite(String.t(), PersistenceUser.t() | map()) ::
-          {:ok, %{user: PersistenceUser.t(), account: Account.t(), membership: AccountMembership.t(), claims: map()}}
+          {:ok,
+           %{
+             user: PersistenceUser.t(),
+             account: Account.t(),
+             membership: AccountMembership.t(),
+             claims: map()
+           }}
           | {:error, atom()}
   def accept_invite(plaintext, %PersistenceUser{} = invitee) when is_binary(plaintext) do
     accept_invite_with_lookup(plaintext, fn _existing ->
@@ -297,7 +302,13 @@ defmodule MealPlannerApi.AccountsMembership do
   "switch account" flow.
   """
   @spec switch_account(PersistenceUser.t(), Ecto.UUID.t() | binary()) ::
-          {:ok, %{user: PersistenceUser.t(), account: Account.t(), membership: AccountMembership.t(), claims: map()}}
+          {:ok,
+           %{
+             user: PersistenceUser.t(),
+             account: Account.t(),
+             membership: AccountMembership.t(),
+             claims: map()
+           }}
           | {:error, :membership_not_found | :not_your_membership | :membership_not_active}
   def switch_account(%PersistenceUser{id: user_id}, target_membership_id)
       when is_binary(target_membership_id) do
@@ -372,17 +383,18 @@ defmodule MealPlannerApi.AccountsMembership do
     hash = InviteService.hash_token(plaintext)
 
     query =
-      from m in AccountMembership,
+      from(m in AccountMembership,
         where: m.invite_token_hash == ^hash,
         where: m.status == :invited,
         limit: 1
+      )
 
     case Repo.one(query) do
       nil ->
         # Could be :invite_token_used (replay) or :invite_token_unknown
         # (wrong plaintext) — distinguish by looking up by hash without
         # the :invited filter.
-        if Repo.exists?(from m in AccountMembership, where: m.invite_token_hash == ^hash) do
+        if Repo.exists?(from(m in AccountMembership, where: m.invite_token_hash == ^hash)) do
           {:error, :invite_token_used}
         else
           {:error, :invite_token_unknown}
@@ -478,14 +490,16 @@ defmodule MealPlannerApi.AccountsMembership do
   @spec list_memberships(Account.t()) :: [AccountMembership.t()]
   def list_memberships(%Account{} = account) do
     query =
-      from m in AccountMembership,
+      from(m in AccountMembership,
         where: m.account_id == ^account.id,
         where: m.status in [:active, :invited],
-        order_by:
-          [asc: fragment("CASE WHEN ? = 'owner' THEN 0 ELSE 1 END", m.role),
-           asc: m.joined_at,
-           asc: m.inserted_at],
+        order_by: [
+          asc: fragment("CASE WHEN ? = 'owner' THEN 0 ELSE 1 END", m.role),
+          asc: m.joined_at,
+          asc: m.inserted_at
+        ],
         preload: [:user]
+      )
 
     Repo.all(query)
   end
@@ -501,7 +515,11 @@ defmodule MealPlannerApi.AccountsMembership do
   """
   @spec remove_member(Account.t(), Ecto.UUID.t() | binary(), AccountMembership.t()) ::
           :ok | {:error, :not_owner | :cannot_remove_owner | :membership_not_found}
-  def remove_member(%Account{} = account, target_user_id, %AccountMembership{role: :owner} = actor)
+  def remove_member(
+        %Account{} = account,
+        target_user_id,
+        %AccountMembership{role: :owner} = actor
+      )
       when is_binary(target_user_id) do
     if actor.user_id == target_user_id do
       {:error, :cannot_remove_owner}
@@ -511,9 +529,7 @@ defmodule MealPlannerApi.AccountsMembership do
           {:error, :membership_not_found}
 
         %AccountMembership{id: id} ->
-          case Repo.delete_all(
-                 from m in AccountMembership, where: m.id == ^id
-               ) do
+          case Repo.delete_all(from(m in AccountMembership, where: m.id == ^id)) do
             {1, _} -> :ok
             _ -> {:error, :membership_not_found}
           end
@@ -555,7 +571,7 @@ defmodule MealPlannerApi.AccountsMembership do
         {:error, :cannot_leave_owned_account}
 
       %AccountMembership{role: :member, id: id} ->
-        case Repo.delete_all(from m in AccountMembership, where: m.id == ^id) do
+        case Repo.delete_all(from(m in AccountMembership, where: m.id == ^id)) do
           {1, _} -> :ok
           _ -> {:error, :not_a_member}
         end
@@ -569,9 +585,10 @@ defmodule MealPlannerApi.AccountsMembership do
     case Ecto.UUID.cast(account_id) do
       {:ok, uuid} ->
         query =
-          from a in Account,
+          from(a in Account,
             where: a.id == ^uuid,
             lock: "FOR UPDATE"
+          )
 
         case Repo.one(query) do
           %Account{} -> :ok
@@ -585,13 +602,14 @@ defmodule MealPlannerApi.AccountsMembership do
 
   defp check_existing_membership(%Account{id: account_id}, email) do
     query =
-      from m in AccountMembership,
+      from(m in AccountMembership,
         join: u in PersistenceUser,
         on: u.id == m.user_id,
         where: m.account_id == ^account_id and u.email == ^email,
         where: m.status in [:invited, :active],
         limit: 1,
         select: m.status
+      )
 
     case Repo.one(query) do
       nil -> :ok
