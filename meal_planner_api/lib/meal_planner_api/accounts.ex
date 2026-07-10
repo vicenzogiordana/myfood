@@ -36,7 +36,8 @@ defmodule MealPlannerApi.Accounts do
          {:ok, db_account_id} <- stable_uuid("account:" <> account_id),
          {:ok, db_user_id} <- stable_uuid("user:" <> user_id),
          {:ok, account} <- upsert_account(db_account_id, plan, params),
-         {:ok, user} <- upsert_user(db_user_id, db_account_id, params) do
+         {:ok, user} <- upsert_user(db_user_id, db_account_id, params),
+         {:ok, _membership} <- upsert_membership(db_user_id, db_account_id) do
       {:ok, %{user: user, account: account}}
     else
       {:error, :missing_identity} -> {:error, :missing_identity}
@@ -136,7 +137,11 @@ defmodule MealPlannerApi.Accounts do
   Q10 — landed in PR 2). The function exists here so callers can compile
   during the dual-write window.
   """
-  @spec seat_usage(map()) :: %{active: non_neg_integer(), invited: non_neg_integer(), capacity: pos_integer()}
+  @spec seat_usage(map()) :: %{
+          active: non_neg_integer(),
+          invited: non_neg_integer(),
+          capacity: pos_integer()
+        }
   def seat_usage(%{plan: plan}) when is_atom(plan) do
     %{active: 0, invited: 0, capacity: max_users_for_plan(plan)}
   end
@@ -382,6 +387,34 @@ defmodule MealPlannerApi.Accounts do
         user
         |> PersistenceUser.changeset(attrs)
         |> Repo.update()
+    end
+  end
+
+  # Post-PR-3b review — BLOCKER fix (legacy membership synthesis): this
+  # social-login identity path used to create/update the User row with
+  # `account_id` set, but NEVER inserted a real `AccountMembership` row —
+  # unlike `register_with_password/1` (PR 2b task 2.10), which does so
+  # atomically. `LoadCurrentMembership` and its siblings now REQUIRE a
+  # real `:active` AccountMembership row before granting access via a
+  # legacy `access` token (they no longer trust `user.account_id` alone —
+  # see those modules' docs). Without this upsert, every social-login user
+  # would be locked out of their own account. Idempotent: safe to call on
+  # every login.
+  defp upsert_membership(db_user_id, db_account_id) do
+    case Repo.get_by(AccountMembership, user_id: db_user_id, account_id: db_account_id) do
+      nil ->
+        %AccountMembership{}
+        |> AccountMembership.changeset(%{
+          user_id: db_user_id,
+          account_id: db_account_id,
+          role: :owner,
+          status: :active,
+          joined_at: DateTime.utc_now()
+        })
+        |> Repo.insert()
+
+      %AccountMembership{} = membership ->
+        {:ok, membership}
     end
   end
 

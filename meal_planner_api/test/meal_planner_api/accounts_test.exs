@@ -67,6 +67,65 @@ defmodule MealPlannerApi.AccountsTest do
   end
 
   # ----------------------------------------------------------------------
+  # Post-PR-3b review — BLOCKER: legacy membership synthesis fix.
+  #
+  # `find_or_create_identity/1` (the social-login path, `auth_controller.ex`
+  # `social/2`) sets `user.account_id` directly but — unlike
+  # `register_with_password/1` (PR 2b task 2.10) — never inserted a real
+  # `AccountMembership` row. Once `LoadCurrentMembership` (and its siblings)
+  # stop trusting `user.account_id` alone and require a real, `:active`
+  # backing row (see the plug/context fixes below), social-login users
+  # would have been locked out entirely despite never having been removed.
+  # `find_or_create_identity/1` is idempotent (stable UUIDs derived from
+  # the external user_id/account_id) and is called on every social login,
+  # so upserting the membership here also self-heals any social-login user
+  # created before this fix, the next time they log in.
+  # ----------------------------------------------------------------------
+  describe "find_or_create_identity/1 backs the identity with a real AccountMembership row" do
+    test "creates an :owner :active AccountMembership row alongside the User/Account" do
+      {:ok, %{user: user, account: account}} =
+        Accounts.find_or_create_identity(%{
+          "user_id" => "u_membership_backed",
+          "account_id" => "acct_membership_backed"
+        })
+
+      membership =
+        Repo.one!(
+          from(m in AccountMembership,
+            where: m.user_id == ^user.id and m.account_id == ^account.id
+          )
+        )
+
+      assert membership.role == :owner
+      assert membership.status == :active
+      assert %DateTime{} = membership.joined_at
+    end
+
+    test "is idempotent — calling it again for the same identity does not duplicate the row" do
+      identity_params = %{
+        "user_id" => "u_membership_backed_twice",
+        "account_id" => "acct_membership_backed_twice"
+      }
+
+      {:ok, %{user: user, account: account}} = Accounts.find_or_create_identity(identity_params)
+      {:ok, %{user: user2, account: account2}} = Accounts.find_or_create_identity(identity_params)
+
+      assert user2.id == user.id
+      assert account2.id == account.id
+
+      count =
+        Repo.one!(
+          from(m in AccountMembership,
+            where: m.user_id == ^user.id and m.account_id == ^account.id,
+            select: count(m.id)
+          )
+        )
+
+      assert count == 1
+    end
+  end
+
+  # ----------------------------------------------------------------------
   # PR 2b post-review fix pass — item 1: claims_for/2 must not hardcode typ
   # ----------------------------------------------------------------------
   #
@@ -208,6 +267,7 @@ defmodule MealPlannerApi.AccountsTest do
       {:ok, decoded} = Guardian.decode_and_verify(token)
 
       assert decoded["typ"] == "access"
+
       refute Map.has_key?(decoded, "membership_id"),
              "access_v1 MUST NOT carry membership_id"
     end
