@@ -35,13 +35,47 @@ defmodule MealPlannerApi.Accounts do
          plan <- normalize_plan(Map.get(params, "account_type", "individual")),
          {:ok, db_account_id} <- stable_uuid("account:" <> account_id),
          {:ok, db_user_id} <- stable_uuid("user:" <> user_id),
-         {:ok, account} <- upsert_account(db_account_id, plan, params),
-         {:ok, user} <- upsert_user(db_user_id, db_account_id, params),
-         {:ok, _membership} <- upsert_membership(db_user_id, db_account_id) do
+         {:ok, %{account: account, user: user}} <-
+           upsert_identity_transaction(db_account_id, db_user_id, plan, params) do
       {:ok, %{user: user, account: account}}
     else
       {:error, :missing_identity} -> {:error, :missing_identity}
       _ -> {:error, :unable_to_issue_identity}
+    end
+  end
+
+  # Post-review fix (CRITICAL item 3): the 3 upserts used to run as 3
+  # independent Repo calls inside the `with` chain above. If :membership
+  # failed AFTER :account/:user already committed, the function fell
+  # through to {:error, :unable_to_issue_identity} with NO rollback,
+  # leaving exactly the broken (account+user exist, no active
+  # membership) state this whole fix pass exists to eliminate — reachable
+  # via any transient write failure (FK violation, race, DB blip), not
+  # just the original design gap. `upsert_account/3` and `upsert_user/3`
+  # are "get-or-insert-or-update" patterns (not pure inserts), so
+  # `Multi.run/3` is used for each step (runs arbitrary logic inside the
+  # transaction, still rolls back on `{:error, _}`) rather than
+  # restructuring them into pure `Multi.insert`/`Multi.update` calls.
+  defp upsert_identity_transaction(db_account_id, db_user_id, plan, params) do
+    transaction_result =
+      Multi.new()
+      |> Multi.run(:account, fn _repo, _changes -> upsert_account(db_account_id, plan, params) end)
+      |> Multi.run(:user, fn _repo, _changes -> upsert_user(db_user_id, db_account_id, params) end)
+      |> Multi.run(:membership, fn _repo, _changes ->
+        upsert_membership(db_user_id, db_account_id)
+      end)
+      |> Repo.transaction()
+
+    case transaction_result do
+      {:ok, %{account: account, user: user}} ->
+        {:ok, %{account: account, user: user}}
+
+      {:error, step, reason, _changes} ->
+        Logger.error(
+          "find_or_create_identity transaction failed at step=#{inspect(step)} reason=#{inspect(reason)}"
+        )
+
+        {:error, :unable_to_issue_identity}
     end
   end
 

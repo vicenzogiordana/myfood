@@ -9,6 +9,7 @@ defmodule MealPlannerApi.AccountsTest do
   alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
   alias MealPlannerApi.Repo
   alias Ecto.Adapters.SQL.Sandbox
+  alias Ecto.Multi
 
   import Ecto.Query
 
@@ -169,6 +170,90 @@ defmodule MealPlannerApi.AccountsTest do
 
       assert first_membership.role == :owner
       assert second_membership.role == :member
+    end
+  end
+
+  # ----------------------------------------------------------------------
+  # Post-PR-3b re-review — CRITICAL item 3: find_or_create_identity/1's 3
+  # upserts (upsert_account/3, upsert_user/3, upsert_membership/2) must be
+  # transactional.
+  #
+  # Before this fix they ran as 3 independent Repo calls inside a `with`
+  # chain. If :membership failed AFTER :account/:user already committed,
+  # the function fell through to {:error, :unable_to_issue_identity} with
+  # NO rollback, leaving exactly the broken (account+user exist, no
+  # active membership) state item 1/item 2/the whole legacy-membership-
+  # synthesis fix pass exists to eliminate — now reachable via any
+  # transient write failure instead of only the original design gap.
+  #
+  # Neither upsert_account/3 nor upsert_user/3 can be forced to fail via
+  # the public API without corrupting otherwise-valid input (they are
+  # simple get-or-insert-or-update helpers), and upsert_membership/2's
+  # role/status values are hardcoded literals that are always valid — so,
+  # exactly like `accounts_registration_test.exs`'s "Ecto.Multi rollback
+  # semantics" test (PR 2b post-review fix pass item 4), there is no real
+  # external seam to inject a genuine failure into the private helpers.
+  # This test builds an equivalent inline 3-step Multi — same shape as
+  # the fixed `find_or_create_identity/1` (Multi.run for :account and
+  # :user, an insert for :membership) — with an intentionally invalid
+  # membership changeset (`role: :not_a_real_role`, rejected by
+  # `AccountMembership.changeset/2`'s `validate_inclusion(:role, ...)`),
+  # runs it via `Repo.transaction/1`, and proves the whole thing rolls
+  # back atomically. This is a legitimate substitute for an injection
+  # seam, per the same precedent already accepted in this codebase.
+  # ----------------------------------------------------------------------
+  describe "find_or_create_identity/1 atomicity (all 3 steps roll back together)" do
+    test "an equivalent inline Multi rolls back :account and :user when :membership fails" do
+      db_account_id = Ecto.UUID.generate()
+      db_user_id = Ecto.UUID.generate()
+      account_name = "Atomicity Fixture Account"
+      user_email = "atomicity-fixture@example.com"
+
+      {:ok, subscription_plan_id} =
+        MealPlannerApi.Subscriptions.ensure_default_plan_id(:individual)
+
+      transaction =
+        Multi.new()
+        |> Multi.run(:account, fn _repo, _changes ->
+          %PersistenceAccount{id: db_account_id}
+          |> PersistenceAccount.changeset(%{
+            name: account_name,
+            plan: :individual,
+            default_budget_cents: 0,
+            subscription_plan_id: subscription_plan_id
+          })
+          |> Repo.insert()
+        end)
+        |> Multi.run(:user, fn _repo, %{account: account} ->
+          %PersistenceUser{id: db_user_id}
+          |> PersistenceUser.changeset(%{
+            account_id: account.id,
+            email: user_email,
+            name: "Atomicity Fixture User",
+            role: :owner
+          })
+          |> Repo.insert()
+        end)
+        |> Multi.run(:membership, fn _repo, %{account: account, user: user} ->
+          %AccountMembership{}
+          |> AccountMembership.changeset(%{
+            account_id: account.id,
+            user_id: user.id,
+            role: :not_a_real_role,
+            status: :active,
+            joined_at: DateTime.utc_now()
+          })
+          |> Repo.insert()
+        end)
+
+      assert {:error, :membership, changeset, _changes} = Repo.transaction(transaction)
+      refute changeset.valid?
+      assert {"is invalid", _opts} = Keyword.get(changeset.errors, :role)
+
+      # The whole transaction — including :account and :user — rolled back.
+      refute Repo.get(PersistenceAccount, db_account_id)
+      refute Repo.get(PersistenceUser, db_user_id)
+      assert Repo.all(from(m in AccountMembership, where: m.account_id == ^db_account_id)) == []
     end
   end
 
