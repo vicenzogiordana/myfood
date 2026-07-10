@@ -69,6 +69,23 @@ defmodule MealPlannerApiWeb.InviteController do
             Logger.warning("invite accept rejected reason=#{reason}")
             conn |> put_status(error_status(reason)) |> json(%{error: Atom.to_string(reason)})
 
+          # Second post-review fix pass: `accept_invite_with_lookup/2`'s
+          # `Repo.update/1` call can fail the
+          # `account_memberships_active_account_user_unique_index` partial
+          # unique constraint (e.g. two `:invited` rows for the same
+          # (account_id, user_id) — a retried/duplicate invite, or a
+          # concurrent-accept race), propagating `{:error, %Ecto.Changeset{}}`
+          # instead of an atom. `Atom.to_string/1` on a `%Ecto.Changeset{}`
+          # raises `ArgumentError`. Treat it as the same conflict outcome as
+          # `:already_a_member` (409) — a duplicate accept is conceptually
+          # the same thing, just detected one layer down.
+          {:error, %Ecto.Changeset{} = changeset} ->
+            Logger.warning(
+              "invite accept rejected reason=membership_conflict errors=#{inspect(changeset.errors)}"
+            )
+
+            conn |> put_status(:conflict) |> json(%{error: "already_a_member"})
+
           {:error, reason} ->
             conn |> put_status(error_status(reason)) |> json(%{error: Atom.to_string(reason)})
         end

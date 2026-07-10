@@ -7,6 +7,7 @@ defmodule MealPlannerApiWeb.InviteAcceptControllerTest do
   alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Repo
+  alias MealPlannerApi.Services.InviteService
 
   describe "POST /api/invites/:token/accept (task 3.4)" do
     test "existing User accepts and receives a fresh auth payload", %{conn: conn} do
@@ -266,6 +267,58 @@ defmodule MealPlannerApiWeb.InviteAcceptControllerTest do
 
       assert claims["typ"] == "access"
       refute Map.has_key?(claims, "membership_id")
+    end
+  end
+
+  # Second post-review fix pass: `accept/2`'s generic `{:error, reason} ->
+  # ... Atom.to_string(reason)` clause assumes `reason` is always an atom.
+  # `accept_invite_with_lookup/2`'s `Repo.update/1` call can propagate
+  # `{:error, %Ecto.Changeset{}}` from the
+  # `account_memberships_active_account_user_unique_index` partial unique
+  # constraint when two DIFFERENT `:invited` rows exist for the same
+  # `(account_id, user_id)` pair and the second one is accepted after the
+  # first already flipped to `:active` (a retried/duplicate invite, or a
+  # concurrent accept race — `AccountsMembership.invite/3`'s app-layer
+  # `:already_invited` guard only stops a SECOND invite call; it does not
+  # stop a SECOND accept of two invites that were already both minted).
+  # `Atom.to_string/1` on a `%Ecto.Changeset{}` raises `ArgumentError`,
+  # turning a controlled 409 into an unhandled 500.
+  describe "changeset-level unique-constraint conflict on accept (second post-review fix pass)" do
+    test "accepting a second invite for a user already active on the account returns 409, not a crash",
+         %{conn: conn} do
+      owner =
+        user_with_memberships(%{email: "owner_accept_dupe@example.com"}, [
+          {%{plan: :family_4, name: "Family Accept Dupe"}, :owner}
+        ])
+
+      [owner_membership] = owner.memberships
+
+      # Two independent :invited rows for the SAME email/user on the SAME
+      # account, created directly via InviteService (bypassing
+      # AccountsMembership.invite/3's :already_invited app-layer guard) —
+      # this is the only way to reach the changeset-level constraint
+      # instead of the earlier app-layer check.
+      {:ok, %{token: first_plaintext}} =
+        InviteService.create_invite_row(owner_membership, "dupe_invitee@example.com")
+
+      {:ok, %{token: second_plaintext}} =
+        InviteService.create_invite_row(owner_membership, "dupe_invitee@example.com")
+
+      first_conn =
+        post(conn, "/api/invites/#{first_plaintext}/accept", %{
+          "name" => "Dupe Invitee",
+          "password" => "supersecret123"
+        })
+
+      assert json_response(first_conn, 200)
+
+      second_conn =
+        post(conn, "/api/invites/#{second_plaintext}/accept", %{
+          "name" => "Dupe Invitee",
+          "password" => "supersecret123"
+        })
+
+      assert json_response(second_conn, 409)["error"] == "already_a_member"
     end
   end
 end
