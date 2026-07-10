@@ -58,31 +58,8 @@ defmodule MealPlannerApi.Accounts do
   # restructuring them into pure `Multi.insert`/`Multi.update` calls.
   defp upsert_identity_transaction(db_account_id, db_user_id, plan, params) do
     transaction_result =
-      Multi.new()
-      # Post-second-review fix (CRITICAL item 1): the Account row lock
-      # (see `first_member_role/1` below) MUST be taken as the very FIRST
-      # statement in this transaction, before `:user`'s insert.
-      # `AccountMembership.changeset/2`'s `foreign_key_constraint(:account_id)`
-      # (and `User`'s own FK to `account_id`) make Postgres implicitly
-      # take a weak `FOR KEY SHARE` lock on the referenced Account row
-      # whenever `:user` or `:membership` inserts a row pointing at it. If
-      # the exclusive `FOR UPDATE` lock were only taken later (inside
-      # `:membership`), two concurrent transactions could each already be
-      # holding the OTHER's needed `FOR KEY SHARE` (from their own `:user`
-      # insert) by the time both try to upgrade to `FOR UPDATE` — a
-      # textbook mutual lock-upgrade deadlock (Postgres error 40P01),
-      # verified empirically while building this fix (see
-      # apply-progress.md). Locking first avoids the upgrade entirely: a
-      # second transaction blocks on `FOR KEY SHARE` (its `:user` step)
-      # before it ever gets to request its own `FOR UPDATE`.
-      |> Multi.run(:account_lock, fn _repo, _changes ->
-        {:ok, lock_account_row(db_account_id)}
-      end)
-      |> Multi.run(:account, fn _repo, _changes -> upsert_account(db_account_id, plan, params) end)
-      |> Multi.run(:user, fn _repo, _changes -> upsert_user(db_user_id, db_account_id, params) end)
-      |> Multi.run(:membership, fn _repo, _changes ->
-        upsert_membership(db_user_id, db_account_id)
-      end)
+      db_account_id
+      |> build_identity_multi(db_user_id, plan, params)
       |> Repo.transaction()
 
     case transaction_result do
@@ -96,6 +73,45 @@ defmodule MealPlannerApi.Accounts do
 
         {:error, :unable_to_issue_identity}
     end
+  end
+
+  # Post-second-review fix (CRITICAL item 2, test-quality): extracted out
+  # of `upsert_identity_transaction/4` so the test suite can introspect
+  # the REAL production `Ecto.Multi` (step names + order) that
+  # `find_or_create_identity/1` runs, instead of a hand-rolled "shape
+  # equivalence" copy. `@doc false` + public rather than `defp` — same
+  # pattern as `AccountsMembership.load_account/1`'s post-review fix
+  # (public so a caller/test can delegate here instead of duplicating).
+  # This function only BUILDS the `Multi` (pure data, no DB access) — it
+  # does not execute or commit anything itself.
+  @doc false
+  @spec build_identity_multi(String.t(), String.t(), atom(), map()) :: Multi.t()
+  def build_identity_multi(db_account_id, db_user_id, plan, params) do
+    Multi.new()
+    # Post-second-review fix (CRITICAL item 1, continued): the Account
+    # row lock (see `first_member_role/1` below) MUST be taken as the
+    # very FIRST statement in this transaction, before `:user`'s insert.
+    # `AccountMembership.changeset/2`'s `foreign_key_constraint(:account_id)`
+    # (and `User`'s own FK to `account_id`) make Postgres implicitly
+    # take a weak `FOR KEY SHARE` lock on the referenced Account row
+    # whenever `:user` or `:membership` inserts a row pointing at it. If
+    # the exclusive `FOR UPDATE` lock were only taken later (inside
+    # `:membership`), two concurrent transactions could each already be
+    # holding the OTHER's needed `FOR KEY SHARE` (from their own `:user`
+    # insert) by the time both try to upgrade to `FOR UPDATE` — a
+    # textbook mutual lock-upgrade deadlock (Postgres error 40P01),
+    # verified empirically while building this fix (see
+    # apply-progress.md). Locking first avoids the upgrade entirely: a
+    # second transaction blocks on `FOR KEY SHARE` (its `:user` step)
+    # before it ever gets to request its own `FOR UPDATE`.
+    |> Multi.run(:account_lock, fn _repo, _changes ->
+      {:ok, lock_account_row(db_account_id)}
+    end)
+    |> Multi.run(:account, fn _repo, _changes -> upsert_account(db_account_id, plan, params) end)
+    |> Multi.run(:user, fn _repo, _changes -> upsert_user(db_user_id, db_account_id, params) end)
+    |> Multi.run(:membership, fn _repo, _changes ->
+      upsert_membership(db_user_id, db_account_id)
+    end)
   end
 
   @spec register_with_password(map()) ::

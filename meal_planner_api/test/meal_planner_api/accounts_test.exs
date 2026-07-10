@@ -323,74 +323,113 @@ defmodule MealPlannerApi.AccountsTest do
   # synthesis fix pass exists to eliminate — now reachable via any
   # transient write failure instead of only the original design gap.
   #
-  # Neither upsert_account/3 nor upsert_user/3 can be forced to fail via
-  # the public API without corrupting otherwise-valid input (they are
-  # simple get-or-insert-or-update helpers), and upsert_membership/2's
-  # role/status values are hardcoded literals that are always valid — so,
-  # exactly like `accounts_registration_test.exs`'s "Ecto.Multi rollback
-  # semantics" test (PR 2b post-review fix pass item 4), there is no real
-  # external seam to inject a genuine failure into the private helpers.
-  # This test builds an equivalent inline 3-step Multi — same shape as
-  # the fixed `find_or_create_identity/1` (Multi.run for :account and
-  # :user, an insert for :membership) — with an intentionally invalid
-  # membership changeset (`role: :not_a_real_role`, rejected by
-  # `AccountMembership.changeset/2`'s `validate_inclusion(:role, ...)`),
-  # runs it via `Repo.transaction/1`, and proves the whole thing rolls
-  # back atomically. This is a legitimate substitute for an injection
-  # seam, per the same precedent already accepted in this codebase.
+  # ----------------------------------------------------------------------
+  # Post-PR-3b SECOND re-review — CRITICAL item 2 (test-quality): the
+  # test that used to live here built its OWN hand-rolled, separate
+  # `Ecto.Multi` (same 3 step *names*, different step *bodies*) instead
+  # of exercising the SHIPPED `find_or_create_identity/1`. That proved
+  # generic `Ecto.Multi`/Postgres rollback semantics work — never in
+  # doubt — not that the shipped function is wired correctly (right step
+  # order, right `changes` keys, no swallowed errors).
+  #
+  # Fix: `Accounts.upsert_identity_transaction/4`'s `Multi` construction
+  # was extracted into `Accounts.build_identity_multi/4` (`@doc false`,
+  # public — see its doc comment) purely so tests can introspect and run
+  # the REAL production `Multi`, not a copy. This describe block now has
+  # 2 tests:
+  #
+  #   1. A genuine failure, forced through the PUBLIC
+  #      `find_or_create_identity/1` API, at the real `:user` step (a
+  #      `unique_constraint(:email)` violation — `users.email` has a
+  #      real unique index, see `20260322090000_create_accounts_and_users.exs`).
+  #      This proves the ACTUAL production transaction rolls back
+  #      end-to-end when a later step fails.
+  #   2. Introspection of `build_identity_multi/4`'s real `Ecto.Multi`
+  #      confirming the step order is exactly
+  #      `[:account_lock, :account, :user, :membership]` — i.e. this IS
+  #      the same multi `find_or_create_identity/1` runs, and `:membership`
+  #      genuinely is the LAST step (so failures at :account or :user,
+  #      like test 1 above, are structurally equivalent evidence for a
+  #      hypothetical :membership failure too: `Ecto.Multi` + `Repo.
+  #      transaction/1`'s rollback-on-`{:error, _}` behavior is
+  #      step-name-agnostic — it does not special-case *which* step
+  #      failed).
+  #
+  # Honesty note — why NOT a genuine :membership-step-specific failure:
+  # we looked hard for one. `upsert_membership/2` only ever calls
+  # `Repo.insert/1` after `Repo.get_by(AccountMembership, user_id:,
+  # account_id:)` finds NO existing row for that exact (user_id,
+  # account_id) pair — and the table's only constraint on that pair
+  # (`account_memberships_active_account_user_unique_index`) is scoped to
+  # that SAME (user_id, account_id) key, so by construction, if `get_by`
+  # found nothing, the subsequent insert cannot violate that constraint
+  # either (single-threaded). `role`/`status` are hardcoded, always-valid
+  # literals. The ONLY way `:membership` could fail was the genuine
+  # concurrent race two DISTINCT users hitting `Repo.get_by` before
+  # either committed — and that is now exactly what item 1's `FOR UPDATE`
+  # lock (this same fix pass) closes. There is no remaining single- or
+  # multi-threaded seam to force a :membership-only failure through the
+  # public API without weakening production code, so we rely on tests 1
+  # + 2 above as documented, honest, structurally-equivalent evidence.
   # ----------------------------------------------------------------------
   describe "find_or_create_identity/1 atomicity (all 3 steps roll back together)" do
-    test "an equivalent inline Multi rolls back :account and :user when :membership fails" do
-      db_account_id = Ecto.UUID.generate()
-      db_user_id = Ecto.UUID.generate()
-      account_name = "Atomicity Fixture Account"
-      user_email = "atomicity-fixture@example.com"
+    test "a real failure at the :user step rolls back the whole transaction, including :account" do
+      conflicting_email = "atomicity-real-seam@example.com"
 
-      {:ok, subscription_plan_id} =
-        MealPlannerApi.Subscriptions.ensure_default_plan_id(:individual)
+      # Pre-existing User with this email, under a DIFFERENT identity —
+      # legitimate test fixture, not touching production code.
+      {:ok, %{account: _other_account}} =
+        Accounts.find_or_create_identity(%{
+          "user_id" => "u_atomicity_seam_owner",
+          "account_id" => "acct_atomicity_seam_owner",
+          "email" => conflicting_email
+        })
 
-      transaction =
-        Multi.new()
-        |> Multi.run(:account, fn _repo, _changes ->
-          %PersistenceAccount{id: db_account_id}
-          |> PersistenceAccount.changeset(%{
-            name: account_name,
-            plan: :individual,
-            default_budget_cents: 0,
-            subscription_plan_id: subscription_plan_id
-          })
-          |> Repo.insert()
-        end)
-        |> Multi.run(:user, fn _repo, %{account: account} ->
-          %PersistenceUser{id: db_user_id}
-          |> PersistenceUser.changeset(%{
-            account_id: account.id,
-            email: user_email,
-            name: "Atomicity Fixture User",
-            role: :owner
-          })
-          |> Repo.insert()
-        end)
-        |> Multi.run(:membership, fn _repo, %{account: account, user: user} ->
-          %AccountMembership{}
-          |> AccountMembership.changeset(%{
-            account_id: account.id,
-            user_id: user.id,
-            role: :not_a_real_role,
-            status: :active,
-            joined_at: DateTime.utc_now()
-          })
-          |> Repo.insert()
-        end)
+      new_external_user_id = "u_atomicity_seam_new"
+      new_external_account_id = "acct_atomicity_seam_new"
 
-      assert {:error, :membership, changeset, _changes} = Repo.transaction(transaction)
-      refute changeset.valid?
-      assert {"is invalid", _opts} = Keyword.get(changeset.errors, :role)
+      {:ok, new_db_account_id} = stable_uuid_for_test("account:" <> new_external_account_id)
+      {:ok, new_db_user_id} = stable_uuid_for_test("user:" <> new_external_user_id)
 
-      # The whole transaction — including :account and :user — rolled back.
-      refute Repo.get(PersistenceAccount, db_account_id)
-      refute Repo.get(PersistenceUser, db_user_id)
-      assert Repo.all(from(m in AccountMembership, where: m.account_id == ^db_account_id)) == []
+      # This call's :account step WILL commit-in-progress (creates a
+      # brand-new Account for new_external_account_id); its :user step
+      # WILL fail — `email` collides with the pre-existing User above,
+      # tripping the real `unique_constraint(:email)` — a genuine DB
+      # failure via the public API, not a fabrication.
+      assert {:error, :unable_to_issue_identity} =
+               Accounts.find_or_create_identity(%{
+                 "user_id" => new_external_user_id,
+                 "account_id" => new_external_account_id,
+                 "email" => conflicting_email
+               })
+
+      # The whole transaction rolled back — including the :account row
+      # that was inserted earlier in the SAME transaction, before :user
+      # failed.
+      refute Repo.get(PersistenceAccount, new_db_account_id)
+      refute Repo.get(PersistenceUser, new_db_user_id)
+
+      assert Repo.all(from(m in AccountMembership, where: m.account_id == ^new_db_account_id)) ==
+               []
+    end
+
+    test "build_identity_multi/4 (the real production Multi) runs :account_lock, :account, :user, :membership in that order" do
+      params = %{
+        "email" => "introspection-fixture@example.com",
+        "name" => "Introspection Fixture"
+      }
+
+      multi =
+        Accounts.build_identity_multi(
+          Ecto.UUID.generate(),
+          Ecto.UUID.generate(),
+          :individual,
+          params
+        )
+
+      step_names = multi |> Multi.to_list() |> Enum.map(fn {name, _operation} -> name end)
+
+      assert step_names == [:account_lock, :account, :user, :membership]
     end
   end
 
@@ -601,5 +640,28 @@ defmodule MealPlannerApi.AccountsTest do
       joined_at: DateTime.utc_now()
     })
     |> Repo.insert!()
+  end
+
+  # Local re-derivation of Accounts.stable_uuid/1 (private) purely so
+  # this test file can predict the deterministic id find_or_create_identity/1
+  # will use, to assert on rollback. Mirrors the production algorithm
+  # exactly; if that algorithm ever changes, this needs to change too.
+  defp stable_uuid_for_test(value) do
+    <<a1::32, a2::16, a3::16, a4::16, a5::48, _::binary>> = :crypto.hash(:sha256, value)
+
+    part3 = Bitwise.bor(Bitwise.band(a3, 0x0FFF), 0x4000)
+    part4 = Bitwise.bor(Bitwise.band(a4, 0x3FFF), 0x8000)
+
+    uuid =
+      [
+        Integer.to_string(a1, 16) |> String.pad_leading(8, "0"),
+        Integer.to_string(a2, 16) |> String.pad_leading(4, "0"),
+        Integer.to_string(part3, 16) |> String.pad_leading(4, "0"),
+        Integer.to_string(part4, 16) |> String.pad_leading(4, "0"),
+        Integer.to_string(a5, 16) |> String.pad_leading(12, "0")
+      ]
+      |> Enum.join("-")
+
+    Ecto.UUID.cast(uuid)
   end
 end
