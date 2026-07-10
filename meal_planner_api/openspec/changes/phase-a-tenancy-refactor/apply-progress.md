@@ -1898,3 +1898,157 @@ separately per the existing "Phase A readiness" section above): tasks
 of `user.account_id`, and the cross-Account HTTP isolation checkpoint) —
 those govern `access_v2` multi-familia switching over HTTP, a distinct
 gap from this fix's legacy-token access-control BLOCKER.
+
+---
+
+# Post-PR-3b re-review fix pass — 3 issues found by the 5-agent re-review
+
+> **Change**: `phase-a-tenancy-refactor`
+> **Branch**: `feature/phase-a-pr-3b`
+> **Apply mode**: `strict_tdd: true`, `test_runner: mix test`
+> **Status**: ✅ 3 / 3 items complete
+> **Date**: 2026-07-10
+
+## Goal recap
+
+A 5-agent re-review (`sdd-verify` + 4R) of the "legacy membership
+synthesis BLOCKER fix" (commits `6ebb48c`..`15e1180`) confirmed that fix
+is correct and closed, but found 3 new issues it introduced. All 3 are
+fixed here, in the required order: BLOCKER first, then the two CRITICAL
+items.
+
+## Summary
+
+- **3 / 3 items complete.**
+- **3 commits** on `feature/phase-a-pr-3b` (one per item, in order).
+- Baseline at session start: **475 tests, 0 failures**. Final: **477
+  tests, 0 failures** (+2 net — item 1 extended 3 existing tests with no
+  new test functions; item 2 added 1 new test; item 3 added 1 new test).
+
+## TDD Cycle Evidence
+
+| Item | RED | GREEN | REFACTOR | Notes |
+|---|---|---|---|---|
+| 1. Zero observability on fail-closed denial paths | ✅ 3 `capture_log` assertions failed (empty log) across the 3 call sites | ✅ `Logger.warning/1` added at each denial point | — | No production behavior change — logging only. |
+| 2. `upsert_membership/2` hardcoded `role: :owner` | ✅ 2 distinct users on the same shared account both got `:owner` | ✅ `first_member_role/1` checks `Repo.exists?` for any existing membership on the account | — | Real privilege-escalation bug fixed. |
+| 3. `find_or_create_identity/1`'s 3 upserts non-transactional | N/A — standalone `Ecto.Multi`/`Repo.transaction` framework-semantics test, same precedent as PR 2b post-review item 4 (see below) | ✅ | — | Constructs an equivalent 3-step `Multi` inline (same shape as the fixed `find_or_create_identity/1`) with an intentionally invalid `:membership` changeset; asserts `{:error, :membership, _, _}` and zero rows for all 3 steps. |
+
+## Item-by-item detail
+
+### Item 1 — BLOCKER: zero observability on the new fail-closed denial paths
+
+- **Files**: `lib/meal_planner_api_web/plugs/load_current_membership.ex`,
+  `lib/meal_planner_api_web/plugs/load_current_membership_socket.ex`,
+  `lib/meal_planner_api/accounts_membership.ex`
+  (`current_membership/2`'s private `load_real_legacy_membership/2`)
+- **Gap**: the 3 fail-closed denial points added by the legacy
+  membership synthesis fix denied access silently. Since that fix
+  already uncovered ONE previously-unknown locked-out population
+  (social-login users, fixed in `6ebb48c`), an undiscovered second
+  population would cause a silent mass lockout, undetectable until
+  users complain.
+- **Fix**: `Logger.warning/1` at each of the 3 denial points, logging
+  `user_id` and `account_id` (never the raw token/claims) with the
+  message `"legacy access token denied: no active membership found
+  user_id=... account_id=..."`. Style matches
+  `EnforceAccountScope`/`auth_controller.ex`'s existing
+  `Logger.warning` calls (plain interpolated string, no `Logger.metadata`).
+- **Test**: extended the 3 existing "no real membership row" /
+  "removed member" tests with `ExUnit.CaptureLog`, asserting the log
+  line and both correlation fields fire. RED confirmed (empty log)
+  before adding the `Logger.warning/1` calls, GREEN after.
+- **Commit**: `12b8d69`
+
+### Item 2 — CRITICAL: `upsert_membership/2` hardcoded `role: :owner` (privilege escalation)
+
+- **File**: `lib/meal_planner_api/accounts.ex`
+- **Bug**: `upsert_membership/2` (added by the prerequisite fix
+  `6ebb48c`) always inserted a NEW membership with `role: :owner`.
+  `db_account_id` is a stable UUID hashed purely from the external
+  `account_id` string, so two DISTINCT external users authenticating
+  against the same external `account_id` (this app's own
+  account-linking/shared-account model — `Account.linked_user_ids` /
+  `link_user/2`) map to the same internal `Account` row. The lookup key
+  is `(user_id, account_id)`, not "does this account already have an
+  owner" — so every distinct user who joined an already-owned account
+  was granted `:owner` authority (`remove_member/3`, `invite/3` both
+  gate on `actor.role == :owner`). This regressed the old (removed)
+  synthesized struct's `role: user.role || :member` default.
+- **Fix**: `first_member_role/1` checks `Repo.exists?` for any existing
+  membership row on the account before deciding the role — first
+  member of an Account is `:owner`, everyone after is `:member`.
+- **Test**: 2 distinct users (`db_user_id`s) both call
+  `find_or_create_identity/1` against the SAME external `account_id`.
+  RED confirmed (both got `:owner`) before the fix, GREEN
+  (`:owner` then `:member`) after.
+- **Commit**: `6279014`
+
+### Item 3 — CRITICAL: `find_or_create_identity/1`'s 3 upserts are non-transactional
+
+- **File**: `lib/meal_planner_api/accounts.ex`
+- **Bug**: `upsert_account/3`, `upsert_user/3`, `upsert_membership/2` ran
+  as 3 independent `Repo` calls inside a `with` chain — unlike
+  `register_with_password/1`'s `create_account_and_user/5`, which wraps
+  all 3 inserts in one `Ecto.Multi`/`Repo.transaction`. A failure in the
+  `:membership` step after `:account`/`:user` already committed fell
+  through to the generic `{:error, :unable_to_issue_identity}` with no
+  rollback, leaving exactly the broken (account+user exist, no active
+  membership) state items 1/2 and the whole prior fix pass exist to
+  eliminate — now reachable via any transient write failure instead of
+  only the original design gap.
+- **Fix**: `upsert_identity_transaction/4` wraps the 3 steps in
+  `Ecto.Multi.run/3` (not `Multi.insert`/`Multi.update`, because
+  `upsert_account/3` and `upsert_user/3` are get-or-insert-or-update
+  patterns, not pure inserts) + `Repo.transaction/1`. Any step failing
+  rolls back all three; the failure is logged via `Logger.error/1`
+  (matching `create_account_and_user/5`'s existing convention for
+  transaction-failure logging).
+- **Test**: neither `upsert_account/3` nor `upsert_user/3` can be forced
+  to fail via the public API without corrupting otherwise-valid input
+  (simple get-or-insert-or-update helpers over always-valid attrs), and
+  `upsert_membership/2`'s `role`/`status` are hardcoded literals that are
+  always valid — the exact same situation
+  `accounts_registration_test.exs`'s PR 2b post-review item 4 test
+  already encountered and solved. Following that precedent exactly: an
+  equivalent inline 3-step `Multi` (same shape as the fixed
+  `find_or_create_identity/1` — `Multi.run` for `:account`/`:user`, an
+  insert for `:membership`) with an intentionally invalid membership
+  changeset (`role: :not_a_real_role`) proves the whole transaction
+  rolls back atomically (`{:error, :membership, changeset, _}`, zero
+  rows for all 3 entities). TDD evidence marks RED as "N/A" for this
+  item, same as the established precedent, since there is no real
+  external seam to inject a genuine failure into the private helpers.
+- **Commit**: `fc91a5b`
+
+## `mix test` summary
+
+```
+475 tests, 0 failures   (baseline, start of this fix pass)
+475 tests, 0 failures   (item 1 — Logger.warning on 3 denial points, no new test functions)
+476 tests, 0 failures   (+1 — item 2 privilege-escalation fix)
+477 tests, 0 failures   (+1 — item 3 transactional atomicity fix)
+```
+
+**Final: 477 tests, 0 failures** (+2 net over the 475 baseline; 0
+regressions).
+
+`mix compile --warnings-as-errors --force`: clean. `mix format` scoped to
+exactly the 5 touched files: clean.
+
+## Files changed
+
+| File | Action |
+|------|--------|
+| `lib/meal_planner_api_web/plugs/load_current_membership.ex` | Modified — `require Logger` + `Logger.warning/1` on legacy-token denial |
+| `lib/meal_planner_api_web/plugs/load_current_membership_socket.ex` | Modified — same, socket sibling |
+| `lib/meal_planner_api/accounts_membership.ex` | Modified — same, `current_membership/2`'s legacy path |
+| `lib/meal_planner_api/accounts.ex` | Modified — `first_member_role/1` (item 2) + `upsert_identity_transaction/4` (item 3) |
+| `test/meal_planner_api_web/plugs/load_current_membership_test.exs` | Extended — 2 `capture_log` assertions |
+| `test/meal_planner_api/accounts_membership_test.exs` | Extended — 1 `capture_log` assertion |
+| `test/meal_planner_api/accounts_test.exs` | Extended — item 2 privilege-escalation test, item 3 atomicity test |
+
+## Status
+
+**All 3 issues found by the 5-agent re-review are fixed.** Branch
+`feature/phase-a-pr-3b` pushed to `origin`. Ready for the next
+`sdd-verify` / re-review pass.
