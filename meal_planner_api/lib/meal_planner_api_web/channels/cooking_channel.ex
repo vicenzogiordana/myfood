@@ -1,25 +1,59 @@
 defmodule MealPlannerApiWeb.CookingChannel do
   use MealPlannerApiWeb, :channel
 
+  alias MealPlannerApi.Data.PlanningRepo
   alias MealPlannerApi.Services.CookingService
+  alias MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket
 
   @impl true
-  def join("cooking:" <> _account_and_session, _payload, socket) do
-    {:ok, socket}
+  def join("cooking:" <> account_and_session, _payload, socket) do
+    topic_account_id =
+      account_and_session
+      |> String.split(":", parts: 2)
+      |> List.first()
+
+    membership = LoadCurrentMembershipSocket.membership_from_socket(socket)
+
+    cond do
+      is_nil(membership) ->
+        {:error, %{reason: "forbidden"}}
+
+      to_string(membership.account_id) != topic_account_id ->
+        {:error, %{reason: "forbidden"}}
+
+      membership.status != :active ->
+        {:error, %{reason: "forbidden"}}
+
+      true ->
+        {:ok,
+         socket
+         |> assign(:account_id, topic_account_id)
+         |> assign(:current_membership, membership)}
+    end
   end
 
   @impl true
   def handle_in("start_session", %{"scheduled_meal_id" => meal_id}, socket)
       when is_binary(meal_id) do
     user = socket.assigns.current_user
+    membership = socket.assigns.current_membership
 
-    case CookingService.start_session(user, meal_id) do
-      {:ok, session} ->
-        push(socket, "session_started", session)
-        {:noreply, socket}
+    # Spec `membership-scoped-channels` §"handle_in with cross-Account entity
+    # id": verify the entity id belongs to current_membership.account_id
+    # BEFORE mutation/delegation.
+    case PlanningRepo.get_scheduled_meal_for_account(membership.account_id, meal_id) do
+      nil ->
+        {:reply, {:error, %{reason: "meal_not_in_account"}}, socket}
 
-      {:error, reason} ->
-        {:reply, {:error, %{reason: reason}}, socket}
+      _meal ->
+        case CookingService.start_session(user, meal_id) do
+          {:ok, session} ->
+            push(socket, "session_started", session)
+            {:noreply, socket}
+
+          {:error, reason} ->
+            {:reply, {:error, %{reason: reason}}, socket}
+        end
     end
   end
 
