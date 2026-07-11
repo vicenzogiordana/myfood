@@ -2052,3 +2052,230 @@ exactly the 5 touched files: clean.
 **All 3 issues found by the 5-agent re-review are fixed.** Branch
 `feature/phase-a-pr-3b` pushed to `origin`. Ready for the next
 `sdd-verify` / re-review pass.
+
+---
+
+# Post-PR-3b SECOND re-review — 3-issue fix pass
+
+> **Change**: `phase-a-tenancy-refactor`
+> **Branch**: `feature/phase-a-pr-3b`
+> **Apply mode**: `strict_tdd: true`, `test_runner: mix test`
+> **Status**: ✅ 3 / 3 items complete
+> **Date**: 2026-07-10
+
+## Goal recap
+
+A 5-agent re-review of the previous 3-issue fix pass (commits
+`12b8d69`..`a7d023e`) found 3 new issues. All 3 fixed here, in the
+required order: CRITICAL (race) first, then CRITICAL (test-quality),
+then WARNING (PII log).
+
+## Summary
+
+- **3 / 3 items complete.**
+- **3 commits** on `feature/phase-a-pr-3b` (one per item, in order):
+  `efa6d85`, `0faf1af`, `31bb586`.
+- Baseline at session start: **477 tests, 0 failures**. Final: **479
+  tests, 0 failures** (+2 net — item 1 added 1 new concurrency test;
+  item 2 replaced 1 flawed test with 2 new tests, net +1; item 3 added
+  no new test function, just extended item 2's test with a
+  `capture_log` assertion).
+
+## TDD Cycle Evidence
+
+| Item | RED | GREEN | REFACTOR | Notes |
+|---|---|---|---|---|
+| 1. TOCTOU race in `first_member_role/1` (2 `:owner`s) | ✅ genuine race reproduced — see below | ✅ | ✅ (deadlock found + fixed mid-cycle, see below) | Real (non-sandboxed) DB connections required — see honesty note. |
+| 2. Hand-rolled "atomicity" test doesn't exercise real code | N/A — test-quality fix, not a behavior bug | ✅ real `:user`-step failure via public API + Multi introspection | ✅ extracted `build_identity_multi/4` | See honesty note on why no genuine `:membership`-step seam exists. |
+| 3. PII leak via unredacted `Ecto.Changeset` in error log | ✅ `capture_log` showed the raw email in the log pre-fix (see below) | ✅ | — | No production behavior change — logging only. |
+
+## Item-by-item detail
+
+### Item 1 — CRITICAL: TOCTOU race in `first_member_role/1` allows two `:owner`s on one Account
+
+- **File**: `lib/meal_planner_api/accounts.ex`
+- **Bug**: `first_member_role/1` did an unlocked `Repo.exists?` check,
+  then — in a separate step back in `upsert_membership/2` — inserted
+  the new membership. Under Postgres's default READ COMMITTED
+  isolation, two concurrent `find_or_create_identity/1` calls for two
+  DISTINCT external users sharing the same `account_id` (this app's
+  account-linking/family-plan model — e.g. a pre-provisioned family
+  account whose members log in for the first time around the same
+  moment) could both observe "no existing membership" before either
+  committed, both getting inserted as `:owner`.
+- **Fix**: take a `FOR UPDATE` row lock on the Account row (same
+  pattern as `AccountsMembership.lock_account_for_invite/1`) as the
+  very FIRST statement of the transaction — BEFORE `:user`'s insert,
+  not merely before the `exists?` check. See "deadlock discovered"
+  below for why the lock's exact position matters.
+- **Test — RED, confirmed empirically, not just theoretically**: wrote
+  a concurrency test firing 8 genuinely concurrent
+  `find_or_create_identity/1` calls (`Task.async`) at an Account that
+  already exists (avoiding the unrelated account-row-insert race,
+  out of scope) but has zero memberships, for 8 distinct new users.
+  Ran it against the UNFIXED code repeatedly: **every single run, all
+  8 racers became `:owner`** (not "sometimes more than one" — every
+  run, all 8). This is a genuine, reliably reproduced bug, not a
+  theoretical one.
+- **A real technical subtlety found along the way — Ecto Sandbox
+  cannot observe this race with default sandboxed connections**: under
+  Ecto's default sandboxed checkout, each spawned `Task` automatically
+  gets its OWN per-process sandbox transaction that can never see
+  another process's uncommitted writes (verified via
+  `IO.puts`/timestamp instrumentation — confirmed genuine concurrency
+  at the connection level, but zero cross-visibility). Fixing this
+  required the test to explicitly `Sandbox.checkin/1` +
+  `Sandbox.checkout(Repo, sandbox: false)` for BOTH the setup phase
+  and every racer task, so writes are genuinely committed and visible
+  across connections — with manual cleanup in `on_exit` since nothing
+  auto-rolls-back real connections.
+  `Ecto.Adapters.SQL.Sandbox.allow/3` (the standard fix for sharing
+  in-progress test data) was considered and rejected: it forces every
+  process onto the SAME physical connection, which serializes all SQL
+  onto one backend and makes it structurally impossible to reproduce
+  two transactions racing on a `FOR UPDATE` lock.
+- **A genuine deadlock found and fixed mid-cycle (REFACTOR)**: the
+  first working version of the fix took the `FOR UPDATE` lock right
+  before the `Repo.exists?` check (the "obvious" place, textually
+  adjacent to the bug). Running the concurrency test against THAT
+  version produced a reliable Postgres `40P01 deadlock_detected` error
+  (reproduced with both 2 and 8 concurrent racers). Root cause:
+  `:user`'s insert (the Multi step immediately before) has a
+  `foreign_key_constraint(:account_id)`, which makes Postgres take an
+  implicit weak `FOR KEY SHARE` lock on the Account row. Two concurrent
+  transactions each already holding the OTHER's needed `FOR KEY SHARE`
+  (from their own `:user` step) and only THEN both trying to upgrade to
+  `FOR UPDATE` is a textbook mutual lock-upgrade deadlock. Fix: move the
+  lock acquisition to the very FIRST statement of the transaction (a new
+  `Multi.run(:account_lock, ...)` step ahead of `:account`), so a second
+  transaction blocks on ITS OWN `FOR KEY SHARE` attempt (its `:user`
+  step) before it ever reaches its own `FOR UPDATE` request — no upgrade,
+  no deadlock.
+- **GREEN, confirmed empirically**: ran the concurrency test 30+ times
+  across different `--seed` values (both at 2 racers and at 8 racers)
+  against the fixed code — zero failures, zero deadlocks, every run
+  produced exactly 1 `:owner`.
+- **Commit**: `efa6d85`
+
+### Item 2 — CRITICAL (test-quality): the shipped "atomicity" test doesn't test the real code
+
+- **File**: `test/meal_planner_api/accounts_test.exs`
+- **Bug**: the "atomicity" test built its OWN hand-rolled, separate
+  `Ecto.Multi` (same 3 step *names*, different step *bodies* — a fresh
+  `PersistenceAccount`/`PersistenceUser`/`AccountMembership` insert
+  chain) instead of exercising the SHIPPED `find_or_create_identity/1`.
+  That proved generic `Ecto.Multi`/Postgres rollback semantics work —
+  never in doubt — not that the shipped function is wired correctly.
+- **Fix**: extracted `upsert_identity_transaction/4`'s `Multi`
+  construction into `build_identity_multi/4` (`@doc false`, public —
+  same pattern as `AccountsMembership.load_account/1`'s earlier
+  post-review fix). This function only BUILDS the `Multi` (pure data);
+  `upsert_identity_transaction/4` still runs it via `Repo.transaction/1`
+  exactly as before — no behavior change, purely a testability seam.
+- **Test — 2 tests replace the 1 flawed one**:
+  1. A genuine failure forced through the PUBLIC
+     `find_or_create_identity/1` API at the real `:user` step: a
+     pre-existing User with a given email (legitimate test fixture,
+     not touching production code), then a second, distinct identity
+     using the SAME email — trips the real `unique_constraint(:email)`
+     (`users.email` has a real unique index,
+     `20260322090000_create_accounts_and_users.exs`). Asserts the whole
+     transaction rolls back, including the `:account` row that
+     committed-in-progress earlier in the SAME transaction.
+  2. Introspection of `build_identity_multi/4`'s real `Ecto.Multi` via
+     `Ecto.Multi.to_list/1`, confirming the step order is exactly
+     `[:account_lock, :account, :user, :membership]` — proving this IS
+     the same multi `find_or_create_identity/1` runs, and that
+     `:membership` genuinely is the last step.
+- **Honesty note — no genuine `:membership`-step-specific failure seam
+  exists**: looked hard for one. `upsert_membership/2` only ever calls
+  `Repo.insert/1` after `Repo.get_by(AccountMembership, user_id:,
+  account_id:)` finds NO existing row for that exact natural key — and
+  the table's only relevant constraint
+  (`account_memberships_active_account_user_unique_index`) is scoped to
+  that SAME key, so by construction a `get_by` miss can never trip that
+  constraint single-threaded. `role`/`status` are hardcoded,
+  always-valid literals. The only way `:membership` could fail was the
+  genuine concurrent race item 1 (this same fix pass) now closes with
+  its `FOR UPDATE` lock. Given `Ecto.Multi` + `Repo.transaction/1`'s
+  rollback-on-`{:error, _}` behavior is step-name-agnostic (it doesn't
+  special-case which step failed), forcing a real `:user`-step failure
+  through the ACTUAL production Multi + confirming `:membership`'s
+  position via introspection is structurally equivalent evidence for
+  the hypothetical `:membership`-failure case.
+- **Commit**: `0faf1af`
+
+### Item 3 — WARNING: PII leak via unredacted `Ecto.Changeset` in error log
+
+- **File**: `lib/meal_planner_api/accounts.ex`
+- **Bug**: `upsert_identity_transaction/4`'s failure log called
+  `inspect/1` on the raw `reason`, which is an `%Ecto.Changeset{}` when
+  the `:account` or `:user` step fails. `Ecto.Changeset`'s default
+  `Inspect` implementation prints the full `:changes` map — including
+  PII (`email`, `name`) supplied by the caller — into logs at `:error`
+  level.
+- **Fix**: `log_transaction_failure/2` — logs only the changeset's
+  `:errors` (validation atoms/messages, never the changed field
+  values) when `reason` is an `%Ecto.Changeset{}`; falls back to
+  logging the reason's shape (`reason_struct`/`reason`/`reason_kind`,
+  never raw `inspect/1`) for any other reason type, since future
+  failure reasons could also carry caller-supplied data.
+- **Test — RED confirmed via `capture_log`**: before this fix, the
+  item-2 `:user`-step-failure test's log line read (captured verbatim
+  during this session, at the pre-fix commit boundary):
+  `find_or_create_identity transaction failed at step=:user reason=#Ecto.Changeset<action: :insert, changes: %{id: "...", name: "MyFood User", role: :owner, account_id: "...", email: "atomicity-real-seam@example.com"}, ...>`
+  — the raw email is directly visible. Extended that same test with an
+  `ExUnit.CaptureLog.capture_log/1` assertion (`refute log =~
+  conflicting_email`), confirmed GREEN after the fix: the log now reads
+  `find_or_create_identity transaction failed at step=:user
+  changeset_errors=[email: {"has already been taken", [constraint:
+  :unique, constraint_name: "users_email_index"]}]` — no PII, but the
+  error shape (field name, reason) is preserved.
+- **Commit**: `31bb586`
+
+## `mix test` summary
+
+```
+477 tests, 0 failures   (baseline, start of this fix pass)
+478 tests, 0 failures   (+1 — item 1 concurrency race fix + test)
+479 tests, 0 failures   (+1 net — item 2 replaces 1 flawed test with 2 new tests)
+479 tests, 0 failures   (item 3 — PII log fix, extends item 2's test, no new test function)
+```
+
+**Final: 479 tests, 0 failures** (+2 net over the 477 baseline; 0
+regressions). Re-ran the full suite 8+ times across different
+`--seed` values at the final commit — stable, no flakiness.
+
+`mix compile --warnings-as-errors --force`: clean at every commit
+boundary. `mix format` scoped to the 2 touched files: clean.
+
+## Files changed
+
+| File | Action |
+|------|--------|
+| `lib/meal_planner_api/accounts.ex` | Modified — `lock_account_row/1` + `Multi.run(:account_lock, ...)` (item 1); `build_identity_multi/4` extraction (item 2); `log_transaction_failure/2` (item 3) |
+| `test/meal_planner_api/accounts_test.exs` | Extended — concurrency race test (item 1); real `:user`-step-failure test + `build_identity_multi/4` introspection test replacing the hand-rolled Multi test (item 2); `capture_log` PII assertion added to the item-2 test (item 3) |
+
+## Honesty summary (explicit, per launch instructions)
+
+- **Item 1's concurrency test**: genuinely reproduces the race (100% of
+  runs, unfixed) and genuinely proves the fix (0 failures across 30+
+  runs, fixed) — but required real, non-sandboxed DB connections
+  (`sandbox: false` + manual cleanup) since Ecto's default sandbox
+  cannot observe cross-process row-lock contention at all. This is
+  documented in-line in the test file itself.
+- **Item 2's test**: could NOT force a genuine `:membership`-step
+  failure through the public API (documented why, above and in the
+  test file) — used a real `:user`-step failure through the ACTUAL
+  production `Multi` instead, plus step-order introspection, as
+  structurally equivalent evidence. This is the documented fallback the
+  launch instructions explicitly allowed for.
+- **No other gaps** — item 3 closed cleanly with a direct before/after
+  log comparison.
+
+## Status
+
+**All 3 issues found by the second 5-agent re-review are fixed.**
+Branch `feature/phase-a-pr-3b`, 3 commits (`efa6d85`, `0faf1af`,
+`31bb586`), pushed to `origin`. Ready for the next `sdd-verify` /
+re-review pass.
