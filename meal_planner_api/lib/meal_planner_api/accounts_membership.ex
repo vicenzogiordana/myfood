@@ -17,6 +17,7 @@ defmodule MealPlannerApi.AccountsMembership do
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.Persistence.Accounts.Account
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
+  alias MealPlannerApi.Persistence.Accounts.AccountMembershipQueries
   alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
   alias MealPlannerApi.Repo
   alias MealPlannerApi.Services.InviteService
@@ -165,9 +166,11 @@ defmodule MealPlannerApi.AccountsMembership do
   def invite(_account, %AccountMembership{}, _email), do: {:error, :not_owner}
 
   @doc """
-  Resolves the `current_membership` from a JWT claim map. Mirrors the
-  `LoadCurrentMembership` plug logic in `meal_planner_api_web/plugs/`
-  (PR 1 task 1.10) so the application layer has a single source of
+  Resolves the `current_membership` from a JWT claim map. Delegates to
+  `MealPlannerApi.Persistence.Accounts.AccountMembershipQueries`, the
+  same shared query module used by the `LoadCurrentMembership` plug and
+  `LoadCurrentMembershipSocket` in `meal_planner_api_web/plugs/`
+  (PR 1 task 1.10), so the application layer has a single source of
   truth for membership resolution — useful for tests, channels, and
   background jobs that need to bypass the conn pipeline.
 
@@ -203,20 +206,7 @@ defmodule MealPlannerApi.AccountsMembership do
     case Map.get(claims, "membership_id") do
       nil -> nil
       "" -> nil
-      membership_id -> fetch_membership_by_id(membership_id)
-    end
-  end
-
-  defp fetch_membership_by_id(membership_id) do
-    case Ecto.UUID.cast(membership_id) do
-      {:ok, uuid} ->
-        case Repo.get(AccountMembership, uuid) do
-          %AccountMembership{} = m -> m
-          _ -> nil
-        end
-
-      _ ->
-        nil
+      membership_id -> AccountMembershipQueries.load_membership_by_id(membership_id)
     end
   end
 
@@ -229,26 +219,16 @@ defmodule MealPlannerApi.AccountsMembership do
         nil
 
       account_id ->
-        case Ecto.UUID.cast(account_id) do
-          {:ok, uuid} ->
-            case Repo.get_by(AccountMembership,
-                   user_id: user.id,
-                   account_id: uuid,
-                   status: :active
-                 ) do
-              nil ->
-                Logger.warning(
-                  "legacy access token denied: no active membership found user_id=#{user.id} account_id=#{uuid}"
-                )
+        case AccountMembershipQueries.load_active_membership(user.id, account_id) do
+          nil ->
+            Logger.warning(
+              "legacy access token denied: no active membership found user_id=#{user.id} account_id=#{account_id}"
+            )
 
-                nil
-
-              %AccountMembership{} = membership ->
-                membership
-            end
-
-          _ ->
             nil
+
+          %AccountMembership{} = membership ->
+            membership
         end
     end
   end
@@ -568,13 +548,18 @@ defmodule MealPlannerApi.AccountsMembership do
   to — they should get `:not_a_member` instead.
 
   Looks the row up by `user_id` + `account_id`, NOT by `actor.id`.
-  `actor` may be a **synthesized** legacy membership (`__synthesized__:
-  true`, `id: nil` — see `LoadCurrentMembership.synthesize_v1_membership/2`)
-  for `access_v1` token holders; `id: nil` never matches a real primary
-  key, so an `id`-based lookup always returned `nil` for every legacy
-  User, making this function permanently broken for them. The
-  synthesized struct does carry the real `user_id`, which is what both
-  real and synthesized memberships have in common.
+  Historical note: before the legacy-membership-synthesis BLOCKER fix
+  (see `LoadCurrentMembership.load_real_legacy_membership/2`), `actor`
+  for `access` (v1) token holders could be an in-memory
+  **synthesized** struct (`__synthesized__: true`, `id: nil`) that was
+  never a real row — an `id`-based lookup would have returned `nil` for
+  every legacy User, permanently broken. The synthesized struct did
+  carry the real `user_id`, which is what both a synthesized and a real
+  membership have in common. Since that fix, `LoadCurrentMembership`
+  and `LoadCurrentMembershipSocket` always resolve `access` tokens to a
+  real `AccountMembership` row (or refuse the request), but this
+  function still looks up by `user_id` + `account_id` rather than
+  `actor.id` for defense in depth.
   """
   @spec leave(Account.t(), AccountMembership.t()) ::
           :ok | {:error, :cannot_leave_owned_account | :not_a_member}

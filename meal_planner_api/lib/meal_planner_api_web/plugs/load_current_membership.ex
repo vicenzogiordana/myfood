@@ -6,8 +6,8 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
   Per `design.md` §4.2:
 
     * When the JWT is `typ: "access_v2"` the plug loads the
-      `AccountMembership` row identified by `claims["membership_id"]`,
-      preload `:account`. Missing/invalid → halt with
+      `AccountMembership` row identified by `claims["membership_id"]`
+      (no association preload). Missing/invalid → halt with
       `401 unauthorized, %{error: "membership_id_required"}`.
 
     * When the JWT is `typ: "access"` (legacy fallback) the plug loads
@@ -17,7 +17,13 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
       request is refused with `401 membership_id_required`, exactly
       like the `access_v2` no-membership case. It no longer fabricates
       an in-memory `:active` struct (see the BLOCKER fix note on
-      `synthesize_legacy_membership/2` below).
+      `load_real_legacy_membership/2` below).
+
+  Both lookups delegate to
+  `MealPlannerApi.Persistence.Accounts.AccountMembershipQueries`, the
+  single shared query module for all "load the real membership" call
+  sites (this plug, `LoadCurrentMembershipSocket`, and
+  `AccountsMembership.current_membership/2`).
 
   The plug is read-only on the conn — it never mutates the User record.
   """
@@ -26,7 +32,7 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
 
   alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
-  alias MealPlannerApi.Repo
+  alias MealPlannerApi.Persistence.Accounts.AccountMembershipQueries
 
   @behaviour Plug
 
@@ -73,7 +79,7 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
         load_access_v2_membership(claims)
 
       "access" ->
-        synthesize_legacy_membership(current_user, claims)
+        load_real_legacy_membership(current_user, claims)
 
       _ ->
         # Unknown typ. Same as the no-membership case — Guardian should
@@ -92,22 +98,10 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
         {:error, :membership_id_required}
 
       membership_id ->
-        case load_membership_by_id(membership_id) do
+        case AccountMembershipQueries.load_membership_by_id(membership_id) do
           %AccountMembership{} = membership -> {:ok, membership}
           _ -> {:error, :membership_id_required}
         end
-    end
-  end
-
-  defp load_membership_by_id(membership_id) do
-    case Ecto.UUID.cast(membership_id) do
-      {:ok, uuid} ->
-        uuid
-        |> AccountMembershipByIdQuery.call()
-        |> Repo.one()
-
-      _ ->
-        nil
     end
   end
 
@@ -126,10 +120,12 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
   # find_or_create_identity/1`'s membership upsert (this fix) guarantee
   # every currently-valid legacy member has such a row — so "no active
   # row found" now correctly means "no longer an active member" (removed,
-  # or never was), not "trust the token's claim".
-  defp synthesize_legacy_membership(%{account_id: account_id, id: user_id}, _claims)
+  # or never was), not "trust the token's claim". (Renamed from
+  # `synthesize_legacy_membership/2` — it hasn't synthesized anything
+  # since this fix; it does a real DB lookup and denies on miss.)
+  defp load_real_legacy_membership(%{account_id: account_id, id: user_id}, _claims)
        when not is_nil(account_id) do
-    case load_real_active_membership(user_id, account_id) do
+    case AccountMembershipQueries.load_active_membership(user_id, account_id) do
       %AccountMembership{} = membership ->
         {:ok, membership}
 
@@ -142,30 +138,5 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
     end
   end
 
-  defp synthesize_legacy_membership(_user, _claims), do: {:error, :membership_id_required}
-
-  defp load_real_active_membership(user_id, account_id) do
-    case Ecto.UUID.cast(account_id) do
-      {:ok, account_uuid} ->
-        Repo.get_by(AccountMembership,
-          user_id: user_id,
-          account_id: account_uuid,
-          status: :active
-        )
-
-      _ ->
-        nil
-    end
-  end
-end
-
-defmodule AccountMembershipByIdQuery do
-  @moduledoc false
-  import Ecto.Query, warn: false
-
-  alias MealPlannerApi.Persistence.Accounts.AccountMembership
-
-  def call(uuid) do
-    from(m in AccountMembership, where: m.id == ^uuid)
-  end
+  defp load_real_legacy_membership(_user, _claims), do: {:error, :membership_id_required}
 end
