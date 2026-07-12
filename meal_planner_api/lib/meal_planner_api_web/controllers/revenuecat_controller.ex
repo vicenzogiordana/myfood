@@ -3,6 +3,7 @@ defmodule MealPlannerApiWeb.RevenuecatController do
 
   alias MealPlannerApi.Persistence.Identity
   alias MealPlannerApi.Services.RevenuecatService
+  alias MealPlannerApiWeb.Controllers.AccountScopeHelpers
 
   def webhook(conn, payload) do
     headers =
@@ -15,8 +16,20 @@ defmodule MealPlannerApiWeb.RevenuecatController do
     end
   end
 
+  # Phase A — Tenancy Refactor (PR 3c task 3.20): the webhook action above
+  # is deliberately unauthenticated (no `:auth` pipe — RevenueCat calls it
+  # directly, ownership is verified from the webhook payload itself, not
+  # from any session). `sync/2` IS behind `:auth`, so its ownership check
+  # is corrected here: `current_user` is scoped to
+  # `conn.assigns.current_membership.account_id` before being handed to
+  # `Identity.ensure_persistent_identity/1`, never the legacy
+  # `current_user.account_id` field. See
+  # `AccountScopeHelpers.scope_user_to_membership/2`.
   def sync(conn, payload) do
-    current_user = Guardian.Plug.current_resource(conn)
+    current_user =
+      conn
+      |> Guardian.Plug.current_resource()
+      |> AccountScopeHelpers.scope_user_to_membership(conn.assigns.current_membership)
 
     with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
          {:ok, data} <-
