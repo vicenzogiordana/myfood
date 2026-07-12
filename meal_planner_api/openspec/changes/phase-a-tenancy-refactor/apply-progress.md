@@ -1477,3 +1477,805 @@ RED → GREEN → REFACTOR.
 - `mix compile --warnings-as-errors --force`: clean.
 - Working tree: 2 commits landed on `feature/phase-a-pr-3a`, each scoped to
   its item; no unrelated files touched.
+
+## PR 3b — Channel sweep (tasks 3.9–3.13)
+
+**Branch**: `feature/phase-a-pr-3b`, created from `feature/phase-a-pr-3a`
+tip (`5315bac`), confirmed at **448 tests, 0 failures** before branching.
+
+**Scope**: tasks 3.9–3.13 only, per the PR 3a/3b split noted in
+`tasks.md` "PR 3 review budget risk". All 5 tasks completed.
+
+### Tasks completed
+
+- [x] 3.9 — `CalendarChannel.join/3` + `handle_in` membership check
+- [x] 3.10 — `PlanningChannel.join/3` + `handle_in` membership check
+- [x] 3.11 — `CookingChannel.join/3` + `handle_in` membership check
+- [x] 3.12 — `AIChannel.join/3` + `handle_in` membership check
+- [x] 3.13 — Multi-familia two-socket channel test (dedicated checkpoint)
+
+### TDD Cycle Evidence
+
+| Task | Test File | Layer | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|-----|-------|-------------|----------|
+| 3.9 | `test/meal_planner_api_web/channels/calendar_channel_test.exs` (+6) | Channel | ✅ (invited-membership case genuinely RED; cross-account/access_v1 cases pre-passed — see note below) | ✅ `ed82260` | ✅ cross-account join / invited join / access_v2 join to non-primary account / access_v1 fallback / cross-account `meal_id` in `set_is_cooked` | ➖ None needed |
+| 3.10 | `test/meal_planner_api_web/channels/planning_channel_test.exs` (+3) | Channel | ✅ (invited-membership case genuinely RED) | ✅ `4f276d7` | ✅ cross-account join / invited join / access_v1 fallback | ➖ None needed |
+| 3.11 | `test/meal_planner_api_web/channels/cooking_channel_test.exs` (+4) | Channel | ✅ (join was previously **unconditional** `{:ok, socket}` — cross-account, invited, and `meal_not_in_account` all genuinely RED) | ✅ `573b1d9` | ✅ cross-account join / invited join / access_v1 fallback / cross-account `scheduled_meal_id` in `start_session` | ➖ None needed |
+| 3.12 | `test/meal_planner_api_web/channels/ai_channel_test.exs` (+3) | Channel | ✅ (invited-membership case genuinely RED; join was previously unconditional) | ✅ `80154b0` | ✅ invited join / access_v2 active join / access_v1 fallback | ➖ None needed |
+| 3.13 | `test/meal_planner_api_web/channels/membership_scoped_channel_test.exs` (new, 1) | Integration (checkpoint) | N/A — dedicated checkpoint per tasks.md ("test passes GREEN"), not a RED→GREEN task; passed on first run because it exercises 3.9–3.12's already-implemented guards | ✅ `c11c0e4` | ✅ single scenario (two sockets, two Accounts, one broadcast) | ➖ None needed |
+
+**Note on RED rigor (3.9/3.10)**: `CalendarChannel` and `PlanningChannel`
+already guarded cross-Account joins via `current_user.account_id ==
+topic_account_id` (task 3.9/3.10 predecessor code). Because
+`MealPlannerApi.Auth.Guardian.resource_from_claims/1` (PR 2b) overwrites
+`current_user.account_id` with `claims["account_id"]` from the JWT itself,
+the pre-existing naive check already coincidentally rejected cross-Account
+joins and coincidentally accepted access_v1 fallback and multi-familia
+access_v2 joins to a non-"first" Account — confirmed by writing those
+cases first and observing them pass before any channel code changed. The
+genuinely new, previously-unenforced behavior in 3.9/3.10 is the
+`:invited`-status rejection (the old code never consulted membership
+status at all), which was confirmed RED (join succeeded) before the fix
+and GREEN after. `CookingChannel` (3.11) and `AIChannel` (3.12) had no
+account-matching guard whatsoever before this PR (`CookingChannel.join/3`
+returned `{:ok, socket}` unconditionally; `AIChannel.join/3` never checked
+membership) — all new tests for those two channels were genuinely RED
+before implementation.
+
+### Files changed
+
+| File | Action | What Was Done |
+|------|--------|---------------|
+| `lib/meal_planner_api_web/channels/calendar_channel.ex` | Modified | `join/3` now consults `LoadCurrentMembershipSocket.membership_from_socket/1`; rejects nil/mismatch/non-active with `forbidden`; assigns `current_membership`. All 4 `handle_in` callbacks (`toggle_favorite`, `upsert_meal`, `delete_meal`, `set_is_cooked`) read `current_membership.account_id` instead of `current_user.account_id`. |
+| `lib/meal_planner_api_web/channels/planning_channel.ex` | Modified | Same join pattern, `"planning:"` prefix. `handle_in` callbacks (`generate_menu`, `chat`, `confirm_proposal`, `reject_proposal`) that directly read `.account_id` now read it from `current_membership`. `swap_constraints`/`confirm_proposal`/`reject_proposal` fallback calls that pass the whole `user` struct to `PlanningChatService` are unchanged (out of scope — service layer, not channel layer). |
+| `lib/meal_planner_api_web/channels/cooking_channel.ex` | Modified | `join/3` previously accepted unconditionally; now parses the `account_id` segment out of the compound `"cooking:<account_id>:<session_id>"` topic via `String.split/3` and applies the same guard. `handle_in("start_session", ...)` now verifies `scheduled_meal_id` belongs to `current_membership.account_id` via `PlanningRepo.get_scheduled_meal_for_account/2` before delegating to `CookingService`, replying `meal_not_in_account` on mismatch. |
+| `lib/meal_planner_api_web/channels/ai_channel.ex` | Modified | `join/3` previously accepted unconditionally; now rejects nil/non-active membership (no account-id-vs-topic check — see deviation below). `handle_in("new_message", ...)` reads `current_membership.account_id` instead of `current_user.account_id` for the error payload. |
+| `test/meal_planner_api_web/channels/calendar_channel_test.exs` | Extended | +6 tests: cross-account join, invited join, access_v1 fallback, access_v2 join to non-primary Account, cross-account `meal_id` in `set_is_cooked`. |
+| `test/meal_planner_api_web/channels/planning_channel_test.exs` | Extended | +3 tests: cross-account join, invited join, access_v1 fallback. |
+| `test/meal_planner_api_web/channels/cooking_channel_test.exs` | Extended | +4 tests: cross-account join, invited join, access_v1 fallback, cross-account `scheduled_meal_id` in `start_session`. |
+| `test/meal_planner_api_web/channels/ai_channel_test.exs` | Extended | +3 tests: invited join rejected, access_v2 active join accepted, access_v1 fallback accepted. |
+| `test/meal_planner_api_web/channels/membership_scoped_channel_test.exs` | Created | Task 3.13 dedicated checkpoint: two sockets (same User, two Accounts) both join `PlanningChannel`; broadcast to Account A's topic only reaches the A-socket. |
+
+### Deviations from design (both documented in `tasks.md` inline, per task)
+
+1. **Task 3.11 (`CookingChannel`) — `set_is_cooked` does not exist on this
+   channel.** The spec `membership-scoped-channels` §"handle_in with
+   cross-Account entity id" and the task's own acceptance criteria cite
+   `handle_in("set_is_cooked", payload, socket)` on the cooking channel as
+   the canonical cross-Account entity-id rejection case. Verified against
+   the actual code (`rg -n "set_is_cooked"`): that event only exists on
+   `CalendarChannel` (task 3.9); `CookingChannel` has no `set_is_cooked`
+   handler at all. `CookingChannel`'s only meal-id-bearing event is
+   `handle_in("start_session", %{"scheduled_meal_id" => ...})`. Implemented
+   the ownership check there instead, using the exact reason string the
+   spec mandates (`meal_not_in_account`). This satisfies the acceptance
+   criterion's intent (cross-Account entity id rejected with that reason)
+   using the event that actually exists on disk, rather than inventing a
+   new `set_is_cooked` handler on `CookingChannel` that nothing in the
+   existing test suite or client integration expects.
+2. **Task 3.12 (`AIChannel`) — topic shape does not carry an account_id.**
+   The task's own text assumes prefix `"ai:"` with the topic shape
+   `<channel>:<account_id>` (per spec `membership-scoped-channels`
+   §"Channel topic shape stays `<channel>:<account_id>`"). The actual
+   channel is registered as `channel("ai_chat:*", ...)` in `user_socket.ex`
+   and its `join/3` pattern is `"ai_chat:" <> room_id`, where `room_id` is
+   an opaque chat/session identifier (confirmed against
+   `ai_channel_test.exs`'s existing `"ai_chat:room_123"` topic and
+   `MealPlannerApi.AI.stream_response/4`, which resolves the Account
+   separately via `user.account_id`, not via `room_id`). There is
+   structurally no account_id embedded in this channel's topic to
+   cross-check against `current_membership.account_id`. Implemented the
+   guard that IS possible and meaningful: reject `nil` or non-`:active`
+   membership (covering the "invited membership rejected" and "access_v1
+   fallback accepted" acceptance criteria exactly as specified). The
+   "cross-Account join rejected" criterion, which cannot be tested
+   literally for this channel (no cross-account topic exists to attempt),
+   is covered by the invited-membership-rejected test instead — the
+   security property it protects (a User without a currently-active
+   membership cannot open a live AI socket) is enforced the same way.
+3. **Multi-membership factory users' `User.account_id` (DB row field) is
+   always `nil`** (per PR 1's nullable `account_id` schema change) — this
+   means most of the cross-Account/legacy-fallback test scenarios in this
+   PR exercise `MealPlannerApi.Auth.Guardian.resource_from_claims/1`'s
+   claims-derived `account_id` override (PR 2b), not the raw DB column.
+   Confirmed this is intentional dual-write behavior (see PR 3a
+   apply-progress risk #3) and not a test-authoring bug.
+
+### Risks / follow-ups for future channel work
+
+1. **Channel count mismatch remains unresolved** (carried from PR 1/2a/3a):
+   `shopping_channel.ex` and `inventory_channel.ex` still do not exist on
+   disk. This PR covers only the 4 channels that exist. Whoever creates
+   those channels in the future should copy the `LoadCurrentMembershipSocket`
+   join-guard pattern from `CalendarChannel`/`PlanningChannel` (simple
+   `"<prefix>:" <> account_id` topic) rather than `CookingChannel`'s
+   compound-topic variant, unless the new channel also needs a
+   `<account_id>:<session_id>` shape.
+2. **`AIChannel`'s topic shape should be revisited if per-Account AI
+   chat isolation ever becomes a real requirement.** Today `room_id` is
+   opaque and not validated against any Account at all beyond "the
+   connecting User has an active membership somewhere" — if two Accounts'
+   Users could ever guess/share a `room_id`, there is no channel-level
+   check preventing simultaneous join to the same room from different
+   Accounts. This was out of scope for PR 3b's mechanical task list (no
+   acceptance criterion asked for it) but is worth flagging for a future
+   change if AI chat rooms become Account-scoped resources.
+3. **`CookingService.start_session/2` and friends still derive their own
+   Account scope internally via `Identity.ensure_persistent_identity/1`**
+   (a legacy stable-UUID derivation from `current_user`, unrelated to
+   `AccountMembership`). This PR added a channel-level pre-check
+   (`meal_not_in_account`) in front of that call for `start_session`
+   specifically; `get_state`, `track_step`, `finish_session`, and
+   `ask_assistant` still delegate to `CookingService` without a
+   channel-level entity check because they operate on `session_id`
+   (already scoped by the prior `start_session` call), not a fresh
+   cross-Account entity id — no acceptance criterion required it, but
+   flagging for anyone extending this surface later.
+4. **`PlanningChannel`'s `swap_constraints`/`confirm_proposal`/
+   `reject_proposal` fallback branches call `PlanningChatService` with the
+   whole `user` struct**, not `current_membership.account_id` — those
+   service calls were left untouched (service-layer, not channel-layer,
+   out of this task's mechanical-rename scope per design §5.2's own module
+   list, which only lists the channel files as modified for this task
+   set).
+
+### Final verification (this session)
+
+- `mix test`: **464 tests, 0 failures** (baseline 448 at PR 3b branch
+  point; +16 net new tests across 5 commits).
+- Ran `mix test` after every task (3.9 → 453, 3.10 → 456, 3.11 → 460,
+  3.12 → 463, 3.13 → 464), all green, no regressions at any step.
+- `mix format` was run scoped only to the files touched in each commit
+  (never an unscoped/project-wide `mix format` or `mix precommit`) — no
+  repeat of the PR 3a side-effect risk.
+- Branch: `feature/phase-a-pr-3b`, 5 commits, each one task, each with its
+  own RED→GREEN test evidence.
+
+### Commits landed (chronological)
+
+| # | SHA | Task | Message |
+|---|-----|------|---------|
+| 1 | `ed82260` | 3.9 | feat(channels): enforce membership-scoped join + set_is_cooked on CalendarChannel |
+| 2 | `4f276d7` | 3.10 | feat(channels): enforce membership-scoped join on PlanningChannel |
+| 3 | `573b1d9` | 3.11 | feat(channels): enforce membership-scoped join + entity check on CookingChannel |
+| 4 | `80154b0` | 3.12 | feat(channels): enforce active-membership guard on AIChannel join |
+| 5 | `c11c0e4` | 3.13 | test(channels): add multi-familia two-socket checkpoint for PlanningChannel |
+
+### Out of scope (explicitly not touched, per launch prompt)
+
+- `shopping_channel.ex` / `inventory_channel.ex` creation — confirmed
+  deferred, open question, not resolved in this session.
+- Tasks 3.1–3.8 (controllers + auth rewrite) — already landed in PR 3a.
+- Tasks 3.14+ (controller sweep, further tests, docs) — not in PR 3b
+  scope; no PR 3c is currently planned per the original 3-PR split, so
+  whoever picks up tasks 3.14+ should re-read `tasks.md` §"PR strategy"
+  and this section's "Risks / follow-ups" before starting.
+
+### PR 3b — post-review fix: CRITICAL crash bug in `CookingChannel.start_session`
+
+- **Found by**: a `review-resilience` pass over PR 3b's diff.
+- **Bug**: `handle_in("start_session", %{"scheduled_meal_id" => meal_id}, socket)`
+  guarded `meal_id` with `is_binary(meal_id)` only — no UUID-format check
+  — before calling
+  `PlanningRepo.get_scheduled_meal_for_account(membership.account_id, meal_id)`.
+  `ScheduledMeal.id` is `:binary_id`, so any well-formed-but-non-UUID string
+  (e.g. `"not-a-uuid"`) made Ecto raise `Ecto.Query.CastError` inside the
+  query, uncaught by the surrounding `case` — this crashed the channel
+  `GenServer` instead of replying `{:error, ...}` to the client.
+- **Fix**: wrapped the existing `case PlanningRepo.get_scheduled_meal_for_account/2 ...`
+  block in a `try/rescue`, matching the exact pattern already used by
+  `PlanningChannel.handle_in("confirm_proposal"/"reject_proposal", ...)`
+  (`rescue Ecto.Query.CastError -> {:reply, {:error, %{reason: ...}}, socket}`).
+  Reason string is `"invalid_meal_id"` — kept distinct from
+  `"meal_not_in_account"` (valid UUID, wrong Account) since they are
+  different failure modes a client needs to distinguish.
+- **TDD**: added
+  `test/meal_planner_api_web/channels/cooking_channel_test.exs` — "malformed
+  (non-UUID) scheduled_meal_id returns a clean error instead of crashing the
+  channel". Confirmed RED first: `mix test` on the new test alone reproduced
+  the exact crash (`** (Ecto.Query.CastError) ... value "not-a-uuid" cannot
+  be dumped to type :binary_id ...`, GenServer terminating). After the fix,
+  GREEN: `assert_reply(ref, :error, %{reason: "invalid_meal_id"})`.
+- **Files**: `lib/meal_planner_api_web/channels/cooking_channel.ex` (modified),
+  `test/meal_planner_api_web/channels/cooking_channel_test.exs` (extended,
+  +1 test).
+- **`mix test`**: 465 tests, 0 failures (was 464 before this fix; +1 new
+  test, no regressions).
+- **Commit**: `fix(channels): guard CookingChannel.start_session against
+  malformed scheduled_meal_id`.
+
+---
+
+# Post-PR-3b review — BLOCKER fix: legacy membership synthesis (fail-open → fail-closed)
+
+> **Change**: `phase-a-tenancy-refactor`
+> **Branch**: `feature/phase-a-pr-3b`
+> **Apply mode**: `strict_tdd: true`, `test_runner: mix test`
+> **Status**: ✅ complete
+> **Date**: 2026-07-10
+
+## Goal recap
+
+Close the BLOCKER flagged by the PR 3b `review-risk` pass: for legacy
+`typ: "access"` (access_v1) JWTs, the codebase resolved
+`current_membership` by **synthesizing** an in-memory
+`%AccountMembership{status: :active}` struct straight from
+`user.account_id` — no database lookup, ever. `AccountsMembership.
+remove_member/3` and `.leave/2` hard-delete the real `AccountMembership`
+row without clearing `user.account_id`, and Guardian's `access` tokens
+carry a 4-week TTL with no server-side denylist — so a removed member's
+stale token retained full read/write access to every membership-scoped
+controller and channel (including PR 3b's own new channel guards, whose
+`status != :active` check was always vacuously false against a
+synthesized struct) for up to 4 weeks post-removal.
+
+**Fix**: before granting access via a legacy token, require a real,
+`:active` `AccountMembership` row for `(user_id, account_id)`. If found,
+use it directly (real `id`, `status`, `role`, `joined_at` — no
+`__synthesized__` flag, mirroring the `access_v2` path). If not found,
+deny — same treatment as "no membership" (`401
+membership_id_required` / `nil`, matching each call site's existing
+no-membership shape).
+
+## Functions changed (the 3 named duplicates + 1 discovered along the way)
+
+1. `MealPlannerApiWeb.Plugs.LoadCurrentMembership.synthesize_legacy_membership/2`
+   (HTTP conn plug) — now `Repo.get_by(AccountMembership, user_id:,
+   account_id:, status: :active)`; `nil` → `{:error,
+   :membership_id_required}` (halts 401, same shape as the existing
+   `access_v2` no-membership case).
+2. `MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket.synthesize_legacy_membership/1`
+   (channel socket sibling) — same real-row query; preloads `:account`
+   for parity with this module's own `access_v2` branch; `nil` on no
+   row.
+3. `MealPlannerApi.AccountsMembership.synthesize_v1_membership/2` →
+   renamed `load_real_legacy_membership/2` (application layer,
+   `current_membership/2`) — same real-row query, keyed off
+   `claims["account_id"]` (this module's pre-existing source of truth,
+   distinct from the two plugs which read `user.account_id` — left
+   unchanged to avoid widening this fix's blast radius).
+4. **Discovered while investigating, not in the original 3**:
+   `MealPlannerApiWeb.UserSocket`'s `connect/3` had its OWN, 4th,
+   independent copy of the exact same fabrication pattern (a private
+   `synthesize_legacy_membership/2` that never delegated to
+   `LoadCurrentMembershipSocket`, unlike its own `access_v2` branch).
+   Fixing only the 3 named functions would have left socket connections
+   (and therefore every channel join) still vulnerable through this
+   path. **Consolidated** rather than duplicated the fix: `connect/3`'s
+   `access` branch now delegates to `LoadCurrentMembershipSocket.
+   membership_from_socket/1` — the same function its `access_v2` branch
+   already used — eliminating the duplicate outright (net −35 lines in
+   `user_socket.ex`) instead of adding a 5th independent copy of the
+   query.
+
+## A 5th, pre-existing gap this fix would have broken without a prerequisite fix
+
+`MealPlannerApi.Accounts.find_or_create_identity/1` (the **social-login**
+production path, `AuthController.social/2`) sets `user.account_id`
+directly but — unlike `register_with_password/1` (PR 2b task 2.10) —
+**never inserted a real `AccountMembership` row**, ever. The launch
+prompt's premise ("PR 1's backfill + PR 2b's atomic registration
+guarantee every currently-valid member has a real row") does not cover
+social-login users, because that identity path predates and bypasses
+both guarantees. Confirmed by reading `find_or_create_identity/1` →
+`upsert_user/3` directly, and independently confirmed by the blast
+radius: `test/support/channel_helpers.ex`'s `issue_identity_and_token/2`
+(used by every test in `calendar_channel_test.exs`,
+`planning_channel_test.exs`, `cooking_channel_test.exs`, and
+`ai_channel_test.exs`) calls this exact function, so this gap was not a
+contrived edge case — it was the default legacy-token fixture for the
+entire channel test suite.
+
+Landing the 3(+1) synthesis fixes without also fixing this would have
+**locked out every social-login user** (a real functional regression,
+not just broken tests). Fixed by adding `Accounts.upsert_membership/2`
+(private, idempotent) to `find_or_create_identity/1`'s `with` chain —
+inserts an `:owner :active` `AccountMembership` row the first time an
+identity is seen, no-ops on subsequent calls. Because
+`find_or_create_identity/1` runs on every social login, this also
+**self-heals** any social-login user created before this fix, the next
+time they log in.
+
+## TDD Cycle Evidence
+
+| # | Scenario | Test File | RED | GREEN | TRIANGULATE | REFACTOR |
+|---|----------|-----------|-----|-------|-------------|----------|
+| 1 | `find_or_create_identity/1` upserts a real `:owner :active` membership (prerequisite) | `accounts_test.exs` | ✅ `Ecto.NoResultsError` / count 0 | ✅ | ✅ idempotency (2nd call, count stays 1) | ➖ None needed |
+| 2 | HTTP plug: no real row → 401; real row → real data; removed member → 401 | `load_current_membership_test.exs` (conn) | ✅ 3 failures (assert struct shape / halt) | ✅ | ✅ 3 scenarios (edge case / legitimate / removed) | ➖ None needed |
+| 3 | Socket plug: no real row → nil; real row → real data; removed member → nil | `load_current_membership_test.exs` (socket) | ✅ 3 failures | ✅ | ✅ 3 scenarios | ➖ None needed |
+| 4 | `AccountsMembership.current_membership/2`: real row wins over synthesis; no row / removed → nil | `accounts_membership_test.exs` | ✅ 3 failures | ✅ | ✅ 3 scenarios | ➖ None needed |
+| 5 | `UserSocket.connect/3` (end-to-end call site): no real row → `:error`; real row → populated; removed member → `:error` | `user_socket_test.exs` | ✅ 3 failures | ✅ | ✅ 3 scenarios | ✅ consolidated away the 4th duplicate |
+
+**Removed-member requirement (launch prompt item 1) — 3 independent proofs**:
+- End-to-end call site: `UserSocket.connect/3` — real membership minted into a token, row hard-deleted, stale token rejected (`:error`).
+- Focused unit test: `AccountsMembership.current_membership/2` — same pattern, `nil`.
+- Focused unit test: `LoadCurrentMembershipSocket.membership_from_socket/1` — same pattern, `nil`.
+- Plus a 4th (HTTP conn, `LoadCurrentMembership.call/2`) for full call-site parity.
+
+**Legitimate legacy member requirement (item 2)** — verified at all 4 call
+sites: real `id`, no `__synthesized__` flag, real `role`/`status` from
+the DB row.
+
+**Genuine edge case (item 3)** — "`user.account_id` set, no real row was
+ever created" — verified at all 4 call sites using the exact fixture
+pattern the pre-fix tests already used (bare `Account` + `User` insert,
+no `AccountMembership` row), which is also precisely what
+`find_or_create_identity/1` used to produce before the prerequisite fix.
+
+## Existing tests updated (with reason, not weakened)
+
+1. `load_current_membership_test.exs` — "access_v1 (legacy) token
+   synthesizes..." (no real row fixture) → renamed to assert 401
+   rejection. **Reason**: this fixture never had a real backing row —
+   under the old behavior it was silently trusted; under the fixed
+   (correct) behavior it must be denied. A separate NEW test covers the
+   "real row exists" case with the correct (non-synthesized) assertion.
+2. `load_current_membership_test.exs` — "synthesizes for an access_v1
+   socket" → same reason/treatment, socket variant.
+3. `user_socket_test.exs` — "synthesizes a current_membership from
+   user.account_id" → same reason/treatment, `connect/3` variant.
+4. `accounts_membership_test.exs` — "returns a synthesized membership
+   for a legacy access claim with `__synthesized__` = true" →
+   **opposite direction**: this fixture (via `user_with_memberships/2`)
+   *already* had a real backing row, so the old assertion
+   (`__synthesized__: true`) was actually pinning the OLD insecure
+   behavior even in a case where a real row existed and should have won.
+   Renamed and flipped to assert the real row's data.
+5. `membership_controller_test.exs` — "a dangling/unknown account
+   reference returns 404 account_not_found" → renamed/reworked. This
+   test proved the controller doesn't leak Account existence, by
+   relying on the plug synthesizing a virtual membership from a claim
+   alone so `EnforceAccountScope` would pass and the controller's own
+   404 check would run. Under the fix, a legacy token for a user with
+   zero real memberships anywhere is now rejected by the plug itself
+   (401) before `EnforceAccountScope` or the controller ever run — a
+   strictly earlier and stronger rejection. Updated to assert the new
+   (earlier, correct) 401, with a comment explaining the controller's
+   404 branch is not weakened, just no longer reachable via this probe.
+
+None of these were "weakened" — each assertion now matches the fixture's
+actual state (real row vs. no row) and the new fail-closed contract.
+
+## Consolidation note
+
+Per the launch prompt's guidance ("if you can cleanly consolidate...
+without adding excessive risk, do so — but correctness is the
+priority"): fully unifying all 4 call sites into one shared query
+function was judged higher-risk than necessary (the 2 HTTP/socket plugs
+read `user.account_id`, while `AccountsMembership.current_membership/2`
+reads `claims["account_id"]` — collapsing that difference would have
+been a separate, riskier refactor). The one consolidation that was both
+safe and high-value — `UserSocket.connect/3` delegating to
+`LoadCurrentMembershipSocket.membership_from_socket/1` instead of
+maintaining its own 4th copy — was done, since it was a straight
+duplicate with no behavioral divergence worth preserving.
+
+## `mix test` summary
+
+```
+465 tests, 0 failures   (baseline, start of this fix pass)
+467 tests, 0 failures   (+2 — find_or_create_identity/1 membership upsert)
+471 tests, 0 failures   (+4 — LoadCurrentMembership + LoadCurrentMembershipSocket)
+471 tests, 0 failures   (membership_controller_test.exs dangling-account fix, net 0)
+473 tests, 0 failures   (+2 — AccountsMembership.current_membership/2)
+475 tests, 0 failures   (+2 — UserSocket.connect/3 consolidation)
+```
+
+**Final: 475 tests, 0 failures** (+10 net over the 465 baseline; 0
+regressions; 0 skipped/weakened assertions — the 5 "updated" tests above
+each now assert something strictly more precise than before, not less).
+
+`mix compile --warnings-as-errors --force`: clean. `mix format
+--check-formatted` on all 10 touched files: clean (ran `mix format`
+scoped to exactly those files, per the PR 3a lesson about unscoped
+`mix format` side effects).
+
+## Files changed
+
+| File | Action |
+|------|--------|
+| `lib/meal_planner_api/accounts.ex` | Modified — `find_or_create_identity/1` upserts a real membership (prerequisite fix) |
+| `lib/meal_planner_api/accounts_membership.ex` | Modified — `current_membership/2`'s legacy path loads-or-denies |
+| `lib/meal_planner_api_web/plugs/load_current_membership.ex` | Modified — HTTP plug loads-or-denies |
+| `lib/meal_planner_api_web/plugs/load_current_membership_socket.ex` | Modified — socket plug loads-or-denies |
+| `lib/meal_planner_api_web/user_socket.ex` | Modified — `connect/3` consolidated onto the socket plug (4th duplicate removed) |
+| `test/meal_planner_api/accounts_test.exs` | Extended — prerequisite membership-upsert coverage |
+| `test/meal_planner_api/accounts_membership_test.exs` | Modified + extended |
+| `test/meal_planner_api_web/plugs/load_current_membership_test.exs` | Modified + extended (conn + socket) |
+| `test/meal_planner_api_web/user_socket_test.exs` | Modified + extended |
+| `test/meal_planner_api_web/controllers/membership_controller_test.exs` | Modified (dangling-account scenario now unreachable past the plug) |
+
+## Status
+
+**This closes the "legacy membership synthesis" BLOCKER flagged by the
+PR 3b `review-risk` pass.** Ready for `sdd-verify` / re-review. Branch
+`feature/phase-a-pr-3b` — not yet pushed at the time of writing this
+section (push is the next step after this artifact update).
+
+Not addressed by this fix pass (unchanged, still open, tracked
+separately per the existing "Phase A readiness" section above): tasks
+3.14–3.25 (controller/service sweep to read `current_membership` instead
+of `user.account_id`, and the cross-Account HTTP isolation checkpoint) —
+those govern `access_v2` multi-familia switching over HTTP, a distinct
+gap from this fix's legacy-token access-control BLOCKER.
+
+---
+
+# Post-PR-3b re-review fix pass — 3 issues found by the 5-agent re-review
+
+> **Change**: `phase-a-tenancy-refactor`
+> **Branch**: `feature/phase-a-pr-3b`
+> **Apply mode**: `strict_tdd: true`, `test_runner: mix test`
+> **Status**: ✅ 3 / 3 items complete
+> **Date**: 2026-07-10
+
+## Goal recap
+
+A 5-agent re-review (`sdd-verify` + 4R) of the "legacy membership
+synthesis BLOCKER fix" (commits `6ebb48c`..`15e1180`) confirmed that fix
+is correct and closed, but found 3 new issues it introduced. All 3 are
+fixed here, in the required order: BLOCKER first, then the two CRITICAL
+items.
+
+## Summary
+
+- **3 / 3 items complete.**
+- **3 commits** on `feature/phase-a-pr-3b` (one per item, in order).
+- Baseline at session start: **475 tests, 0 failures**. Final: **477
+  tests, 0 failures** (+2 net — item 1 extended 3 existing tests with no
+  new test functions; item 2 added 1 new test; item 3 added 1 new test).
+
+## TDD Cycle Evidence
+
+| Item | RED | GREEN | REFACTOR | Notes |
+|---|---|---|---|---|
+| 1. Zero observability on fail-closed denial paths | ✅ 3 `capture_log` assertions failed (empty log) across the 3 call sites | ✅ `Logger.warning/1` added at each denial point | — | No production behavior change — logging only. |
+| 2. `upsert_membership/2` hardcoded `role: :owner` | ✅ 2 distinct users on the same shared account both got `:owner` | ✅ `first_member_role/1` checks `Repo.exists?` for any existing membership on the account | — | Real privilege-escalation bug fixed. |
+| 3. `find_or_create_identity/1`'s 3 upserts non-transactional | N/A — standalone `Ecto.Multi`/`Repo.transaction` framework-semantics test, same precedent as PR 2b post-review item 4 (see below) | ✅ | — | Constructs an equivalent 3-step `Multi` inline (same shape as the fixed `find_or_create_identity/1`) with an intentionally invalid `:membership` changeset; asserts `{:error, :membership, _, _}` and zero rows for all 3 steps. |
+
+## Item-by-item detail
+
+### Item 1 — BLOCKER: zero observability on the new fail-closed denial paths
+
+- **Files**: `lib/meal_planner_api_web/plugs/load_current_membership.ex`,
+  `lib/meal_planner_api_web/plugs/load_current_membership_socket.ex`,
+  `lib/meal_planner_api/accounts_membership.ex`
+  (`current_membership/2`'s private `load_real_legacy_membership/2`)
+- **Gap**: the 3 fail-closed denial points added by the legacy
+  membership synthesis fix denied access silently. Since that fix
+  already uncovered ONE previously-unknown locked-out population
+  (social-login users, fixed in `6ebb48c`), an undiscovered second
+  population would cause a silent mass lockout, undetectable until
+  users complain.
+- **Fix**: `Logger.warning/1` at each of the 3 denial points, logging
+  `user_id` and `account_id` (never the raw token/claims) with the
+  message `"legacy access token denied: no active membership found
+  user_id=... account_id=..."`. Style matches
+  `EnforceAccountScope`/`auth_controller.ex`'s existing
+  `Logger.warning` calls (plain interpolated string, no `Logger.metadata`).
+- **Test**: extended the 3 existing "no real membership row" /
+  "removed member" tests with `ExUnit.CaptureLog`, asserting the log
+  line and both correlation fields fire. RED confirmed (empty log)
+  before adding the `Logger.warning/1` calls, GREEN after.
+- **Commit**: `12b8d69`
+
+### Item 2 — CRITICAL: `upsert_membership/2` hardcoded `role: :owner` (privilege escalation)
+
+- **File**: `lib/meal_planner_api/accounts.ex`
+- **Bug**: `upsert_membership/2` (added by the prerequisite fix
+  `6ebb48c`) always inserted a NEW membership with `role: :owner`.
+  `db_account_id` is a stable UUID hashed purely from the external
+  `account_id` string, so two DISTINCT external users authenticating
+  against the same external `account_id` (this app's own
+  account-linking/shared-account model — `Account.linked_user_ids` /
+  `link_user/2`) map to the same internal `Account` row. The lookup key
+  is `(user_id, account_id)`, not "does this account already have an
+  owner" — so every distinct user who joined an already-owned account
+  was granted `:owner` authority (`remove_member/3`, `invite/3` both
+  gate on `actor.role == :owner`). This regressed the old (removed)
+  synthesized struct's `role: user.role || :member` default.
+- **Fix**: `first_member_role/1` checks `Repo.exists?` for any existing
+  membership row on the account before deciding the role — first
+  member of an Account is `:owner`, everyone after is `:member`.
+- **Test**: 2 distinct users (`db_user_id`s) both call
+  `find_or_create_identity/1` against the SAME external `account_id`.
+  RED confirmed (both got `:owner`) before the fix, GREEN
+  (`:owner` then `:member`) after.
+- **Commit**: `6279014`
+
+### Item 3 — CRITICAL: `find_or_create_identity/1`'s 3 upserts are non-transactional
+
+- **File**: `lib/meal_planner_api/accounts.ex`
+- **Bug**: `upsert_account/3`, `upsert_user/3`, `upsert_membership/2` ran
+  as 3 independent `Repo` calls inside a `with` chain — unlike
+  `register_with_password/1`'s `create_account_and_user/5`, which wraps
+  all 3 inserts in one `Ecto.Multi`/`Repo.transaction`. A failure in the
+  `:membership` step after `:account`/`:user` already committed fell
+  through to the generic `{:error, :unable_to_issue_identity}` with no
+  rollback, leaving exactly the broken (account+user exist, no active
+  membership) state items 1/2 and the whole prior fix pass exist to
+  eliminate — now reachable via any transient write failure instead of
+  only the original design gap.
+- **Fix**: `upsert_identity_transaction/4` wraps the 3 steps in
+  `Ecto.Multi.run/3` (not `Multi.insert`/`Multi.update`, because
+  `upsert_account/3` and `upsert_user/3` are get-or-insert-or-update
+  patterns, not pure inserts) + `Repo.transaction/1`. Any step failing
+  rolls back all three; the failure is logged via `Logger.error/1`
+  (matching `create_account_and_user/5`'s existing convention for
+  transaction-failure logging).
+- **Test**: neither `upsert_account/3` nor `upsert_user/3` can be forced
+  to fail via the public API without corrupting otherwise-valid input
+  (simple get-or-insert-or-update helpers over always-valid attrs), and
+  `upsert_membership/2`'s `role`/`status` are hardcoded literals that are
+  always valid — the exact same situation
+  `accounts_registration_test.exs`'s PR 2b post-review item 4 test
+  already encountered and solved. Following that precedent exactly: an
+  equivalent inline 3-step `Multi` (same shape as the fixed
+  `find_or_create_identity/1` — `Multi.run` for `:account`/`:user`, an
+  insert for `:membership`) with an intentionally invalid membership
+  changeset (`role: :not_a_real_role`) proves the whole transaction
+  rolls back atomically (`{:error, :membership, changeset, _}`, zero
+  rows for all 3 entities). TDD evidence marks RED as "N/A" for this
+  item, same as the established precedent, since there is no real
+  external seam to inject a genuine failure into the private helpers.
+- **Commit**: `fc91a5b`
+
+## `mix test` summary
+
+```
+475 tests, 0 failures   (baseline, start of this fix pass)
+475 tests, 0 failures   (item 1 — Logger.warning on 3 denial points, no new test functions)
+476 tests, 0 failures   (+1 — item 2 privilege-escalation fix)
+477 tests, 0 failures   (+1 — item 3 transactional atomicity fix)
+```
+
+**Final: 477 tests, 0 failures** (+2 net over the 475 baseline; 0
+regressions).
+
+`mix compile --warnings-as-errors --force`: clean. `mix format` scoped to
+exactly the 5 touched files: clean.
+
+## Files changed
+
+| File | Action |
+|------|--------|
+| `lib/meal_planner_api_web/plugs/load_current_membership.ex` | Modified — `require Logger` + `Logger.warning/1` on legacy-token denial |
+| `lib/meal_planner_api_web/plugs/load_current_membership_socket.ex` | Modified — same, socket sibling |
+| `lib/meal_planner_api/accounts_membership.ex` | Modified — same, `current_membership/2`'s legacy path |
+| `lib/meal_planner_api/accounts.ex` | Modified — `first_member_role/1` (item 2) + `upsert_identity_transaction/4` (item 3) |
+| `test/meal_planner_api_web/plugs/load_current_membership_test.exs` | Extended — 2 `capture_log` assertions |
+| `test/meal_planner_api/accounts_membership_test.exs` | Extended — 1 `capture_log` assertion |
+| `test/meal_planner_api/accounts_test.exs` | Extended — item 2 privilege-escalation test, item 3 atomicity test |
+
+## Status
+
+**All 3 issues found by the 5-agent re-review are fixed.** Branch
+`feature/phase-a-pr-3b` pushed to `origin`. Ready for the next
+`sdd-verify` / re-review pass.
+
+---
+
+# Post-PR-3b SECOND re-review — 3-issue fix pass
+
+> **Change**: `phase-a-tenancy-refactor`
+> **Branch**: `feature/phase-a-pr-3b`
+> **Apply mode**: `strict_tdd: true`, `test_runner: mix test`
+> **Status**: ✅ 3 / 3 items complete
+> **Date**: 2026-07-10
+
+## Goal recap
+
+A 5-agent re-review of the previous 3-issue fix pass (commits
+`12b8d69`..`a7d023e`) found 3 new issues. All 3 fixed here, in the
+required order: CRITICAL (race) first, then CRITICAL (test-quality),
+then WARNING (PII log).
+
+## Summary
+
+- **3 / 3 items complete.**
+- **3 commits** on `feature/phase-a-pr-3b` (one per item, in order):
+  `efa6d85`, `0faf1af`, `31bb586`.
+- Baseline at session start: **477 tests, 0 failures**. Final: **479
+  tests, 0 failures** (+2 net — item 1 added 1 new concurrency test;
+  item 2 replaced 1 flawed test with 2 new tests, net +1; item 3 added
+  no new test function, just extended item 2's test with a
+  `capture_log` assertion).
+
+## TDD Cycle Evidence
+
+| Item | RED | GREEN | REFACTOR | Notes |
+|---|---|---|---|---|
+| 1. TOCTOU race in `first_member_role/1` (2 `:owner`s) | ✅ genuine race reproduced — see below | ✅ | ✅ (deadlock found + fixed mid-cycle, see below) | Real (non-sandboxed) DB connections required — see honesty note. |
+| 2. Hand-rolled "atomicity" test doesn't exercise real code | N/A — test-quality fix, not a behavior bug | ✅ real `:user`-step failure via public API + Multi introspection | ✅ extracted `build_identity_multi/4` | See honesty note on why no genuine `:membership`-step seam exists. |
+| 3. PII leak via unredacted `Ecto.Changeset` in error log | ✅ `capture_log` showed the raw email in the log pre-fix (see below) | ✅ | — | No production behavior change — logging only. |
+
+## Item-by-item detail
+
+### Item 1 — CRITICAL: TOCTOU race in `first_member_role/1` allows two `:owner`s on one Account
+
+- **File**: `lib/meal_planner_api/accounts.ex`
+- **Bug**: `first_member_role/1` did an unlocked `Repo.exists?` check,
+  then — in a separate step back in `upsert_membership/2` — inserted
+  the new membership. Under Postgres's default READ COMMITTED
+  isolation, two concurrent `find_or_create_identity/1` calls for two
+  DISTINCT external users sharing the same `account_id` (this app's
+  account-linking/family-plan model — e.g. a pre-provisioned family
+  account whose members log in for the first time around the same
+  moment) could both observe "no existing membership" before either
+  committed, both getting inserted as `:owner`.
+- **Fix**: take a `FOR UPDATE` row lock on the Account row (same
+  pattern as `AccountsMembership.lock_account_for_invite/1`) as the
+  very FIRST statement of the transaction — BEFORE `:user`'s insert,
+  not merely before the `exists?` check. See "deadlock discovered"
+  below for why the lock's exact position matters.
+- **Test — RED, confirmed empirically, not just theoretically**: wrote
+  a concurrency test firing 8 genuinely concurrent
+  `find_or_create_identity/1` calls (`Task.async`) at an Account that
+  already exists (avoiding the unrelated account-row-insert race,
+  out of scope) but has zero memberships, for 8 distinct new users.
+  Ran it against the UNFIXED code repeatedly: **every single run, all
+  8 racers became `:owner`** (not "sometimes more than one" — every
+  run, all 8). This is a genuine, reliably reproduced bug, not a
+  theoretical one.
+- **A real technical subtlety found along the way — Ecto Sandbox
+  cannot observe this race with default sandboxed connections**: under
+  Ecto's default sandboxed checkout, each spawned `Task` automatically
+  gets its OWN per-process sandbox transaction that can never see
+  another process's uncommitted writes (verified via
+  `IO.puts`/timestamp instrumentation — confirmed genuine concurrency
+  at the connection level, but zero cross-visibility). Fixing this
+  required the test to explicitly `Sandbox.checkin/1` +
+  `Sandbox.checkout(Repo, sandbox: false)` for BOTH the setup phase
+  and every racer task, so writes are genuinely committed and visible
+  across connections — with manual cleanup in `on_exit` since nothing
+  auto-rolls-back real connections.
+  `Ecto.Adapters.SQL.Sandbox.allow/3` (the standard fix for sharing
+  in-progress test data) was considered and rejected: it forces every
+  process onto the SAME physical connection, which serializes all SQL
+  onto one backend and makes it structurally impossible to reproduce
+  two transactions racing on a `FOR UPDATE` lock.
+- **A genuine deadlock found and fixed mid-cycle (REFACTOR)**: the
+  first working version of the fix took the `FOR UPDATE` lock right
+  before the `Repo.exists?` check (the "obvious" place, textually
+  adjacent to the bug). Running the concurrency test against THAT
+  version produced a reliable Postgres `40P01 deadlock_detected` error
+  (reproduced with both 2 and 8 concurrent racers). Root cause:
+  `:user`'s insert (the Multi step immediately before) has a
+  `foreign_key_constraint(:account_id)`, which makes Postgres take an
+  implicit weak `FOR KEY SHARE` lock on the Account row. Two concurrent
+  transactions each already holding the OTHER's needed `FOR KEY SHARE`
+  (from their own `:user` step) and only THEN both trying to upgrade to
+  `FOR UPDATE` is a textbook mutual lock-upgrade deadlock. Fix: move the
+  lock acquisition to the very FIRST statement of the transaction (a new
+  `Multi.run(:account_lock, ...)` step ahead of `:account`), so a second
+  transaction blocks on ITS OWN `FOR KEY SHARE` attempt (its `:user`
+  step) before it ever reaches its own `FOR UPDATE` request — no upgrade,
+  no deadlock.
+- **GREEN, confirmed empirically**: ran the concurrency test 30+ times
+  across different `--seed` values (both at 2 racers and at 8 racers)
+  against the fixed code — zero failures, zero deadlocks, every run
+  produced exactly 1 `:owner`.
+- **Commit**: `efa6d85`
+
+### Item 2 — CRITICAL (test-quality): the shipped "atomicity" test doesn't test the real code
+
+- **File**: `test/meal_planner_api/accounts_test.exs`
+- **Bug**: the "atomicity" test built its OWN hand-rolled, separate
+  `Ecto.Multi` (same 3 step *names*, different step *bodies* — a fresh
+  `PersistenceAccount`/`PersistenceUser`/`AccountMembership` insert
+  chain) instead of exercising the SHIPPED `find_or_create_identity/1`.
+  That proved generic `Ecto.Multi`/Postgres rollback semantics work —
+  never in doubt — not that the shipped function is wired correctly.
+- **Fix**: extracted `upsert_identity_transaction/4`'s `Multi`
+  construction into `build_identity_multi/4` (`@doc false`, public —
+  same pattern as `AccountsMembership.load_account/1`'s earlier
+  post-review fix). This function only BUILDS the `Multi` (pure data);
+  `upsert_identity_transaction/4` still runs it via `Repo.transaction/1`
+  exactly as before — no behavior change, purely a testability seam.
+- **Test — 2 tests replace the 1 flawed one**:
+  1. A genuine failure forced through the PUBLIC
+     `find_or_create_identity/1` API at the real `:user` step: a
+     pre-existing User with a given email (legitimate test fixture,
+     not touching production code), then a second, distinct identity
+     using the SAME email — trips the real `unique_constraint(:email)`
+     (`users.email` has a real unique index,
+     `20260322090000_create_accounts_and_users.exs`). Asserts the whole
+     transaction rolls back, including the `:account` row that
+     committed-in-progress earlier in the SAME transaction.
+  2. Introspection of `build_identity_multi/4`'s real `Ecto.Multi` via
+     `Ecto.Multi.to_list/1`, confirming the step order is exactly
+     `[:account_lock, :account, :user, :membership]` — proving this IS
+     the same multi `find_or_create_identity/1` runs, and that
+     `:membership` genuinely is the last step.
+- **Honesty note — no genuine `:membership`-step-specific failure seam
+  exists**: looked hard for one. `upsert_membership/2` only ever calls
+  `Repo.insert/1` after `Repo.get_by(AccountMembership, user_id:,
+  account_id:)` finds NO existing row for that exact natural key — and
+  the table's only relevant constraint
+  (`account_memberships_active_account_user_unique_index`) is scoped to
+  that SAME key, so by construction a `get_by` miss can never trip that
+  constraint single-threaded. `role`/`status` are hardcoded,
+  always-valid literals. The only way `:membership` could fail was the
+  genuine concurrent race item 1 (this same fix pass) now closes with
+  its `FOR UPDATE` lock. Given `Ecto.Multi` + `Repo.transaction/1`'s
+  rollback-on-`{:error, _}` behavior is step-name-agnostic (it doesn't
+  special-case which step failed), forcing a real `:user`-step failure
+  through the ACTUAL production Multi + confirming `:membership`'s
+  position via introspection is structurally equivalent evidence for
+  the hypothetical `:membership`-failure case.
+- **Commit**: `0faf1af`
+
+### Item 3 — WARNING: PII leak via unredacted `Ecto.Changeset` in error log
+
+- **File**: `lib/meal_planner_api/accounts.ex`
+- **Bug**: `upsert_identity_transaction/4`'s failure log called
+  `inspect/1` on the raw `reason`, which is an `%Ecto.Changeset{}` when
+  the `:account` or `:user` step fails. `Ecto.Changeset`'s default
+  `Inspect` implementation prints the full `:changes` map — including
+  PII (`email`, `name`) supplied by the caller — into logs at `:error`
+  level.
+- **Fix**: `log_transaction_failure/2` — logs only the changeset's
+  `:errors` (validation atoms/messages, never the changed field
+  values) when `reason` is an `%Ecto.Changeset{}`; falls back to
+  logging the reason's shape (`reason_struct`/`reason`/`reason_kind`,
+  never raw `inspect/1`) for any other reason type, since future
+  failure reasons could also carry caller-supplied data.
+- **Test — RED confirmed via `capture_log`**: before this fix, the
+  item-2 `:user`-step-failure test's log line read (captured verbatim
+  during this session, at the pre-fix commit boundary):
+  `find_or_create_identity transaction failed at step=:user reason=#Ecto.Changeset<action: :insert, changes: %{id: "...", name: "MyFood User", role: :owner, account_id: "...", email: "atomicity-real-seam@example.com"}, ...>`
+  — the raw email is directly visible. Extended that same test with an
+  `ExUnit.CaptureLog.capture_log/1` assertion (`refute log =~
+  conflicting_email`), confirmed GREEN after the fix: the log now reads
+  `find_or_create_identity transaction failed at step=:user
+  changeset_errors=[email: {"has already been taken", [constraint:
+  :unique, constraint_name: "users_email_index"]}]` — no PII, but the
+  error shape (field name, reason) is preserved.
+- **Commit**: `31bb586`
+
+## `mix test` summary
+
+```
+477 tests, 0 failures   (baseline, start of this fix pass)
+478 tests, 0 failures   (+1 — item 1 concurrency race fix + test)
+479 tests, 0 failures   (+1 net — item 2 replaces 1 flawed test with 2 new tests)
+479 tests, 0 failures   (item 3 — PII log fix, extends item 2's test, no new test function)
+```
+
+**Final: 479 tests, 0 failures** (+2 net over the 477 baseline; 0
+regressions). Re-ran the full suite 8+ times across different
+`--seed` values at the final commit — stable, no flakiness.
+
+`mix compile --warnings-as-errors --force`: clean at every commit
+boundary. `mix format` scoped to the 2 touched files: clean.
+
+## Files changed
+
+| File | Action |
+|------|--------|
+| `lib/meal_planner_api/accounts.ex` | Modified — `lock_account_row/1` + `Multi.run(:account_lock, ...)` (item 1); `build_identity_multi/4` extraction (item 2); `log_transaction_failure/2` (item 3) |
+| `test/meal_planner_api/accounts_test.exs` | Extended — concurrency race test (item 1); real `:user`-step-failure test + `build_identity_multi/4` introspection test replacing the hand-rolled Multi test (item 2); `capture_log` PII assertion added to the item-2 test (item 3) |
+
+## Honesty summary (explicit, per launch instructions)
+
+- **Item 1's concurrency test**: genuinely reproduces the race (100% of
+  runs, unfixed) and genuinely proves the fix (0 failures across 30+
+  runs, fixed) — but required real, non-sandboxed DB connections
+  (`sandbox: false` + manual cleanup) since Ecto's default sandbox
+  cannot observe cross-process row-lock contention at all. This is
+  documented in-line in the test file itself.
+- **Item 2's test**: could NOT force a genuine `:membership`-step
+  failure through the public API (documented why, above and in the
+  test file) — used a real `:user`-step failure through the ACTUAL
+  production `Multi` instead, plus step-order introspection, as
+  structurally equivalent evidence. This is the documented fallback the
+  launch instructions explicitly allowed for.
+- **No other gaps** — item 3 closed cleanly with a direct before/after
+  log comparison.
+
+## Status
+
+**All 3 issues found by the second 5-agent re-review are fixed.**
+Branch `feature/phase-a-pr-3b`, 3 commits (`efa6d85`, `0faf1af`,
+`31bb586`), pushed to `origin`. Ready for the next `sdd-verify` /
+re-review pass.

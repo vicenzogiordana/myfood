@@ -1,6 +1,8 @@
 defmodule MealPlannerApiWeb.CalendarChannelTest do
   use MealPlannerApiWeb.ChannelCase, async: false
 
+  import MealPlannerApi.FactoryHelpers
+
   alias MealPlannerApi.{Persistence.Calendar, Persistence.Catalog, Persistence.Planning}
   alias MealPlannerApiWeb.{CalendarChannel, UserSocket}
 
@@ -26,6 +28,91 @@ defmodule MealPlannerApiWeb.CalendarChannelTest do
 
       assert {:error, %{reason: "forbidden"}} =
                subscribe_and_join(socket, CalendarChannel, "calendar:other_account_id")
+    end
+
+    test "access_v2 user joins the calendar for their active membership's account (task 3.9)" do
+      user =
+        user_with_memberships(
+          %{email: "cal_v2_join@example.com"},
+          [
+            {%{plan: :family_4, name: "Cal V2 Join A"}, :owner},
+            {%{plan: :individual, name: "Cal V2 Join B"}, :member}
+          ]
+        )
+
+      membership_b = Enum.find(user.memberships, &(&1.account.name == "Cal V2 Join B"))
+      token_b = issue_access_v2_token(user, membership_b)
+
+      {:ok, socket} = connect(UserSocket, %{"token" => token_b})
+
+      assert {:ok, _reply, socket} =
+               subscribe_and_join(socket, CalendarChannel, "calendar:#{membership_b.account_id}")
+
+      assert socket.assigns.account_id == membership_b.account_id
+    end
+
+    test "cross-Account join is rejected (membership-scoped-channels, task 3.9)" do
+      user =
+        user_with_memberships(
+          %{email: "cal_cross@example.com"},
+          [
+            {%{plan: :family_4, name: "Cal Cross A"}, :owner},
+            {%{plan: :individual, name: "Cal Cross B"}, :member}
+          ]
+        )
+
+      membership_a = Enum.find(user.memberships, &(&1.account.name == "Cal Cross A"))
+      membership_b = Enum.find(user.memberships, &(&1.account.name == "Cal Cross B"))
+      token_a = issue_access_v2_token(user, membership_a)
+
+      {:ok, socket} = connect(UserSocket, %{"token" => token_a})
+
+      assert {:error, %{reason: "forbidden"}} =
+               subscribe_and_join(socket, CalendarChannel, "calendar:#{membership_b.account_id}")
+    end
+
+    test "invited (non-active) membership join is rejected (task 3.9)" do
+      user =
+        user_with_memberships(
+          %{email: "cal_invited@example.com"},
+          [
+            {%{plan: :family_4, name: "Cal Invited Account"}, :owner}
+          ]
+        )
+
+      [membership] = user.memberships
+
+      {:ok, invited_membership} =
+        membership
+        |> MealPlannerApi.Persistence.Accounts.AccountMembership.changeset(%{status: :invited})
+        |> MealPlannerApi.Repo.update()
+
+      token = issue_access_v2_token(user, invited_membership)
+
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+      assert {:error, %{reason: "forbidden"}} =
+               subscribe_and_join(
+                 socket,
+                 CalendarChannel,
+                 "calendar:#{invited_membership.account_id}"
+               )
+    end
+
+    test "access_v1 legacy token is accepted via fallback (task 3.9)", %{
+      account: account,
+      token: token
+    } do
+      # `issue_identity_and_token/2` mints a legacy `typ: "access"` token —
+      # this is the access_v1 fallback path (UserSocket synthesizes a
+      # virtual :active membership from current_user.account_id).
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+      assert {:ok, _reply, socket} =
+               subscribe_and_join(socket, CalendarChannel, "calendar:#{account.id}")
+
+      assert socket.assigns.current_membership.account_id == account.id
+      assert socket.assigns.current_membership.status == :active
     end
   end
 
@@ -261,6 +348,48 @@ defmodule MealPlannerApiWeb.CalendarChannelTest do
 
       ref = push(socket, "set_is_cooked", %{"is_cooked" => true})
       assert_reply(ref, :error, %{reason: "missing_params"})
+    end
+
+    test "set is_cooked with a meal_id from another Account is rejected (task 3.9)" do
+      user =
+        user_with_memberships(
+          %{email: "cal_meal_cross@example.com"},
+          [
+            {%{plan: :family_4, name: "Cal Meal Cross A"}, :owner},
+            {%{plan: :individual, name: "Cal Meal Cross B"}, :member}
+          ]
+        )
+
+      membership_a = Enum.find(user.memberships, &(&1.account.name == "Cal Meal Cross A"))
+      membership_b = Enum.find(user.memberships, &(&1.account.name == "Cal Meal Cross B"))
+
+      {:ok, recipe} =
+        Catalog.create_recipe(%{
+          account_id: membership_b.account_id,
+          created_by_user_id: user.id,
+          name: "Recipe in Account B",
+          source: :user_created,
+          servings: 2,
+          suitable_for_slots: [:lunch]
+        })
+
+      {:ok, meal_in_b} =
+        Planning.schedule_meal(%{
+          account_id: membership_b.account_id,
+          date: ~D[2026-04-01],
+          slot: :lunch,
+          recipe_id: recipe.id,
+          is_cooked: false
+        })
+
+      token_a = issue_access_v2_token(user, membership_a)
+      {:ok, socket} = connect(UserSocket, %{"token" => token_a})
+
+      {:ok, _reply, socket} =
+        subscribe_and_join(socket, CalendarChannel, "calendar:#{membership_a.account_id}")
+
+      ref = push(socket, "set_is_cooked", %{"meal_id" => meal_in_b.id, "is_cooked" => true})
+      assert_reply(ref, :error, %{reason: "not_found"})
     end
   end
 

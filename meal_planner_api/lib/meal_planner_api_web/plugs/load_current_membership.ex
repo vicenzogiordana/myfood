@@ -10,19 +10,21 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
       preload `:account`. Missing/invalid → halt with
       `401 unauthorized, %{error: "membership_id_required"}`.
 
-    * When the JWT is `typ: "access"` (legacy fallback) the plug
-      **synthesizes** a virtual membership struct from
-      `current_user.account_id` + `current_user.role` + `Account.plan`.
-      The struct is marked `__synthesized__: true` so tests can assert
-      which path populated it. No row is inserted.
+    * When the JWT is `typ: "access"` (legacy fallback) the plug loads
+      the real, `:active` `AccountMembership` row for
+      `(current_user.id, current_user.account_id)`. If no such row
+      exists — e.g. the member was removed, or never was one — the
+      request is refused with `401 membership_id_required`, exactly
+      like the `access_v2` no-membership case. It no longer fabricates
+      an in-memory `:active` struct (see the BLOCKER fix note on
+      `synthesize_legacy_membership/2` below).
 
-  The plug is read-only on the conn — it never mutates the User record,
-  never reads the membership table unless `typ: "access_v2"` was
-  presented.
+  The plug is read-only on the conn — it never mutates the User record.
   """
 
+  require Logger
+
   alias MealPlannerApi.Auth.Guardian
-  alias MealPlannerApi.Persistence.Accounts.Account
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Repo
 
@@ -109,37 +111,50 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
     end
   end
 
-  defp synthesize_legacy_membership(%{account_id: account_id} = user, _claims)
+  # Post-PR-3b review — BLOCKER fix (legacy membership synthesis).
+  #
+  # This used to fabricate an in-memory `%AccountMembership{status:
+  # :active}` straight from `user.account_id`, with NO database lookup at
+  # all. `AccountsMembership.remove_member/3` and `.leave/2` hard-delete
+  # the real `AccountMembership` row without ever clearing
+  # `user.account_id`, and Guardian's `access` tokens carry a 4-week TTL
+  # with no server-side revocation — so a removed member's stale legacy
+  # token retained full access for up to 4 weeks. We now REQUIRE a real,
+  # `:active` `AccountMembership` row for `(user_id, account_id)` before
+  # granting access. PR 1's backfill migration (task 1.4), PR 2b's atomic
+  # `register_with_password/1` (task 2.10), and `Accounts.
+  # find_or_create_identity/1`'s membership upsert (this fix) guarantee
+  # every currently-valid legacy member has such a row — so "no active
+  # row found" now correctly means "no longer an active member" (removed,
+  # or never was), not "trust the token's claim".
+  defp synthesize_legacy_membership(%{account_id: account_id, id: user_id}, _claims)
        when not is_nil(account_id) do
-    plan = fetch_account_plan(account_id)
+    case load_real_active_membership(user_id, account_id) do
+      %AccountMembership{} = membership ->
+        {:ok, membership}
 
-    membership =
-      %AccountMembership{
-        id: nil,
-        account_id: account_id,
-        user_id: user.id,
-        role: user.role || :member,
-        status: :active,
-        joined_at: nil
-      }
-      |> Map.put(:plan, plan)
-      |> Map.put(:__synthesized__, true)
+      nil ->
+        Logger.warning(
+          "legacy access token denied: no active membership found user_id=#{user_id} account_id=#{account_id}"
+        )
 
-    {:ok, membership}
+        {:error, :membership_id_required}
+    end
   end
 
   defp synthesize_legacy_membership(_user, _claims), do: {:error, :membership_id_required}
 
-  defp fetch_account_plan(account_id) do
+  defp load_real_active_membership(user_id, account_id) do
     case Ecto.UUID.cast(account_id) do
-      {:ok, uuid} ->
-        case Repo.get(Account, uuid) do
-          %Account{plan: plan} -> plan
-          _ -> :individual
-        end
+      {:ok, account_uuid} ->
+        Repo.get_by(AccountMembership,
+          user_id: user_id,
+          account_id: account_uuid,
+          status: :active
+        )
 
       _ ->
-        :individual
+        nil
     end
   end
 end

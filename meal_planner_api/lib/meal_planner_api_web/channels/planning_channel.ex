@@ -23,27 +23,40 @@ defmodule MealPlannerApiWeb.PlanningChannel do
 
   alias MealPlannerApi.Generation.Server
   alias MealPlannerApi.Services.PlanningChatService
+  alias MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket
 
   @impl true
-  def join("planning:" <> account_id, _payload, socket) do
-    user = socket.assigns.current_user
+  def join("planning:" <> topic_account_id, _payload, socket) do
+    membership = LoadCurrentMembershipSocket.membership_from_socket(socket)
 
-    if user.account_id == account_id do
-      {:ok, assign(socket, :account_id, account_id)}
-    else
-      {:error, %{reason: "forbidden"}}
+    cond do
+      is_nil(membership) ->
+        {:error, %{reason: "forbidden"}}
+
+      to_string(membership.account_id) != topic_account_id ->
+        {:error, %{reason: "forbidden"}}
+
+      membership.status != :active ->
+        {:error, %{reason: "forbidden"}}
+
+      true ->
+        {:ok,
+         socket
+         |> assign(:account_id, topic_account_id)
+         |> assign(:current_membership, membership)}
     end
   end
 
   @impl true
   def handle_in("generate_menu", payload, socket) do
     user = socket.assigns.current_user
+    membership = socket.assigns.current_membership
     request_id = Map.get(payload, "request_id", build_request_id())
 
     # Constraints viene del payload (date_from, date_to, budget_cents, etc.)
     constraints = Map.get(payload, "constraints", %{}) |> Map.merge(payload)
 
-    case Server.start_generation(user.account_id, user.id, constraints, socket.channel_pid) do
+    case Server.start_generation(membership.account_id, user.id, constraints, socket.channel_pid) do
       {:ok, run_id} ->
         broadcast!(socket, "generation_started", %{request_id: request_id, run_id: run_id})
         {:reply, {:ok, %{request_id: request_id, run_id: run_id}}, socket}
@@ -93,10 +106,13 @@ defmodule MealPlannerApiWeb.PlanningChannel do
 
   @impl true
   def handle_in("chat", %{"message" => message, "proposal_id" => proposal_id}, socket) do
-    user = socket.assigns.current_user
+    membership = socket.assigns.current_membership
 
     # Obtener el PID del GenerationServer para este account
-    case Registry.lookup(MealPlannerApi.Generation.Generations, {:generation, user.account_id}) do
+    case Registry.lookup(
+           MealPlannerApi.Generation.Generations,
+           {:generation, membership.account_id}
+         ) do
       [{server_pid, _}] ->
         Server.chat(server_pid, proposal_id, message)
         {:noreply, socket}
@@ -108,9 +124,13 @@ defmodule MealPlannerApiWeb.PlanningChannel do
 
   def handle_in("confirm_proposal", %{"proposal_id" => proposal_id}, socket) do
     user = socket.assigns.current_user
+    membership = socket.assigns.current_membership
 
     # Primero intentar con GenerationServer (si existe para este account)
-    case Registry.lookup(MealPlannerApi.Generation.Generations, {:generation, user.account_id}) do
+    case Registry.lookup(
+           MealPlannerApi.Generation.Generations,
+           {:generation, membership.account_id}
+         ) do
       [{server_pid, _}] ->
         case Server.confirm(server_pid, proposal_id) do
           {:ok, result} ->
@@ -145,8 +165,12 @@ defmodule MealPlannerApiWeb.PlanningChannel do
 
   def handle_in("reject_proposal", %{"proposal_id" => proposal_id}, socket) do
     user = socket.assigns.current_user
+    membership = socket.assigns.current_membership
 
-    case Registry.lookup(MealPlannerApi.Generation.Generations, {:generation, user.account_id}) do
+    case Registry.lookup(
+           MealPlannerApi.Generation.Generations,
+           {:generation, membership.account_id}
+         ) do
       [{server_pid, _}] ->
         Server.reject(server_pid, proposal_id)
         {:noreply, socket}
