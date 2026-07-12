@@ -2279,3 +2279,417 @@ boundary. `mix format` scoped to the 2 touched files: clean.
 Branch `feature/phase-a-pr-3b`, 3 commits (`efa6d85`, `0faf1af`,
 `31bb586`), pushed to `origin`. Ready for the next `sdd-verify` /
 re-review pass.
+
+---
+
+# PR 3c — Controller/service tenancy sweep + docs (tasks 3.14–3.25)
+
+**Branch**: `feature/phase-a-pr-3c`, based on `feature/phase-a-pr-3b`
+(479 tests, 0 failures, fully verified at the base commit).
+**Strict TDD**: `true`, `test_runner: mix test`.
+
+## Goal recap
+
+Finish the mechanical Phase A controller sweep (tasks 3.14–3.20, 3.22):
+every controller reads tenancy scope from
+`conn.assigns.current_membership.account_id`, never
+`current_user.account_id`. Sweep the 12 services listed in task 3.21.
+Land the load-bearing cross-Account isolation checkpoint (3.23) and
+update both docs (3.24, 3.25).
+
+## Summary — 12/12 tasks complete
+
+| Task | Description | Status |
+|---|---|---|
+| 3.14 | `CalendarController` | ✅ |
+| 3.15 | `PlanningController` | ✅ |
+| 3.16 | `CookingController` | ✅ |
+| 3.17 | `ShoppingController` | ✅ |
+| 3.18 | `InventoryController` | ✅ |
+| 3.19 | `PlanningChatController` | ✅ |
+| 3.20 | `RevenuecatController` | ✅ |
+| 3.21 | Service sweep (12 services) | ✅ (0 services needed internal change — see "Deviations") |
+| 3.22 | `AccountsController` | ✅ |
+| 3.23 | Cross-Account isolation checkpoint | ✅ |
+| 3.24 | `ARCHITECTURE.md` Auth Flow | ✅ |
+| 3.25 | `docs/FRONTEND_INTEGRATION.md` | ✅ |
+
+Plus one prerequisite fix discovered and landed mid-PR (see below):
+`Identity.ensure_persistent_identity/1` needed a fix before task 3.21's
+7 `user`-taking services could resolve real multi-membership Users at
+all.
+
+## Architectural decision — the controller boundary as the single choke point
+
+Every one of tasks 3.14–3.20 and 3.22 follows the same pattern, added
+once to the shared `AccountScopeHelpers` module (already used by the
+PR 3a controllers):
+
+```elixir
+@spec scope_user_to_membership(struct() | map(), AccountMembership.t()) :: struct() | map()
+def scope_user_to_membership(user, %{account_id: account_id}) do
+  Map.put(user, :account_id, account_id)
+end
+```
+
+**Why this instead of rewriting every service's signature to accept
+`membership` directly** (the literal framing task 3.21 offered):
+per-controller/per-service grep audit found every downstream service
+that takes a `user`/`current_user` argument derives `account_id` from
+it in exactly one way — either `Map.get(user, :account_id)`
+(`budget_service.ex`) or `Identity.ensure_persistent_identity(user)`
+(`cooking_service.ex`, `inventory_service.ex`,
+`planning_chat_service.ex`, `planning_service.ex`, `recipe_service.ex`,
+`shopping_service.ex`). None of them need any OTHER field renamed or
+restructured. Correcting `user.account_id` once, at the single point
+tenancy scope enters the domain layer (the controller, right after
+`LoadCurrentMembership` populates `conn.assigns.current_membership`),
+makes every downstream read of `.account_id` automatically correct —
+without touching 7 services' internals, dozens of existing call sites,
+or any pre-existing test coverage. This is the "or preload memberships
+and read the active one" alternative task 3.21's own text explicitly
+allowed for, applied at the boundary instead of inside each service.
+
+The real security property (`current_membership.account_id`, never a
+JWT claim or `current_user.account_id`, decides what data comes back)
+is proven end-to-end by `cross_account_isolation_test.exs` (task 3.23)
+and `tenancy_sweep_test.exs` (task 3.21) — not just asserted by
+inspection.
+
+## The RED-discriminator problem, and how it was solved
+
+The very first attempt at a task 3.14 test (multi-familia User, JWT
+"scoped to Account_A" via `issue_access_v2_token/2`, `GET /api/calendar`)
+**passed on the UNMODIFIED controller** — i.e. it was not a valid RED
+test. Root cause: `MealPlannerApi.Auth.Guardian.resource_from_claims/1`
+re-attaches `:account_id` onto the loaded `%User{}` struct straight
+from the JWT's `account_id` claim (a dual-write compatibility shim for
+`LoadCurrentMembership`'s OWN legacy-token synthesis path — see its
+moduledoc). Since a well-formed `access_v2` token's `account_id` claim
+is always consistent with its `membership_id`, `current_user.account_id`
+and `current_membership.account_id` are indistinguishable for any
+normally-issued token — the bug tasks 3.14–3.22 exist to prevent is not
+reproducible with a "normal" token, only with one where the two
+disagree.
+
+**Fix**: every RED test in this PR mints a validly-signed token via
+`Guardian.encode_and_sign/3` with `AccountsMembership.claims_for/2`'s
+claim map, then `Map.put`s a DIFFERENT (tampered) `account_id` onto it
+before signing — `membership_id` still points at Account A (the
+canonical scope pointer per design §3.2), but the redundant
+`account_id` claim now points at Account B. Before the controller fix,
+the controller resolves Account B's data (via the tampered,
+Guardian-reattached `current_user.account_id`); after the fix, it
+correctly resolves Account A's data (via `current_membership.account_id`,
+resolved from the DB by `membership_id`, never the claim). This
+genuinely RED-fails on unmodified code and GREEN-passes after the fix,
+for every task in this PR. It also happens to be a legitimate defense-
+in-depth property in its own right: a controller should never trust a
+redundant, client-visible claim field over the DB-resolved, signature-
+verified membership.
+
+## TDD Cycle Evidence
+
+| Task | RED | GREEN | REFACTOR | Notes |
+|---|---|---|---|---|
+| 3.14 | ✅ tampered-claim test fails (`403`→ wrong data) | ✅ | n/a | 2 tests (happy-path + tampered-claim) |
+| 3.15 | ✅ (confirm + weekly, both independently RED-verified) | ✅ | n/a | `weekly` test added later in this same PR once unblocked (see below) |
+| 3.16 | ✅ | ✅ | n/a | |
+| 3.17 | ✅ | ✅ | n/a | |
+| 3.18 | ✅ | ✅ | n/a | |
+| 3.19 | ✅ | ✅ | n/a | |
+| 3.20 | ✅ | ✅ | n/a | |
+| 3.21 | n/a — verification-only task (see Deviations) | ✅ (6 sub-tests) | n/a | No production code changed for this task itself; `tenancy_sweep_test.exs` proves the composed behavior from 3.14–3.20 + the identity prerequisite fix |
+| 3.22 | ✅ | ✅ | n/a | No prior test file existed for `AccountsController` — created one |
+| 3.23 | n/a — dedicated checkpoint (per tasks.md `Type`), passed on first write | n/a | n/a | Same "checkpoint" type as tasks 1.13, 2.16, 3.13 |
+| 3.24 | n/a — docs-only | n/a | n/a | |
+| 3.25 | n/a — docs-only | n/a | n/a | |
+| prereq: `Identity.ensure_persistent_identity/1` | ✅ | ✅ | n/a | Blocking bug discovered while writing task 3.16's test |
+
+## Item-by-item detail
+
+### Task 3.14 — `CalendarController`
+
+`index/2` and `show_slot/2` now read `conn.assigns.current_membership.account_id`
+instead of `current_user.account_id`. `Calendar.monthly_overview/2` and
+`Calendar.get_slot_meal/4` already took `account_id` directly — no
+persistence-layer change needed. Two tests: a happy-path multi-familia
+scoping test, and the tampered-claim discriminator (see above).
+**Commit**: `bcd7697`.
+
+### Task 3.15 — `PlanningController`
+
+`confirm/2` reads `membership.account_id` directly (it already passed
+`account_id` to `PlanningService.save_plan/4`). `weekly/2` and
+`toggle_slot_favorite/2` pass the whole `user` struct to
+`PlanningService`, which internally resolves account via
+`Identity.ensure_persistent_identity/1` — both now receive a
+`scope_user_to_membership/2`-corrected `user`.
+
+The `confirm/2` test initially failed with a false RED signal: the
+`meal["date"]` payload key is actually ignored by
+`PlanningService.save_plan/4` (`parse_date/1` reads `meal["day"]`, a
+weekday NAME — a pre-existing, unrelated quirk also present in this
+file's original "confirm endpoint persists scheduled meals" test).
+Widened the assertion's date range to sidestep it, matching the
+existing test's own workaround.
+
+The `weekly/2` test was INITIALLY deferred: `PlanningService.
+generate_weekly_plan/3` routes through `Identity.
+ensure_persistent_identity/1`, which (before the prerequisite fix,
+below) minted a second, colliding shadow `User` row for any real
+`user_with_memberships/2` fixture. Once the prerequisite fix landed
+later in this same PR (commit `7abb5ab`), the `weekly/2` test was added
+(commit `884ee89`) — the deferral note in the intermediate commit
+(`99781a4`) is superseded and documented as stale in that later commit's
+message.
+
+**Commits**: `99781a4`, `884ee89`.
+
+### Task 3.16 — `CookingController`
+
+All 5 actions (`start/2`, `show/2`, `step/2`, `finish/2`, `ask/2`) now
+use a `scoped_user/1` private helper. `CookingService` needed no
+internal change. Test: `start/2` with a tampered claim resolves the
+scheduled meal via the real membership's Account, not the claim's.
+**Commit**: `9071560`.
+
+### Task 3.17 — `ShoppingController`
+
+All 5 actions (`index/2`, `mark_cart/2`, `assign_supermarket/2`,
+`confirm_checkout/2`, `confirm_delivery/2`) corrected. Test: `index/2`
+resolves shopping items via the real membership's Account. **Commit**:
+`1e8617c`.
+
+### Task 3.18 — `InventoryController`
+
+All 7 actions corrected, including `rescue_plan/2`'s
+`BudgetService.resolve(user)` call (also fed the scoped `user`). Test:
+`index/2` resolves inventory items via the real membership's Account.
+**Commit**: `ef7155a`.
+
+### Task 3.19 — `PlanningChatController`
+
+All 4 actions corrected. Test: `favorites/2` resolves favorites via
+the real membership's Account (seeded via `Calendar.toggle_favorite/3`).
+**Commit**: `e5cbc43`.
+
+### Task 3.20 — `RevenuecatController`
+
+`webhook/2` is deliberately unauthenticated (no `:auth` pipe — the
+route has no `current_membership` to read at all; RevenueCat calls it
+directly and ownership is verified from the payload itself) and is out
+of scope. `sync/2` IS behind `:auth` and is corrected. Test: `sync/2`
+upserts the RevenueCat customer row under the real membership's
+Account, not the tampered claim's. **Commit**: `fa71bf6`.
+
+### Task 3.21 — Service sweep, prerequisite fix, and shared integration test
+
+**Prerequisite fix — `Identity.ensure_persistent_identity/1`** (commit
+`7abb5ab`, landed between the cooking and shopping controller fixes):
+discovered while writing task 3.16's cooking test. This bridge module
+predates `AccountMembership` — its only "already resolved" fast path
+required the real `users.account_id` COLUMN to equal the target
+Account. Per design.md §2.3 (decision 5.1), that column is
+intentionally `nil` for real multi-membership Users
+(`current_membership` carries tenancy instead). Without a fix, calling
+this bridge for a real multi-membership User (as every service in this
+task does) fell through to the "mint a NEW shadow `User` row" branch —
+inserting a second `users` row with the SAME email and crashing on the
+`users.email` unique index, 100% reproducibly, for every affected
+service. Fixed by also short-circuiting on a real, `:active`
+`AccountMembership` row for `(user_id, account_id)` — proven by a
+dedicated RED test in `test/meal_planner_api/persistence/identity_test.exs`.
+The legacy `find_or_create_identity/1` single-account flow (which still
+sets `users.account_id` directly) is unaffected.
+
+**Per-service grep audit** (task 3.21's own acceptance criteria):
+
+| Service | Reads `user.account_id`? | Change needed? |
+|---|---|---|
+| `account_service.ex` | No — `me/1`/`context/1` take an explicit `%{account_id:, user_id:}` map built by the caller | **No** — caller fixed in task 3.22 |
+| `budget_service.ex` | Yes — `Map.get(user, :account_id)` | **No** — controller-boundary fix (3.18) suffices |
+| `cooking_service.ex` | Yes — via `Identity.ensure_persistent_identity/1` | **No** — controller-boundary fix (3.16) suffices |
+| `generation_service.ex` | No — takes `account_id`/profile directly | **No** |
+| `inventory_service.ex` | Yes — via `Identity.ensure_persistent_identity/1` | **No** — controller-boundary fix (3.18) suffices |
+| `planning_chat_service.ex` | Yes — via `Identity.ensure_persistent_identity/1` | **No** — controller-boundary fix (3.19) suffices |
+| `planning_service.ex` | Yes — via `Identity.ensure_persistent_identity/1` and directly | **No** — controller-boundary fix (3.15) suffices |
+| `price_service.ex` | No — takes `account_id` directly | **No** |
+| `recipe_service.ex` | Yes — via `Identity.ensure_persistent_identity/1` | **No** — no production callers anywhere in `lib/` at all (dead code); prerequisite fix still required for it to be testable |
+| `revenuecat_service.ex` | No — takes `account_id` directly | **No** |
+| `shopping_service.ex` | Yes — via `Identity.ensure_persistent_identity/1` | **No** — controller-boundary fix (3.17) suffices |
+| `subscription_service.ex` | No — takes `account_id` directly | **No** |
+
+**Result: 0 of 12 services required an internal signature change.**
+This is an honest, explicit outcome of the grep-first check, not a
+silent skip — recorded here and in `tasks.md`'s task 3.21 Deviation
+note per the launch instructions.
+
+**Shared integration test** (`test/meal_planner_api/services/tenancy_sweep_test.exs`,
+commit `0cfd2c3`): seeds one multi-familia User with 2 memberships and
+exercises one method per `user`-taking service (`BudgetService.resolve/1`,
+`CookingService.session_state/2`, `InventoryService.inventory_view/1`,
+`PlanningChatService.quick_favorites/2`, `ShoppingService.
+get_shopping_list/2`, `RecipeService.is_favorite?/2`), asserting
+cross-Account data is filtered out for each. Two PRE-EXISTING, unrelated
+bugs discovered in `RecipeService` while writing this test —
+`list_recipes/1` reads a `:title` field the `Recipe` schema doesn't
+have; `add_favorite/2`'s underlying `RecipeRepo.add_favorite/2` omits
+the required `user_id` on its `FavoriteRecipe` changeset insert.
+`RecipeService` has NO production callers anywhere in `lib/` (confirmed
+via `grep`), so neither bug was ever previously exercised. Both are out
+of scope for this tenancy PR — the shared test uses `is_favorite?/2`
+(a read-only path that avoids both bugs) instead of `list_recipes/1`/
+`add_favorite/2`, and seeds the favorite row directly via
+`Calendar.toggle_favorite/3`.
+
+### Task 3.22 — `AccountsController`
+
+`me/2` and `context/2` corrected. No prior test file existed for this
+controller — created `test/meal_planner_api_web/controllers/accounts_controller_test.exs`.
+**Commit**: `0d1d6ba`.
+
+### Task 3.23 — Cross-Account isolation checkpoint
+
+`test/meal_planner_api_web/cross_account_isolation_test.exs` (commit
+`8a0f807`). A single User has `:owner` membership in Account A and
+`:member` in Account B, with one full fixture set per Account (recipe,
+scheduled meal, cooking session, inventory item, shopping item — every
+name/id carries an `A`/`B` label so cross-leakage is trivially
+detectable). Over real HTTP only, via `ConnCase` — no internal context
+calls:
+
+1. `GET /api/accounts/<Account_B_id>/memberships` with an Account-A
+   token → `403 account_mismatch` (`EnforceAccountScope`, task 3.7).
+   `GET /api/accounts/<Account_A_id>/memberships` (own Account)
+   succeeds.
+2. `GET /api/calendar`, `GET /api/planning/weekly`,
+   `GET /api/cooking/sessions/:session_id`, `GET /api/inventory`,
+   `GET /api/shopping-list` — each returns ONLY Account A's fixtures,
+   never Account B's.
+3. `POST /api/auth/switch-account` to Account B's membership succeeds,
+   returns a fresh token scoped to Account B.
+4. The SAME 5 routes, called again with the Account-B token, now
+   return ONLY Account B's fixtures.
+
+**Documented route-mapping deviation**: the launch prompt's `GET
+/api/planning`, `GET /api/cooking`, `GET /api/shopping` don't exist
+literally in `router.ex` (no bare GET route at those paths) — the
+closest real GET routes are used instead (`/api/planning/weekly`,
+`/api/cooking/sessions/:session_id`, `/api/shopping-list`), and this is
+called out explicitly in the test file's own moduledoc, not silently
+substituted.
+
+**Does this genuinely prove end-to-end multi-familia isolation +
+switch-account correctness, as asked?** Yes: it is the only test in
+this PR that (a) goes purely over HTTP with zero internal context
+calls, (b) covers all 5 non-`:account_id`-URL data surfaces PLUS the
+one `:account_id`-URL surface, (c) proves BOTH accounts' isolation
+directions (A-token never sees B, and — after the checkpoint's own
+`switch-account` call — B-token never sees A), and (d) composes the
+independently-tested controller fixes (3.14–3.20) into one connected
+proof rather than re-testing them in isolation.
+
+### Tasks 3.24 / 3.25 — Docs
+
+`ARCHITECTURE.md`'s Auth Flow section rewritten: both token claim
+shapes, the full `AuthPipeline` diagram (`VerifyHeader` →
+`VerifyTokenType` → `EnsureAuthenticated` → `LoadResource` →
+`LoadCurrentMembership`), why `current_membership` (not
+`current_user.account_id`) is the only trustworthy tenancy source,
+the `MEAL_PLANNER_TENANCY_V2` cutover procedure, and an ASCII sequence
+diagram for invite → accept → switch-account. Also replaced the stale
+"Group vs Individual Rules" section (pre-Phase-A `account_type` enum)
+with a short "Multi-Account Plans" section. **Commit**: `5ddeafc`.
+
+`docs/FRONTEND_INTEGRATION.md` gets a new "Multi-Familia (Cuentas
+Múltiples)" section (Spanish, matching the doc's existing established
+convention) documenting the `access_v2` claim shape with an example
+JWT, all 6 new endpoints (invite, accept, list memberships, remove
+member, switch-account, leave) with request/response examples and
+error tables sourced from `specs/invite-and-accept.md` and
+`specs/multi-familia-switch-account.md`, and the multi-familia
+two-socket WebSocket pattern. Also added an `account_mismatch` row to
+the common error codes table and bumped the doc's stale version/test-
+count header (was `2026-06-09` / 272 tests). **Commit**: `e293141`.
+
+## `mix test` summary (this PR)
+
+```
+479 tests, 0 failures   (baseline, feature/phase-a-pr-3b tip)
+481 tests, 0 failures   (+2 — task 3.14: happy-path + tampered-claim test)
+482 tests, 0 failures   (+1 — task 3.15: confirm tampered-claim test)
+484 tests, 0 failures   (+2 — Identity prerequisite fix: 2 tests)
+485 tests, 0 failures   (+1 — task 3.16: cooking tampered-claim test)
+486 tests, 0 failures   (+1 — task 3.17: shopping tampered-claim test)
+487 tests, 0 failures   (+1 — task 3.18: inventory tampered-claim test)
+488 tests, 0 failures   (+1 — task 3.19: planning_chat tampered-claim test)
+489 tests, 0 failures   (+1 — task 3.20: revenuecat tampered-claim test)
+495 tests, 0 failures   (+6 — task 3.21: tenancy_sweep_test.exs, 6 sub-tests)
+496 tests, 0 failures   (+1 — task 3.22: accounts_controller_test.exs, new file)
+497 tests, 0 failures   (+1 — task 3.15 follow-up: weekly test, unblocked by prereq fix)
+498 tests, 0 failures   (+1 — task 3.23: cross_account_isolation_test.exs)
+498 tests, 0 failures   (tasks 3.24/3.25 — docs-only, no test count change)
+```
+
+**Final: 498 tests, 0 failures** (+19 net over the 479 baseline; 0
+regressions). Every RED test was independently verified to fail on the
+unmodified code (via `git stash` of the production fix, re-run, `git
+stash pop`) before its GREEN implementation was confirmed — for every
+task in this PR, not just spot-checked.
+
+`mix format` scoped to only the files touched in each commit (never an
+unscoped `mix format` or `mix precommit`, per the explicit instruction
+to avoid PR 3a's mistake of reformatting ~19 unrelated files).
+
+## Deviations summary (honest, per launch instructions)
+
+1. **Task 3.15's `weekly/2` test was initially deferred, then added
+   later in this same PR** once the Identity prerequisite fix unblocked
+   it. The stale deferral note in the intermediate commit is superseded
+   and explicitly marked stale in the follow-up commit's message — not
+   silently left inconsistent.
+2. **Task 3.21: 0 of 12 services needed an internal signature change.**
+   Explicitly verified via grep for all 12, documented per-service in
+   the table above, per the launch instruction to "say so explicitly
+   rather than silently skipping it."
+3. **Task 3.21's shared test uses `RecipeService.is_favorite?/2`
+   instead of `list_recipes/1`** — the latter (and `add_favorite/2`)
+   hit pre-existing, unrelated bugs in dead code (no production
+   callers). Documented, not silently worked around.
+4. **A prerequisite fix outside the original 12 tasks was required**
+   (`Identity.ensure_persistent_identity/1`) — without it, task 3.21's
+   shared test (and several controller tests) could not be written at
+   all for real multi-membership fixtures. This is a genuine,
+   necessary, narrowly-scoped fix (one function, additive, backward
+   compatible with the legacy flow), not scope creep — documented as
+   its own commit and its own row in the TDD evidence table.
+5. **Task 3.23's route mapping** — `GET /api/planning`, `/api/cooking`,
+   `/api/shopping` don't exist literally; closest real GET routes used
+   instead, documented in the test file itself.
+6. **`ARCHITECTURE.md`'s "Group vs Individual Rules" section** was
+   replaced (not just the Auth Flow section) since it referenced the
+   pre-Phase-A `account_type` enum Phase A removed — a small, directly
+   related correction while already editing this file.
+
+## Out of scope (explicitly not touched)
+
+- `RecipeService.list_recipes/1` and `.add_favorite/2`'s pre-existing
+  bugs (discovered, documented, not fixed — no production callers).
+- The 3 pieces of deliberately-deferred debt carried forward from PR 3b
+  (duplicated "load real membership" query logic, stale
+  `synthesize_legacy_membership` naming, `access_v2`'s membership
+  lookup missing a `status: :active` filter) — untouched, per the
+  launch instructions.
+- `priv/repo/seeds.exs`'s no-real-membership-row dev-only gap —
+  untouched.
+
+## Status
+
+**All 12 tasks (3.14–3.25) complete**, plus 1 necessary prerequisite
+fix. Branch `feature/phase-a-pr-3c`, 14 commits
+(`bcd7697`..`e293141`, see `git log --oneline
+feature/phase-a-pr-3b..feature/phase-a-pr-3c`), based on
+`feature/phase-a-pr-3b`. **498 tests, 0 failures** (+19 over the 479
+baseline, 0 regressions). Pushed to `origin`. Ready for `sdd-verify` /
+review.
