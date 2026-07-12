@@ -2,9 +2,15 @@ defmodule MealPlannerApiWeb.ShoppingController do
   use MealPlannerApiWeb, :controller
 
   alias MealPlannerApi.Services.ShoppingService
+  alias MealPlannerApiWeb.Controllers.AccountScopeHelpers
+
+  # Phase A — Tenancy Refactor (PR 3c task 3.17): tenancy scope is always
+  # resolved from `conn.assigns.current_membership.account_id`, never
+  # from the legacy `current_user.account_id` field. See
+  # `AccountScopeHelpers.scope_user_to_membership/2`.
 
   def index(conn, params) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case ShoppingService.get_shopping_list(user, params) do
       {:ok, payload} -> json(conn, %{data: payload})
@@ -13,7 +19,7 @@ defmodule MealPlannerApiWeb.ShoppingController do
   end
 
   def mark_cart(conn, payload) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     # Support both item_ids (list of item IDs) and ingredient_id (mark all items for ingredient)
     item_ids = Map.get(payload, "item_ids")
@@ -43,7 +49,7 @@ defmodule MealPlannerApiWeb.ShoppingController do
   end
 
   def assign_supermarket(conn, payload) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     # Support both item_id (single item) and ingredient_id (assign all for ingredient in range)
     item_id = Map.get(payload, "item_id")
@@ -78,7 +84,7 @@ defmodule MealPlannerApiWeb.ShoppingController do
   end
 
   def confirm_checkout(conn, payload) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     # Support both session_id (path param) and date-range checkout (body params)
     session_id = Map.get(payload, "session_id")
@@ -118,12 +124,18 @@ defmodule MealPlannerApiWeb.ShoppingController do
   defp parse_date_param(d), do: d
 
   def confirm_delivery(conn, %{"checkout_session_id" => checkout_session_id}) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case ShoppingService.confirm_delivery(user, checkout_session_id) do
       {:ok, response} -> json(conn, %{data: response})
       {:error, reason} -> render_error(conn, reason)
     end
+  end
+
+  defp scoped_user(conn) do
+    conn
+    |> Guardian.Plug.current_resource()
+    |> AccountScopeHelpers.scope_user_to_membership(conn.assigns.current_membership)
   end
 
   defp render_error(conn, reason) do
