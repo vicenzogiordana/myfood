@@ -45,7 +45,12 @@ defmodule MealPlannerApi.Accounts do
   end
 
   @spec register_with_password(map()) ::
-          {:ok, %{user: PersistenceUser.t(), account: PersistenceAccount.t()}}
+          {:ok,
+           %{
+             user: PersistenceUser.t(),
+             account: PersistenceAccount.t(),
+             membership: AccountMembership.t()
+           }}
           | {:error,
              :email_already_registered
              | :invalid_email
@@ -62,7 +67,7 @@ defmodule MealPlannerApi.Accounts do
          password_hash <- Bcrypt.hash_pwd_salt(password),
          {:ok, result} <-
            create_account_and_user(email, password_hash, plan, params, subscription_plan_id) do
-      {:ok, %{user: result.user, account: result.account}}
+      {:ok, %{user: result.user, account: result.account, membership: result.membership}}
     else
       %PersistenceUser{} -> {:error, :email_already_registered}
       {:error, _} = error -> error
@@ -276,8 +281,8 @@ defmodule MealPlannerApi.Accounts do
       end)
 
     case Repo.transaction(transaction) do
-      {:ok, %{account: account, user: user}} ->
-        {:ok, %{account: account, user: user}}
+      {:ok, %{account: account, user: user, membership: membership}} ->
+        {:ok, %{account: account, user: user, membership: membership}}
 
       {:error, step, reason, _changes} ->
         Logger.error(

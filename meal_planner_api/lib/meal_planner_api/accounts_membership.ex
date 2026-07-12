@@ -12,6 +12,7 @@ defmodule MealPlannerApi.AccountsMembership do
   `multi-familia-switch-account.md`, and `guardian-jwt-claims.md`.
   """
 
+  alias MealPlannerApi.Accounts
   alias MealPlannerApi.Persistence.Accounts.Account
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
@@ -315,12 +316,31 @@ defmodule MealPlannerApi.AccountsMembership do
          user: fresh_user,
          account: account,
          membership: membership,
-         claims: claims_for(fresh_user, membership)
+         claims: build_response_claims(fresh_user, account, membership)
        }}
     end
   end
 
   def switch_account(_user, _id), do: {:error, :membership_not_found}
+
+  # Post-review fix pass, item 2: `switch_account/2` and `accept_invite/2`
+  # used to call `claims_for/2` directly, unconditionally minting
+  # `access_v2` regardless of `MEAL_PLANNER_TENANCY_V2` — unlike
+  # `auth_controller.ex`'s `password/2`, which gates issuance through the
+  # same flag (see its private `issuance_typ/1`). This made the flag not a
+  # real killswitch for these two flows. Mirrors `auth_controller.ex`'s
+  # `tenancy_v2_only?/0` check exactly (same config key).
+  defp build_response_claims(user, account, membership) do
+    if tenancy_v2_only?() do
+      claims_for(user, membership)
+    else
+      Accounts.claims_for(user, account)
+    end
+  end
+
+  defp tenancy_v2_only? do
+    Application.get_env(:meal_planner_api, :tenancy_v2_only, false)
+  end
 
   defp load_active_membership(uuid) do
     case Repo.get(AccountMembership, uuid) do
@@ -379,7 +399,8 @@ defmodule MealPlannerApi.AccountsMembership do
             {:error, :invite_token_expired}
 
           true ->
-            with {:ok, invitee} <- resolve_user.(:stub),
+            with {:ok, stub_user} <- fetch_membership_user(membership),
+                 {:ok, invitee} <- resolve_user.(stub_user),
                  {:ok, consumed} <-
                    Repo.update(
                      AccountMembership.changeset(membership, %{
@@ -396,7 +417,7 @@ defmodule MealPlannerApi.AccountsMembership do
                  user: invitee,
                  account: account,
                  membership: consumed,
-                 claims: claims_for(invitee, consumed)
+                 claims: build_response_claims(invitee, account, consumed)
                }}
             else
               {:error, reason} -> {:error, reason}
@@ -405,7 +426,30 @@ defmodule MealPlannerApi.AccountsMembership do
     end
   end
 
-  defp load_account(account_id) do
+  # PR 3a task 3.4 fix: `resolve_user.()` must receive the actual stub
+  # `%PersistenceUser{}` row created by
+  # `InviteService.create_invite_row/2` (looked up by
+  # `membership.user_id`), not a placeholder atom — the "new User"
+  # arity's closure pattern-matches `%PersistenceUser{}` and always
+  # raised `FunctionClauseError` before this fix.
+  defp fetch_membership_user(%AccountMembership{user_id: user_id}) do
+    case Repo.get(PersistenceUser, user_id) do
+      %PersistenceUser{} = user -> {:ok, user}
+      nil -> {:error, :invite_token_unknown}
+    end
+  end
+
+  @doc """
+  Loads an `Account` by its (string) id. Returns `{:error,
+  :account_not_found}` for a malformed id or a missing row.
+
+  Public (post-review fix pass item 5) so
+  `MealPlannerApiWeb.Controllers.AccountScopeHelpers.load_account/1` can
+  delegate here instead of duplicating the same
+  `Ecto.UUID.cast/1` → `Repo.get/2` → error-tuple shape.
+  """
+  @spec load_account(String.t()) :: {:ok, Account.t()} | {:error, :account_not_found}
+  def load_account(account_id) do
     case Ecto.UUID.cast(account_id) do
       {:ok, uuid} ->
         case Repo.get(Account, uuid) do
@@ -490,11 +534,20 @@ defmodule MealPlannerApi.AccountsMembership do
   is the owner of a *different* Account from triggering
   `:cannot_leave_owned_account` against an Account they don't belong
   to — they should get `:not_a_member` instead.
+
+  Looks the row up by `user_id` + `account_id`, NOT by `actor.id`.
+  `actor` may be a **synthesized** legacy membership (`__synthesized__:
+  true`, `id: nil` — see `LoadCurrentMembership.synthesize_v1_membership/2`)
+  for `access_v1` token holders; `id: nil` never matches a real primary
+  key, so an `id`-based lookup always returned `nil` for every legacy
+  User, making this function permanently broken for them. The
+  synthesized struct does carry the real `user_id`, which is what both
+  real and synthesized memberships have in common.
   """
   @spec leave(Account.t(), AccountMembership.t()) ::
           :ok | {:error, :cannot_leave_owned_account | :not_a_member}
   def leave(%Account{} = account, %AccountMembership{} = actor) do
-    case Repo.get_by(AccountMembership, id: actor.id, account_id: account.id) do
+    case Repo.get_by(AccountMembership, user_id: actor.user_id, account_id: account.id) do
       nil ->
         {:error, :not_a_member}
 

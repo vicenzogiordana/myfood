@@ -279,6 +279,14 @@ defmodule MealPlannerApi.AccountsMembershipTest do
 
   describe "accept_invite/2" do
     test "existing User acceptance flips :invited → :active and yields fresh claims" do
+      # Post-review fix pass, item 2: `build_response_claims/3` now
+      # consults `:meal_planner_api, :tenancy_v2_only` (same flag
+      # `auth_controller.ex` uses) before minting `access_v2` — flip it on
+      # for this test so the assertions below reflect the flag-on path.
+      previous = Application.get_env(:meal_planner_api, :tenancy_v2_only)
+      on_exit(fn -> Application.put_env(:meal_planner_api, :tenancy_v2_only, previous) end)
+      Application.put_env(:meal_planner_api, :tenancy_v2_only, true)
+
       invitee =
         user_with_memberships(
           %{email: "invitee@example.com", name: "Invitee"},
@@ -311,6 +319,31 @@ defmodule MealPlannerApi.AccountsMembershipTest do
       assert result.claims["plan"] == "family_4"
       assert result.claims["role"] == "member"
       assert result.claims["status"] == "active"
+    end
+
+    test "an invitee argument matching neither known shape returns :invalid_invitee" do
+      # Post-review fix pass, item 7: `error_status/1`'s `invalid_invitee`
+      # mapping (400) has no HTTP-level path that can trigger it —
+      # `InviteController.resolve_invitee/2` only ever produces a
+      # `%PersistenceUser{}` or a `%{name:, password_hash:}` map, both of
+      # which match `accept_invite/2`'s named clauses. The catch-all
+      # clause (`accept_invite(_plaintext, _args), do: {:error,
+      # :invalid_invitee}`) was previously untested at ANY layer — this
+      # pins its behavior directly against the application function.
+      owner =
+        user_with_memberships(
+          %{email: "invalid-invitee-owner@example.com"},
+          [{%{plan: :family_4, name: "Invalid Invitee Family"}, :owner}]
+        )
+
+      [owner_membership] = owner.memberships
+      account = Repo.get!(PersistenceAccount, owner_membership.account_id)
+
+      {:ok, %{token: plaintext}} =
+        AccountsMembership.invite(account, owner_membership, "invalid-invitee@example.com")
+
+      assert {:error, :invalid_invitee} =
+               AccountsMembership.accept_invite(plaintext, %{unexpected: "shape"})
     end
 
     test "replay (second accept with same plaintext) returns :invite_token_used" do
@@ -368,6 +401,42 @@ defmodule MealPlannerApi.AccountsMembershipTest do
 
       assert {:error, :invite_token_expired} =
                AccountsMembership.accept_invite(plaintext, invitee)
+    end
+
+    test "new User acceptance (map arity) fills in the stub User's name and password_hash" do
+      # PR 3a task 3.4 regression: the map-based accept_invite/2 arity
+      # (invitee has no User yet) previously called
+      # `resolve_user.(:stub)` with the literal atom `:stub` instead of
+      # the actual stub %User{} row created by
+      # `InviteService.create_invite_row/2` — the closure in this arity
+      # pattern-matches `%PersistenceUser{}`, so this always raised
+      # `FunctionClauseError` and the "new User accepts" flow could
+      # never have worked end-to-end.
+      owner =
+        user_with_memberships(
+          %{email: "new-user-owner@example.com"},
+          [
+            {%{plan: :family_4, name: "New User Family"}, :owner}
+          ]
+        )
+
+      [owner_membership] = owner.memberships
+      account = Repo.get!(PersistenceAccount, owner_membership.account_id)
+
+      {:ok, %{token: plaintext}} =
+        AccountsMembership.invite(account, owner_membership, "brand-new-invitee@example.com")
+
+      assert {:ok, result} =
+               AccountsMembership.accept_invite(plaintext, %{
+                 name: "Brand New Invitee",
+                 password_hash: "hashed-password"
+               })
+
+      assert result.user.email == "brand-new-invitee@example.com"
+      assert result.user.name == "Brand New Invitee"
+      assert result.user.password_hash == "hashed-password"
+      assert result.membership.status == :active
+      assert result.membership.user_id == result.user.id
     end
 
     test "an :active User accepting an invite for an email they already own returns :already_a_member" do
@@ -513,6 +582,14 @@ defmodule MealPlannerApi.AccountsMembershipTest do
 
   describe "switch_account/2" do
     test "multi-familia User can switch to a second :active membership and yield fresh claims" do
+      # Post-review fix pass, item 2: `build_response_claims/3` now
+      # consults `:meal_planner_api, :tenancy_v2_only` (same flag
+      # `auth_controller.ex` uses) before minting `access_v2` — flip it on
+      # for this test so the assertions below reflect the flag-on path.
+      previous = Application.get_env(:meal_planner_api, :tenancy_v2_only)
+      on_exit(fn -> Application.put_env(:meal_planner_api, :tenancy_v2_only, previous) end)
+      Application.put_env(:meal_planner_api, :tenancy_v2_only, true)
+
       user =
         user_with_memberships(
           %{email: "switch@example.com", name: "Switch User"},

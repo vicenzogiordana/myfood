@@ -26,6 +26,17 @@ defmodule MealPlannerApi.AccountsMembershipIntegrationTest do
   setup do
     :ok = Sandbox.checkout(Repo)
     :ok = MealPlannerApi.SubscriptionPlanFixtures.ensure_plans!()
+
+    # Post-review fix pass, item 2: `accept_invite/2` and `switch_account/2`
+    # now consult `:meal_planner_api, :tenancy_v2_only` before minting
+    # `access_v2` claims (same flag `auth_controller.ex` uses). This suite
+    # exercises the Phase A `access_v2` claim shape end-to-end, so flip
+    # the flag on for the duration of each test.
+    previous = Application.get_env(:meal_planner_api, :tenancy_v2_only)
+    Application.put_env(:meal_planner_api, :tenancy_v2_only, true)
+    on_exit(fn -> Application.put_env(:meal_planner_api, :tenancy_v2_only, previous) end)
+
+    :ok
   end
 
   describe "invite → accept → list → remove → leave flow" do
