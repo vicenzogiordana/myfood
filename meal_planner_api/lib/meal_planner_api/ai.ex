@@ -4,13 +4,14 @@ defmodule MealPlannerApi.AI do
   Orchestrates requests and delegates provider calls to the configured client.
   """
 
-  alias MealPlannerApi.Accounts.User
+  alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
   alias MealPlannerApi.Services.BudgetService
   alias MealPlannerApi.Services.SubscriptionService
   alias MealPlannerApi.Messages
 
-  @spec stream_response(String.t(), String.t(), User.t(), map()) :: :ok | {:error, term()}
-  def stream_response(room_id, prompt, %User{} = user, params \\ %{})
+  @spec stream_response(String.t(), String.t(), PersistenceUser.t(), map()) ::
+          :ok | {:error, term()}
+  def stream_response(room_id, prompt, %PersistenceUser{} = user, params \\ %{})
       when is_binary(room_id) and is_binary(prompt) do
     with {:ok, client_module} <- client(),
          :ok <- ensure_client_ready(client_module) do
