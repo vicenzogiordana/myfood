@@ -318,12 +318,14 @@ defmodule MealPlannerApi.Data.PlanningRepo do
   # -------------------------------------------------------------------------
 
   @spec toggle_slot_favorite(map()) :: {:ok, map()} | {:error, term()}
-  def toggle_slot_favorite(%{
-        account_id: account_id,
-        user_id: user_id,
-        date: date,
-        slot: slot
-      }) do
+  def toggle_slot_favorite(
+        %{
+          account_id: account_id,
+          user_id: user_id,
+          date: date,
+          slot: slot
+        } = attrs
+      ) do
     existing =
       from(sf in SlotFavorite,
         where:
@@ -338,7 +340,11 @@ defmodule MealPlannerApi.Data.PlanningRepo do
       Repo.delete!(existing)
       {:ok, %{status: :removed, date: date, slot: slot}}
     else
-      attrs = %{account_id: account_id, user_id: user_id, date: date, slot: slot}
+      # `scheduled_meal_id` and `recipe_id` are required by
+      # SlotFavorite.changeset/2 — the original pattern match only
+      # destructured account_id/user_id/date/slot and silently dropped
+      # them here, so a new favorite could never be created. Pass the
+      # full input map through instead.
       %SlotFavorite{} |> SlotFavorite.changeset(attrs) |> Repo.insert()
     end
   end

@@ -24,7 +24,10 @@ defmodule MealPlannerApi.Persistence.Catalog.SlotFavorite do
     timestamps(type: :utc_datetime_usec)
   end
 
-  @slot_values ~w(breakfast lunch snack dinner)a
+  # `:slot` is a `:string` column (not an `Ecto.Enum`), so the inclusion
+  # list MUST be strings, not atoms — comparing a cast string value
+  # against an atom list always fails validate_inclusion.
+  @slot_values ~w(breakfast lunch snack dinner)
 
   def slot_values, do: @slot_values
 

@@ -12,11 +12,16 @@ defmodule MealPlannerApi.Accounts do
   consumers continue to work without an app release.
   """
 
+  import Ecto.Query
+
+  require Logger
+
   alias Ecto.Multi
   alias MealPlannerApi.Repo
   alias MealPlannerApi.Subscriptions
   alias MealPlannerApi.Accounts.Account
   alias MealPlannerApi.Persistence.Accounts.Account, as: PersistenceAccount
+  alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
 
   @plan_values [:individual, :family_4, :family_6, :trial]
@@ -66,7 +71,12 @@ defmodule MealPlannerApi.Accounts do
   end
 
   @spec authenticate_with_password(map()) ::
-          {:ok, %{user: PersistenceUser.t(), account: PersistenceAccount.t()}}
+          {:ok,
+           %{
+             user: PersistenceUser.t(),
+             account: PersistenceAccount.t(),
+             membership: AccountMembership.t() | nil
+           }}
           | {:error, :invalid_email | :invalid_password | :invalid_credentials}
   def authenticate_with_password(params) when is_map(params) do
     with {:ok, email} <- fetch_email(params),
@@ -75,7 +85,9 @@ defmodule MealPlannerApi.Accounts do
          true <- is_binary(user.password_hash) and user.password_hash != "",
          true <- Bcrypt.verify_pass(password, user.password_hash),
          %PersistenceAccount{} = account <- Repo.get(PersistenceAccount, user.account_id) do
-      {:ok, %{user: user, account: account}}
+      membership = first_active_membership_for(user, account)
+
+      {:ok, %{user: user, account: account, membership: membership}}
     else
       nil ->
         Bcrypt.no_user_verify()
@@ -126,6 +138,19 @@ defmodule MealPlannerApi.Accounts do
 
   def seat_usage(_), do: %{active: 0, invited: 0, capacity: 1}
 
+  @doc """
+  Builds the legacy `access_v1` JWT claim map for the given user/account
+  pair.
+
+  Deliberately does NOT set a `"typ"` key. `Guardian.encode_and_sign/3`'s
+  `token_type:` option only controls the minted `typ` claim when the
+  claims map passed in has no (non-nil) `"typ"` key already — Guardian's
+  `set_type/3` skips overriding an existing one. Every call site
+  (`auth_controller.ex`) passes `token_type: "access"` or
+  `token_type: "refresh"` explicitly; hardcoding `"typ" => "access"` here
+  used to force every refresh token to carry `typ: "access"`, letting
+  refresh tokens pass as access tokens anywhere behind `VerifyTokenType`.
+  """
   @spec claims_for(map(), map()) :: map()
   def claims_for(user, account) when is_map(user) and is_map(account) do
     legacy_account_type = legacy_account_type_from_plan(plan_from(account))
@@ -239,15 +264,60 @@ defmodule MealPlannerApi.Accounts do
         attrs = Map.put(user_attrs, :account_id, account.id)
         PersistenceUser.changeset(%PersistenceUser{}, attrs)
       end)
+      |> Multi.insert(:membership, fn %{account: account, user: user} ->
+        %AccountMembership{}
+        |> AccountMembership.changeset(%{
+          account_id: account.id,
+          user_id: user.id,
+          role: :owner,
+          status: :active,
+          joined_at: DateTime.utc_now()
+        })
+      end)
 
     case Repo.transaction(transaction) do
-      {:ok, %{account: account, user: user}} -> {:ok, %{account: account, user: user}}
-      {:error, _step, _reason, _changes} -> {:error, :unable_to_issue_identity}
+      {:ok, %{account: account, user: user}} ->
+        {:ok, %{account: account, user: user}}
+
+      {:error, step, reason, _changes} ->
+        Logger.error(
+          "registration transaction failed at step=#{inspect(step)} reason=#{inspect(reason)}"
+        )
+
+        {:error, :unable_to_issue_identity}
     end
   end
 
   defp user_by_email(email) when is_binary(email),
     do: Repo.get_by(PersistenceUser, email: email)
+
+  # Look up the first :active AccountMembership for a User, SCOPED to the
+  # Account being authenticated into. Used by authenticate_with_password/1
+  # when the MEAL_PLANNER_TENANCY_V2 flag is on, so the PR 3 auth_controller
+  # layer has the membership row it needs to mint an `access_v2` JWT.
+  # Returns `nil` when the User has no membership on this Account (the
+  # controller should fall back to the synthesized `current_membership`
+  # path in that case).
+  #
+  # MUST filter by account_id: a multi-familia User can have :active
+  # memberships on 2+ different Accounts. Without this filter, the
+  # returned membership could belong to a different Account than the
+  # `account` returned alongside it by authenticate_with_password/1 —
+  # a tenancy-isolation bug (PR 2b post-review fix pass item 2).
+  defp first_active_membership_for(%PersistenceUser{id: user_id}, %PersistenceAccount{
+         id: account_id
+       }) do
+    query =
+      from(m in AccountMembership,
+        where: m.user_id == ^user_id and m.account_id == ^account_id and m.status == :active,
+        order_by: [asc: m.inserted_at],
+        limit: 1
+      )
+
+    Repo.one(query)
+  end
+
+  defp first_active_membership_for(_, _), do: nil
 
   defp normalize_email(value) when is_binary(value) do
     value = value |> String.trim() |> String.downcase()

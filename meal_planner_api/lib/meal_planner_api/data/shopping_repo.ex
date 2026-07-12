@@ -116,7 +116,7 @@ defmodule MealPlannerApi.Data.ShoppingRepo do
   def list_pending_delivery_sessions(account_id) do
     from(s in CheckoutSession,
       where: s.account_id == ^account_id and s.status == :pending_delivery,
-      order_by: [asc: s.delivery_window_start]
+      order_by: [asc: s.inserted_at]
     )
     |> Repo.all()
   end
