@@ -1,11 +1,137 @@
 defmodule MealPlannerApiWeb.CalendarControllerTest do
   use MealPlannerApiWeb.ConnCase, async: true
 
+  import MealPlannerApi.FactoryHelpers
+
   alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Calendar
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApi.Persistence.Identity
   alias MealPlannerApi.Persistence.Planning
+
+  # ─── Phase A — Tenancy Refactor (PR 3c task 3.14) ───────────────────────────
+  # Controller sweep: `CalendarController` must resolve tenancy scope from
+  # `conn.assigns.current_membership.account_id` (the DB-resolved,
+  # `membership_id`-backed row `LoadCurrentMembership` assigns), not the
+  # legacy `current_user.account_id` field — which Guardian's
+  # `resource_from_claims/1` re-attaches straight from the JWT's
+  # (redundant, non-authoritative) `account_id` claim for dual-write
+  # backward compatibility (see `lib/meal_planner_api/auth/guardian.ex`).
+  # Because that reattachment already mirrors a well-formed `access_v2`
+  # token's `account_id` claim, a naive "JWT scoped to Account_A" test
+  # alone cannot distinguish the two fields (it's GREEN either way). The
+  # discriminating case is a validly-signed token whose `membership_id`
+  # (canonical) and `account_id` claim (redundant, must never be trusted
+  # directly) disagree — exactly the shape a stale/legacy claim could take.
+  describe "GET /api/calendar — multi-familia tenancy scoping (task 3.14)" do
+    setup do
+      user =
+        user_with_memberships(%{email: "cal_multi_a@example.com"}, [
+          {%{plan: :family_4, name: "Calendar Account A"}, :owner},
+          {%{plan: :family_4, name: "Calendar Account B"}, :member}
+        ])
+
+      [membership_a, membership_b] = user.memberships
+      today = Date.utc_today()
+
+      {:ok, recipe_a} =
+        Catalog.create_recipe(%{
+          name: "Only In Account A",
+          account_id: membership_a.account_id,
+          created_by_user_id: user.id,
+          source: :user_created,
+          servings: 2,
+          calories_per_serving: 300,
+          prep_time_minutes: 10,
+          suitable_for_slots: [:lunch]
+        })
+
+      {:ok, recipe_b} =
+        Catalog.create_recipe(%{
+          name: "Only In Account B",
+          account_id: membership_b.account_id,
+          created_by_user_id: user.id,
+          source: :user_created,
+          servings: 2,
+          calories_per_serving: 300,
+          prep_time_minutes: 10,
+          suitable_for_slots: [:lunch]
+        })
+
+      {:ok, _meal_a} =
+        Calendar.upsert_scheduled_meal(membership_a.account_id, %{
+          date: today,
+          slot: :lunch,
+          recipe_id: recipe_a.id
+        })
+
+      {:ok, _meal_b} =
+        Calendar.upsert_scheduled_meal(membership_b.account_id, %{
+          date: today,
+          slot: :lunch,
+          recipe_id: recipe_b.id
+        })
+
+      %{user: user, membership_a: membership_a, membership_b: membership_b, today: today}
+    end
+
+    test "JWT scoped to Account_A (via membership_id) returns Account_A data only", %{
+      conn: conn,
+      user: user,
+      membership_a: membership_a,
+      today: today
+    } do
+      token_a = issue_access_v2_token(user, membership_a)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token_a)
+        |> get("/api/calendar", %{
+          "start_date" => Date.to_iso8601(today),
+          "end_date" => Date.to_iso8601(Date.add(today, 6))
+        })
+
+      body = json_response(conn, 200)
+      recipe_names = Enum.map(body["data"]["meals"], & &1["recipe_name"])
+
+      assert "Only In Account A" in recipe_names
+      refute "Only In Account B" in recipe_names
+    end
+
+    test "trusts the DB-resolved current_membership.account_id, not a tampered account_id claim",
+         %{
+           conn: conn,
+           user: user,
+           membership_a: membership_a,
+           membership_b: membership_b,
+           today: today
+         } do
+      # membership_id points at Account A (the canonical scope pointer);
+      # the redundant account_id claim is tampered to point at Account B.
+      # A controller reading `current_membership.account_id` (resolved via
+      # membership_id) must return Account A's data regardless.
+      tampered_claims =
+        MealPlannerApi.AccountsMembership.claims_for(user, membership_a)
+        |> Map.put("account_id", to_string(membership_b.account_id))
+
+      {:ok, token, _claims} =
+        Guardian.encode_and_sign(user, tampered_claims, token_type: "access")
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> get("/api/calendar", %{
+          "start_date" => Date.to_iso8601(today),
+          "end_date" => Date.to_iso8601(Date.add(today, 6))
+        })
+
+      body = json_response(conn, 200)
+      recipe_names = Enum.map(body["data"]["meals"], & &1["recipe_name"])
+
+      assert "Only In Account A" in recipe_names
+      refute "Only In Account B" in recipe_names
+    end
+  end
 
   # ─── Gap 1: show_slot endpoint ──────────────────────────────────────────────
 

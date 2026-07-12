@@ -6,7 +6,7 @@ defmodule MealPlannerApi.Persistence.Identity do
   import Ecto.Query, warn: false
 
   alias MealPlannerApi.Repo
-  alias MealPlannerApi.Persistence.Accounts.{Account, User}
+  alias MealPlannerApi.Persistence.Accounts.{Account, AccountMembership, User}
 
   @spec ensure_persistent_identity(map()) ::
           {:ok, %{account_id: Ecto.UUID.t(), user_id: Ecto.UUID.t()}}
@@ -33,11 +33,40 @@ defmodule MealPlannerApi.Persistence.Identity do
     with {:ok, _} <- Ecto.UUID.cast(user_id),
          {:ok, _} <- Ecto.UUID.cast(account_id),
          %Account{} <- Repo.get(Account, account_id),
-         %User{account_id: ^account_id} <- Repo.get(User, user_id) do
+         %User{} = user <- Repo.get(User, user_id),
+         true <-
+           legacy_account_match?(user, account_id) or active_membership?(user_id, account_id) do
       {:ok, %{account_id: account_id, user_id: user_id}}
     else
       _ -> :not_found
     end
+  end
+
+  # Phase A — Tenancy Refactor (PR 3c task 3.21, prerequisite fix).
+  #
+  # This bridge predates the `AccountMembership` model — its only
+  # original fast path was "the real `users.account_id` column equals
+  # the target account" (`legacy_account_match?/2`). Per design.md §2.3
+  # (decision 5.1), `users.account_id` is intentionally nil for real
+  # multi-membership Users going forward — `current_membership` carries
+  # tenancy instead. Without also checking for a real, `:active`
+  # `AccountMembership` row here, every service still routing through
+  # `ensure_persistent_identity/1` (cooking_service, inventory_service,
+  # planning_chat_service, shopping_service, recipe_service) would fall
+  # through to the "mint a shadow User" branch below for ANY real
+  # multi-membership User — inserting a second `users` row with the same
+  # email and crashing on the `users.email` unique index. Both checks are
+  # kept (`or`) so the legacy `find_or_create_identity/1` single-account
+  # flow (which still sets `users.account_id` directly) is unaffected.
+  defp legacy_account_match?(%User{account_id: account_id}, account_id), do: true
+  defp legacy_account_match?(_user, _account_id), do: false
+
+  defp active_membership?(user_id, account_id) do
+    Repo.exists?(
+      from(m in AccountMembership,
+        where: m.user_id == ^user_id and m.account_id == ^account_id and m.status == :active
+      )
+    )
   end
 
   defp ensure_account(account_id, user) do

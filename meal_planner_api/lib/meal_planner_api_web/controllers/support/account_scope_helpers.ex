@@ -113,4 +113,28 @@ defmodule MealPlannerApiWeb.Controllers.AccountScopeHelpers do
       _ -> {:error, :token_refresh_failed}
     end
   end
+
+  @doc """
+  Phase A — Tenancy Refactor (PR 3c tasks 3.14–3.20, 3.22).
+
+  Overrides `user.account_id` with `membership.account_id` — the
+  DB-resolved, `membership_id`-backed value `LoadCurrentMembership`
+  assigns — before the `User` struct is handed to a service/context
+  function that internally reads `.account_id` for tenancy filtering
+  (e.g. via `MealPlannerApi.Persistence.Identity.
+  ensure_persistent_identity/1`).
+
+  This is the single choke point where every controller sweep task
+  applies the fix: rather than rewriting the internal signature of every
+  downstream service (12 services, deep call chains, dozens of existing
+  callers/tests), the User struct is corrected at the one place tenancy
+  scope enters the domain layer — the controller boundary — so every
+  downstream read of `.account_id` is automatically correct. `user.id`
+  and every other field the services depend on (`subscription_tier`,
+  `kcal_target`, etc.) are left untouched.
+  """
+  @spec scope_user_to_membership(struct() | map(), AccountMembership.t()) :: struct() | map()
+  def scope_user_to_membership(user, %{account_id: account_id}) do
+    Map.put(user, :account_id, account_id)
+  end
 end

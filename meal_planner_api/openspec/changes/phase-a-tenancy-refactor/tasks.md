@@ -709,7 +709,7 @@ Chain strategy: feature-branch-chain
 - **Depends on**: 3.9–3.12
 - **Landed**: PR 3b task 3.13 (see `apply-progress.md` §"PR 3b").
 
-### Task 3.14 — Controller sweep: `CalendarController` reads `current_membership.account_id`
+### Task 3.14 — Controller sweep: `CalendarController` reads `current_membership.account_id` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api_web/controllers/calendar_controller.ex` (modify)
@@ -717,12 +717,13 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Mechanical change — replace every `current_user.account_id` with `current_membership.account_id`. Filters in `Calendar.monthly_overview/2` and friends now resolve via `membership.account_id`.
 - **Acceptance criteria**:
-  - [ ] test asserts multi-familia User calling `GET /api/calendar` with JWT scoped to `Account_A` returns `Account_A` data only (RED)
-  - [ ] change applied; test GREEN
+  - [x] test asserts multi-familia User calling `GET /api/calendar` with JWT scoped to `Account_A` returns `Account_A` data only (RED)
+  - [x] change applied; test GREEN
 - **Estimated lines**: +15 / -10
 - **Depends on**: 1.11, 2.13
+- **Landed**: `bcd7697` (PR 3c — see `apply-progress.md` §"PR 3c")
 
-### Task 3.15 — Controller sweep: `PlanningController`
+### Task 3.15 — Controller sweep: `PlanningController` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api_web/controllers/planning_controller.ex` (modify)
@@ -731,8 +732,9 @@ Chain strategy: feature-branch-chain
 - **Description**: Same as 3.14.
 - **Estimated lines**: +15 / -10
 - **Depends on**: 3.14
+- **Landed**: `99781a4`, `884ee89` (PR 3c — see `apply-progress.md` §"PR 3c")
 
-### Task 3.16 — Controller sweep: `CookingController`
+### Task 3.16 — Controller sweep: `CookingController` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api_web/controllers/cooking_controller.ex` (modify)
@@ -741,8 +743,9 @@ Chain strategy: feature-branch-chain
 - **Description**: Same as 3.14.
 - **Estimated lines**: +15 / -10
 - **Depends on**: 3.14
+- **Landed**: `9071560` (PR 3c — see `apply-progress.md` §"PR 3c")
 
-### Task 3.17 — Controller sweep: `ShoppingController`
+### Task 3.17 — Controller sweep: `ShoppingController` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api_web/controllers/shopping_controller.ex` (modify)
@@ -751,8 +754,9 @@ Chain strategy: feature-branch-chain
 - **Description**: Same as 3.14.
 - **Estimated lines**: +15 / -10
 - **Depends on**: 3.14
+- **Landed**: `1e8617c` (PR 3c — see `apply-progress.md` §"PR 3c")
 
-### Task 3.18 — Controller sweep: `InventoryController`
+### Task 3.18 — Controller sweep: `InventoryController` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api_web/controllers/inventory_controller.ex` (modify)
@@ -761,8 +765,9 @@ Chain strategy: feature-branch-chain
 - **Description**: Same as 3.14.
 - **Estimated lines**: +15 / -10
 - **Depends on**: 3.14
+- **Landed**: `ef7155a` (PR 3c — see `apply-progress.md` §"PR 3c")
 
-### Task 3.19 — Controller sweep: `PlanningChatController`
+### Task 3.19 — Controller sweep: `PlanningChatController` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api_web/controllers/planning_chat_controller.ex` (modify)
@@ -771,8 +776,9 @@ Chain strategy: feature-branch-chain
 - **Description**: Same as 3.14.
 - **Estimated lines**: +15 / -10
 - **Depends on**: 3.14
+- **Landed**: `e5cbc43` (PR 3c — see `apply-progress.md` §"PR 3c")
 
-### Task 3.20 — Controller sweep: `RevenuecatController`
+### Task 3.20 — Controller sweep: `RevenuecatController` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api_web/controllers/revenuecat_controller.ex` (modify)
@@ -781,8 +787,9 @@ Chain strategy: feature-branch-chain
 - **Description**: Same as 3.14 (webhook controller reads the Account from the request, but ownership verification moves to `current_membership`).
 - **Estimated lines**: +15 / -8
 - **Depends on**: 3.14
+- **Landed**: `fa71bf6` (PR 3c — see `apply-progress.md` §"PR 3c")
 
-### Task 3.21 — Service sweep (12 services read `current_membership`)
+### Task 3.21 — Service sweep (12 services read `current_membership`) ✅
 
 - **Files** (12 files, but each is a one-line mechanical change in most cases; consolidate per service file in a single commit if the diff per service stays under ~30 LOC):
   - `meal_planner_api/lib/meal_planner_api/services/account_service.ex`
@@ -800,13 +807,15 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green) — one shared integration test, but the per-file diff stays small
 - **Description**: Each service that today takes a `user` and reads `user.account_id` is updated to take `membership` (or preload `memberships` and read the active one) and read `membership.account_id`. Where the service signature doesn't need to change (it already receives `account_id` from the caller), no edit is required — verified by `grep` first. This is the lightest possible sweep; services that today receive `account_id` directly require no change. **The task is committed as a single commit only if the total diff is ≤ 200 LOC and tests stay green.** If the diff is larger, split into two sub-tasks (3.21a "services that take `user`" and 3.21b "services that already take `account_id` (verification only)") at apply time.
 - **Acceptance criteria**:
-  - [ ] grep verification: every service that previously read `user.account_id` now reads `membership.account_id`
-  - [ ] grep verification: no service still imports `User` for tenancy purposes
-  - [ ] shared integration test (`test/meal_planner_api/services/tenancy_sweep_test.exs`) — seeds a multi-familia User, calls one method per affected service, asserts cross-Account data is filtered out
+  - [x] grep verification: every service that previously read `user.account_id` now reads `membership.account_id`
+  - [x] grep verification: no service still imports `User` for tenancy purposes
+  - [x] shared integration test (`test/meal_planner_api/services/tenancy_sweep_test.exs`) — seeds a multi-familia User, calls one method per affected service, asserts cross-Account data is filtered out
 - **Estimated lines**: +80 / -40 (variable; depends on how many services actually take `user`)
 - **Depends on**: 3.14
+- **Deviation** (documented in `apply-progress.md` §"PR 3c"): the grep-first audit found NONE of the 12 services needed an internal signature rewrite. 5 (`account_service`, `generation_service`, `price_service`, `revenuecat_service`, `subscription_service`) already take `account_id` directly. The other 7 read `user.account_id` (directly or via `Identity.ensure_persistent_identity/1`) but are already correctly scoped by the controller-boundary fix from tasks 3.14–3.20 (`AccountScopeHelpers.scope_user_to_membership/2`), which corrects `user.account_id` to `current_membership.account_id` before the User struct ever reaches these services — the single point tenancy scope enters the domain layer. A prerequisite fix to `Identity.ensure_persistent_identity/1` was required (see below) so it can resolve real multi-membership Users at all.
+- **Landed**: `0cfd2c3` (PR 3c — see `apply-progress.md` §"PR 3c"); prerequisite fix `7abb5ab`
 
-### Task 3.22 — `AccountsController` membership-aware endpoints (extend the existing controller, do not duplicate)
+### Task 3.22 — `AccountsController` membership-aware endpoints (extend the existing controller, do not duplicate) ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api_web/controllers/accounts_controller.ex` (modify)
@@ -814,47 +823,52 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: The existing `AccountsController` has tenant-facing endpoints (e.g. `GET /api/accounts/me`). Replace every `current_user.account_id` read with `current_membership.account_id`. (The new `MembershipController` handles the roster/remove — this task only updates the existing controller's reads.)
 - **Acceptance criteria**:
-  - [ ] test asserts `GET /api/accounts/me` returns the `membership.account_id`, not `user.account_id` (RED)
-  - [ ] change applied; test GREEN
+  - [x] test asserts `GET /api/accounts/me` returns the `membership.account_id`, not `user.account_id` (RED)
+  - [x] change applied; test GREEN
 - **Estimated lines**: +15 / -8
 - **Depends on**: 1.11
+- **Landed**: `0d1d6ba` (PR 3c — see `apply-progress.md` §"PR 3c")
 
-### Task 3.23 — Cross-Account isolation test (dedicated checkpoint)
+### Task 3.23 — Cross-Account isolation test (dedicated checkpoint) ✅
 
 - **Files**:
   - `meal_planner_api/test/meal_planner_api_web/cross_account_isolation_test.exs` (new)
 - **Type**: dedicated test (checkpoint)
 - **Description**: Per design §8.5 — end-to-end HTTP test (no internal context calls). User has `:owner` membership in `Account_A` and `:member` in `Account_B`. Issues `access_v2` token scoped to `Account_A`. Calls `GET /api/accounts/<Account_B_id>/memberships` and asserts `403 account_mismatch`. Repeat for `GET /api/calendar`, `GET /api/planning`, `GET /api/cooking`, `GET /api/inventory`, `GET /api/shopping`, `POST /api/auth/switch-account` (succeeds), then re-issues token and asserts the prior URL returns the Account_B data.
 - **Acceptance criteria**:
-  - [ ] test passes GREEN
+  - [x] test passes GREEN
 - **Estimated lines**: +60 / -0
 - **Depends on**: 3.1–3.22
+- **Deviation** (documented in `apply-progress.md` §"PR 3c"): `GET /api/planning`, `GET /api/cooking`, `GET /api/shopping` don't exist literally in `router.ex`; the closest real GET routes are used (`/api/planning/weekly`, `/api/cooking/sessions/:session_id`, `/api/shopping-list`). Only `GET /api/accounts/:account_id/memberships` carries `:account_id` in its URL, so it's the only route that can produce `403 account_mismatch`; the other 5 routes carry no URL `:account_id` at all — their isolation guarantee is proven by asserting they return ONLY the correctly-scoped Account's data (never the other Account's), both before and after `switch-account`.
+- **Landed**: `8a0f807` (PR 3c — see `apply-progress.md` §"PR 3c")
 
-### Task 3.24 — Update `ARCHITECTURE.md` Auth Flow section
+### Task 3.24 — Update `ARCHITECTURE.md` Auth Flow section ✅
 
 - **Files**:
   - `meal_planner_api/ARCHITECTURE.md` (modify)
 - **Type**: docs-only (no test)
 - **Description**: Document the dual-token model (`access` vs `access_v2`), the `current_user` + `current_membership` dual-assign, the `LoadCurrentMembership` plug, the `EnforceAccountScope` plug, and the env-var cutover. Add a sequence diagram for invite → accept → switch.
 - **Acceptance criteria**:
-  - [ ] Auth Flow section lists both token types with their claim shapes
-  - [ ] Pipeline diagram includes `LoadCurrentMembership` and `EnforceAccountScope`
-  - [ ] Cutover procedure (env var flip) is documented
+  - [x] Auth Flow section lists both token types with their claim shapes
+  - [x] Pipeline diagram includes `LoadCurrentMembership` and `EnforceAccountScope`
+  - [x] Cutover procedure (env var flip) is documented
 - **Estimated lines**: +50 / -10
 - **Depends on**: 1.11, 3.7, 3.8
+- **Landed**: `5ddeafc` (PR 3c — see `apply-progress.md` §"PR 3c")
 
-### Task 3.25 — Update `meal_planner_api/docs/FRONTEND_INTEGRATION.md`
+### Task 3.25 — Update `meal_planner_api/docs/FRONTEND_INTEGRATION.md` ✅
 
 - **Files**:
   - `meal_planner_api/docs/FRONTEND_INTEGRATION.md` (modify)
 - **Type**: docs-only (no test)
 - **Description**: Document the new JWT claim shape (`access_v2`), the 6 new endpoints (invites, accept, list memberships, remove member, switch-account, leave), and the multi-familia two-socket pattern for the React Native client. Include request/response examples for every endpoint with the error shapes from spec `invite-and-accept.md` and `multi-familia-switch-account.md`.
 - **Acceptance criteria**:
-  - [ ] `access_v2` claim shape is documented with an example JWT
-  - [ ] All 6 new endpoints are documented with request, response, error shapes
-  - [ ] Multi-familia two-socket pattern is explained
+  - [x] `access_v2` claim shape is documented with an example JWT
+  - [x] All 6 new endpoints are documented with request, response, error shapes
+  - [x] Multi-familia two-socket pattern is explained
 - **Estimated lines**: +80 / -5
 - **Depends on**: 3.1–3.8
+- **Landed**: `e293141` (PR 3c — see `apply-progress.md` §"PR 3c")
 
 **PR 3 subtotal**: +960 added, -219 modified, 25 tasks
 **PR 3 review budget risk**: **High** (~741 net diff vs. 400-line budget — exceeds by ~340). Mitigation: every per-controller / per-channel / per-service task is its own commit, so a reviewer can scan one at a time. If maintainers push back, the orchestrator may split PR 3 into 3a (controllers 3.1–3.7 + auth rewrite 3.8) and 3b (channels 3.9–3.13 + sweeps 3.14–3.22 + tests + docs 3.23–3.25) at apply time.

@@ -3,9 +3,15 @@ defmodule MealPlannerApiWeb.InventoryController do
 
   alias MealPlannerApi.Services.InventoryService
   alias MealPlannerApi.Services.BudgetService
+  alias MealPlannerApiWeb.Controllers.AccountScopeHelpers
+
+  # Phase A — Tenancy Refactor (PR 3c task 3.18): tenancy scope is always
+  # resolved from `conn.assigns.current_membership.account_id`, never
+  # from the legacy `current_user.account_id` field. See
+  # `AccountScopeHelpers.scope_user_to_membership/2`.
 
   def index(conn, _params) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case InventoryService.inventory_view(user) do
       {:ok, payload} -> json(conn, %{data: payload})
@@ -14,7 +20,7 @@ defmodule MealPlannerApiWeb.InventoryController do
   end
 
   def add_extra(conn, payload) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case InventoryService.add_extra_item(user, payload) do
       {:ok, payload} -> json(conn, %{data: payload})
@@ -23,7 +29,7 @@ defmodule MealPlannerApiWeb.InventoryController do
   end
 
   def update_quantity(conn, %{"item_id" => item_id} = payload) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case InventoryService.adjust_item_quantity(user, item_id, payload) do
       {:ok, payload} -> json(conn, %{data: payload})
@@ -32,7 +38,7 @@ defmodule MealPlannerApiWeb.InventoryController do
   end
 
   def dispose(conn, %{"item_id" => item_id} = payload) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case InventoryService.dispose_item(user, item_id, payload) do
       {:ok, payload} -> json(conn, %{data: payload})
@@ -41,7 +47,7 @@ defmodule MealPlannerApiWeb.InventoryController do
   end
 
   def voice_preview(conn, payload) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case InventoryService.voice_preview(user, payload) do
       {:ok, data} -> json(conn, %{data: data})
@@ -50,7 +56,7 @@ defmodule MealPlannerApiWeb.InventoryController do
   end
 
   def voice_apply(conn, payload) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case InventoryService.voice_apply(user, payload) do
       {:ok, data} -> json(conn, %{data: data})
@@ -59,13 +65,19 @@ defmodule MealPlannerApiWeb.InventoryController do
   end
 
   def rescue_plan(conn, payload) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
     budget = BudgetService.resolve(user)
 
     case InventoryService.rescue_plan(user, payload, budget) do
       {:ok, data} -> json(conn, %{data: data})
       {:error, reason} -> render_error(conn, reason)
     end
+  end
+
+  defp scoped_user(conn) do
+    conn
+    |> Guardian.Plug.current_resource()
+    |> AccountScopeHelpers.scope_user_to_membership(conn.assigns.current_membership)
   end
 
   defp render_error(conn, reason) do

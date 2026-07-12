@@ -2,6 +2,7 @@ defmodule MealPlannerApiWeb.AIChannel do
   use MealPlannerApiWeb, :channel
 
   alias MealPlannerApi.AI
+  alias MealPlannerApiWeb.Controllers.AccountScopeHelpers
   alias MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket
 
   # Note (task 3.12): unlike planning/cooking/calendar, this channel's topic
@@ -33,8 +34,18 @@ defmodule MealPlannerApiWeb.AIChannel do
   @impl true
   def handle_in("new_message", %{"message" => message} = payload, socket)
       when is_binary(message) do
-    user = socket.assigns.current_user
     membership = socket.assigns.current_membership
+
+    # Post-PR-3c review — BLOCKER fix: bring AIChannel into the same
+    # "single choke point" pattern as the 7 controllers + AccountsController
+    # (tasks 3.14-3.22) — the User struct's `:account_id` must be
+    # corrected to `current_membership.account_id` (DB-resolved via
+    # `membership_id`) before it reaches any service, never trust the
+    # claim-derived `current_user.account_id` (see AccountScopeHelpers.
+    # scope_user_to_membership/2 moduledoc for the full rationale).
+    user =
+      AccountScopeHelpers.scope_user_to_membership(socket.assigns.current_user, membership)
+
     request_id = Map.get(payload, "request_id", build_request_id())
 
     case AI.stream_response(socket.assigns.room_id, message, user, %{

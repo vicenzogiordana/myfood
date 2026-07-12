@@ -3,8 +3,15 @@ defmodule MealPlannerApiWeb.CalendarController do
 
   alias MealPlannerApi.Persistence.Calendar
 
+  # Phase A — Tenancy Refactor (PR 3c task 3.14): tenancy scope is always
+  # resolved from `conn.assigns.current_membership.account_id` (the
+  # DB-resolved row `LoadCurrentMembership` assigns via `membership_id`),
+  # never from `current_user.account_id` — see the plug for why the latter
+  # is only a dual-write compatibility shim, not an authoritative source.
+
   def index(conn, params) do
     user = Guardian.Plug.current_resource(conn)
+    membership = conn.assigns.current_membership
 
     with {:ok, start_date} <- parse_date(Map.get(params, "start_date")),
          {:ok, end_date} <- parse_date(Map.get(params, "end_date")),
@@ -13,7 +20,7 @@ defmodule MealPlannerApiWeb.CalendarController do
            parse_optional_date(Map.get(params, "selected_date"), Date.utc_today()),
          {:ok, selected_slot} <- parse_optional_slot(Map.get(params, "selected_slot"), :lunch) do
       data =
-        Calendar.monthly_overview(user.account_id, user.id, start_date, end_date, %{
+        Calendar.monthly_overview(membership.account_id, user.id, start_date, end_date, %{
           selected_date: selected_date,
           selected_slot: selected_slot
         })
@@ -29,10 +36,11 @@ defmodule MealPlannerApiWeb.CalendarController do
 
   def show_slot(conn, params) do
     user = Guardian.Plug.current_resource(conn)
+    membership = conn.assigns.current_membership
 
     with {:ok, date} <- parse_date(Map.get(params, "date")),
          {:ok, slot} <- parse_slot(Map.get(params, "slot")),
-         {:ok, meal} <- get_slot_meal_result(user, date, slot) do
+         {:ok, meal} <- get_slot_meal_result(membership, user, date, slot) do
       json(conn, %{data: serialize_slot_response(meal, date, slot)})
     else
       {:error, reason} ->
@@ -42,8 +50,8 @@ defmodule MealPlannerApiWeb.CalendarController do
     end
   end
 
-  defp get_slot_meal_result(user, date, slot) do
-    case Calendar.get_slot_meal(user.account_id, user.id, date, slot) do
+  defp get_slot_meal_result(membership, user, date, slot) do
+    case Calendar.get_slot_meal(membership.account_id, user.id, date, slot) do
       nil -> {:ok, nil}
       meal -> {:ok, meal}
     end

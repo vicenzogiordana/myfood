@@ -1,6 +1,8 @@
 defmodule MealPlannerApiWeb.ShoppingControllerTest do
   use MealPlannerApiWeb.ConnCase, async: false
 
+  import MealPlannerApi.FactoryHelpers
+
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Catalog
@@ -8,6 +10,84 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
   alias MealPlannerApi.Persistence.Inventory
   alias MealPlannerApi.Persistence.Planning
   alias MealPlannerApi.Persistence.Shopping
+
+  # ─── Phase A — Tenancy Refactor (PR 3c task 3.17) ───────────────────────────
+  # See calendar_controller_test.exs (task 3.14) for why a tampered
+  # `account_id` claim is the genuine RED-discriminating case here.
+  describe "multi-familia tenancy scoping (task 3.17)" do
+    test "GET /api/shopping-list resolves items via current_membership.account_id, not a tampered account_id claim",
+         %{conn: conn} do
+      user =
+        user_with_memberships(%{email: "shopping_tamper@example.com"}, [
+          {%{plan: :family_4, name: "Shopping Tamper Account A"}, :owner},
+          {%{plan: :family_4, name: "Shopping Tamper Account B"}, :member}
+        ])
+
+      [membership_a, membership_b] = user.memberships
+
+      {:ok, ingredient} =
+        Catalog.upsert_ingredient_by_name(%{
+          name: "Shopping Tamper Ingredient",
+          category: :verduras,
+          calories_per_100: 40,
+          protein_g_per_100: Decimal.new("1.2"),
+          carbs_g_per_100: Decimal.new("9.3"),
+          fat_g_per_100: Decimal.new("0.1")
+        })
+
+      {:ok, recipe} =
+        Catalog.create_recipe(%{
+          account_id: membership_a.account_id,
+          created_by_user_id: user.id,
+          name: "Shopping Tamper Recipe",
+          source: :user_created,
+          servings: 2,
+          suitable_for_slots: [:dinner]
+        })
+
+      today = Date.utc_today()
+
+      {:ok, meal} =
+        Planning.schedule_meal(%{
+          account_id: membership_a.account_id,
+          date: today,
+          slot: :dinner,
+          recipe_id: recipe.id,
+          is_cooked: false
+        })
+
+      {:ok, _item} =
+        Shopping.create_shopping_item(%{
+          account_id: membership_a.account_id,
+          scheduled_meal_id: meal.id,
+          planned_date: today,
+          ingredient_id: ingredient.id,
+          quantity_milli: 500,
+          unit: :g,
+          status: :pending
+        })
+
+      tampered_claims =
+        MealPlannerApi.AccountsMembership.claims_for(user, membership_a)
+        |> Map.put("account_id", to_string(membership_b.account_id))
+
+      {:ok, token, _claims} =
+        Guardian.encode_and_sign(user, tampered_claims, token_type: "access")
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> get("/api/shopping-list", %{
+          "from_date" => Date.to_iso8601(today),
+          "to_date" => Date.to_iso8601(Date.add(today, 6))
+        })
+
+      body = json_response(conn, 200)
+      ingredient_ids = Enum.map(body["data"]["items"], & &1["ingredient_id"])
+
+      assert ingredient.id in ingredient_ids
+    end
+  end
 
   test "shopping list supports grouping, assignment, cart marking and checkout", %{conn: conn} do
     token = issue_token(conn, %{"user_id" => "u_shop", "account_id" => "acct_shop"})

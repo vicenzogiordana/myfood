@@ -2,9 +2,15 @@ defmodule MealPlannerApiWeb.CookingController do
   use MealPlannerApiWeb, :controller
 
   alias MealPlannerApi.Services.CookingService
+  alias MealPlannerApiWeb.Controllers.AccountScopeHelpers
+
+  # Phase A — Tenancy Refactor (PR 3c task 3.16): tenancy scope is always
+  # resolved from `conn.assigns.current_membership.account_id`, never
+  # from the legacy `current_user.account_id` field. See
+  # `AccountScopeHelpers.scope_user_to_membership/2`.
 
   def start(conn, %{"scheduled_meal_id" => scheduled_meal_id}) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case CookingService.start_session(user, scheduled_meal_id) do
       {:ok, session} ->
@@ -18,7 +24,7 @@ defmodule MealPlannerApiWeb.CookingController do
   end
 
   def show(conn, %{"session_id" => session_id}) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case CookingService.session_state(user, session_id) do
       {:ok, state} ->
@@ -32,7 +38,7 @@ defmodule MealPlannerApiWeb.CookingController do
   end
 
   def step(conn, %{"session_id" => session_id, "recipe_step_id" => step_id} = params) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     status =
       case params["status"] do
@@ -63,7 +69,7 @@ defmodule MealPlannerApiWeb.CookingController do
   end
 
   def finish(conn, %{"session_id" => session_id}) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case CookingService.finish_session(user, session_id) do
       {:ok, result} ->
@@ -77,7 +83,7 @@ defmodule MealPlannerApiWeb.CookingController do
   end
 
   def ask(conn, %{"session_id" => session_id, "message" => message} = params) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
     content_type = Map.get(params, "content_type", "text")
 
     case CookingService.answer_question(user, session_id, message, content_type) do
@@ -100,6 +106,12 @@ defmodule MealPlannerApiWeb.CookingController do
   # -------------------------------------------------------------------------
   # Private helpers
   # -------------------------------------------------------------------------
+
+  defp scoped_user(conn) do
+    conn
+    |> Guardian.Plug.current_resource()
+    |> AccountScopeHelpers.scope_user_to_membership(conn.assigns.current_membership)
+  end
 
   defp error_status(:scheduled_meal_not_found), do: :not_found
   defp error_status(:session_not_found), do: :not_found
