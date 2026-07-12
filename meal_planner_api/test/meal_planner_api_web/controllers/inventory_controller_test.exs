@@ -15,7 +15,7 @@ defmodule MealPlannerApiWeb.InventoryControllerTest do
       Identity.ensure_persistent_identity(%{
         id: "u_inv",
         account_id: "acct_inv",
-        account_type: :group
+        plan: :family_4
       })
 
     {:ok, ingredient} =
@@ -95,7 +95,7 @@ defmodule MealPlannerApiWeb.InventoryControllerTest do
       Identity.ensure_persistent_identity(%{
         id: "u_rescue",
         account_id: "acct_rescue",
-        account_type: :group
+        plan: :family_4
       })
 
     {:ok, tomato} =

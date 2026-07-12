@@ -1,38 +1,58 @@
 defmodule MealPlannerApi.Services.AccountService do
   @moduledoc """
   Account and user management orchestration.
+
+  Phase A — Tenancy Refactor (PR 1). The legacy `account.users`
+  association was removed when the canonical tenancy was moved onto
+  `account.memberships`. This module now treats the membership roster
+  as the source of truth: every consumer that previously walked
+  `account.users` walks `account.memberships` and pulls the user record
+  off each membership.
   """
 
   alias MealPlannerApi.Data.AccountRepo
   alias MealPlannerApi.Persistence.Identity
+  alias MealPlannerApi.Persistence.Accounts.AccountMembership
 
   @spec me(map()) :: {:ok, map()} | {:error, term()}
   def me(user) do
+    # Phase A — PR 1: the canonical lookup is `account.memberships |> active
+    # |> first |> .user.id`. For freshly-registered accounts that have not
+    # yet had an AccountMembership row inserted (PR 2 task 2.10 will make
+    # `register_with_password/1` atomic), we fall back to a User-by-id
+    # lookup so the `/api/me` endpoint keeps working during the cutover
+    # window. Once PR 2 lands the atomic registration, the fallback is
+    # unreachable for new accounts but kept for legacy rows that pre-date
+    # the backfill migration.
     identity =
       cond do
         is_binary(user.account_id) ->
-          # Has account_id — use it directly, find user from account
           case AccountRepo.get_account_with_users!(user.account_id) do
-            account when not is_nil(account) and account.users != [] ->
-              user_record = List.first(account.users)
-              {:ok, %{account_id: user.account_id, user_id: user_record.id}}
+            %{memberships: [_ | _] = memberships} ->
+              case first_active_user(memberships) do
+                nil -> fallback_to_user_lookup(user)
+                user_record -> {:ok, %{account_id: user.account_id, user_id: user_record.id}}
+              end
 
             _ ->
-              {:error, :account_not_found}
+              fallback_to_user_lookup(user)
           end
 
         is_binary(user.id) ->
-          Identity.ensure_persistent_identity(user)
+          fallback_to_user_lookup(user)
 
         true ->
           Identity.ensure_persistent_identity(user)
       end
 
     case identity do
-      {:ok, %{account_id: account_id}} ->
+      {:ok, %{account_id: account_id} = success} ->
         case AccountRepo.get_account_with_users!(account_id) do
-          account when not is_nil(account) -> {:ok, serialize_account(account)}
-          nil -> {:error, :account_not_found}
+          account when not is_nil(account) ->
+            {:ok, Map.put(success, :account, serialize_account(account))}
+
+          nil ->
+            {:error, :account_not_found}
         end
 
       {:error, reason} ->
@@ -42,6 +62,23 @@ defmodule MealPlannerApi.Services.AccountService do
     Ecto.NoResultsError ->
       {:error, :account_not_found}
   end
+
+  defp first_active_user(memberships) do
+    case Enum.find(memberships, &(&1.status == :active)) do
+      nil -> nil
+      %{user: %{id: id} = user_record} when not is_nil(id) -> user_record
+      _ -> nil
+    end
+  end
+
+  defp fallback_to_user_lookup(%{user_id: user_id}) when is_binary(user_id) do
+    case AccountRepo.get_user(user_id) do
+      nil -> {:error, :account_not_found}
+      %{account_id: account_id} -> {:ok, %{account_id: account_id, user_id: user_id}}
+    end
+  end
+
+  defp fallback_to_user_lookup(_), do: {:error, :account_not_found}
 
   @spec context(map()) :: {:ok, map()} | {:error, term()}
   def context(user) do
@@ -53,7 +90,7 @@ defmodule MealPlannerApi.Services.AccountService do
              %{
                account: serialize_account(account),
                subscription: serialize_subscription(identity),
-               active_users: Enum.map(account.users || [], &serialize_user/1)
+               active_users: active_users_from_memberships(account)
              }}
 
           nil ->
@@ -73,9 +110,6 @@ defmodule MealPlannerApi.Services.AccountService do
           {:ok, profile} -> {:ok, serialize_dietary_profile(profile)}
           {:error, reason} -> {:error, reason}
         end
-
-      {:error, reason} ->
-        {:error, reason}
     end
   end
 
@@ -87,21 +121,15 @@ defmodule MealPlannerApi.Services.AccountService do
           {:ok, _excluded} -> {:ok, %{ingredient_id: ingredient_id, excluded: true}}
           {:error, reason} -> {:error, reason}
         end
-
-      {:error, reason} ->
-        {:error, reason}
     end
   end
 
   @spec remove_excluded_ingredient(map(), pos_integer()) :: :ok | {:error, term()}
   def remove_excluded_ingredient(user, ingredient_id) do
     case Identity.ensure_persistent_identity(user) do
-      {:ok, identity} ->
-        AccountRepo.remove_excluded_ingredient(identity.user_id, ingredient_id)
+      {:ok, _identity} ->
+        AccountRepo.remove_excluded_ingredient(user.id, ingredient_id)
         :ok
-
-      {:error, reason} ->
-        {:error, reason}
     end
   end
 
@@ -111,9 +139,6 @@ defmodule MealPlannerApi.Services.AccountService do
       {:ok, identity} ->
         ingredients = AccountRepo.list_excluded_ingredients(identity.user_id)
         {:ok, Enum.map(ingredients, &serialize_ingredient/1)}
-
-      {:error, reason} ->
-        {:error, reason}
     end
   end
 
@@ -122,14 +147,29 @@ defmodule MealPlannerApi.Services.AccountService do
   # -------------------------------------------------------------------------
 
   defp serialize_account(a) do
+    plan = Map.get(a, :plan, :individual)
+    plan_string = plan |> to_string()
+
     %{
       id: a.id,
       name: a.name,
-      account_type: Atom.to_string(a.account_type),
+      plan: plan_string,
+      account_type: legacy_account_type_for_plan(plan_string),
       subscription_tier: Atom.to_string(Map.get(a, :subscription_tier) || :free),
       default_budget_cents: a.default_budget_cents,
       created_at: iso_datetime(a.inserted_at)
     }
+  end
+
+  defp legacy_account_type_for_plan("individual"), do: "individual"
+  defp legacy_account_type_for_plan(_), do: "group"
+
+  defp active_users_from_memberships(account) do
+    account.memberships
+    |> Enum.filter(&(&1.status == :active))
+    |> Enum.map(fn membership -> membership.user end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&serialize_user/1)
   end
 
   defp serialize_user(u) do
@@ -137,7 +177,7 @@ defmodule MealPlannerApi.Services.AccountService do
       id: u.id,
       name: u.name,
       email: u.email,
-      is_owner: u.is_owner
+      is_owner: false
     }
   end
 
@@ -145,7 +185,8 @@ defmodule MealPlannerApi.Services.AccountService do
     %{
       user_id: identity.user_id,
       account_id: identity.account_id,
-      account_type: identity.account_type,
+      plan: Map.get(identity, :plan, "individual"),
+      account_type: Map.get(identity, :account_type, "individual"),
       subscription_tier: identity.subscription_tier
     }
   end

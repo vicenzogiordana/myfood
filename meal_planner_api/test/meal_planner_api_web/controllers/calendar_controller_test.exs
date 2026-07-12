@@ -21,7 +21,7 @@ defmodule MealPlannerApiWeb.CalendarControllerTest do
         Identity.ensure_persistent_identity(%{
           id: "u_slot_filled",
           account_id: "acct_slot_filled",
-          account_type: :group
+          plan: :family_4
         })
 
       # Create a recipe and scheduled meal for the target slot
@@ -78,7 +78,7 @@ defmodule MealPlannerApiWeb.CalendarControllerTest do
         Identity.ensure_persistent_identity(%{
           id: "u_slot_empty",
           account_id: "acct_slot_empty",
-          account_type: :group
+          plan: :family_4
         })
 
       # No scheduled meal for 2026-06-20 / dinner
@@ -118,7 +118,7 @@ defmodule MealPlannerApiWeb.CalendarControllerTest do
         Identity.ensure_persistent_identity(%{
           id: "u_slot_bad_date",
           account_id: "acct_slot_bad_date",
-          account_type: :group
+          plan: :family_4
         })
 
       conn =
@@ -143,7 +143,7 @@ defmodule MealPlannerApiWeb.CalendarControllerTest do
         Identity.ensure_persistent_identity(%{
           id: "u_slot_bad_slot",
           account_id: "acct_slot_bad_slot",
-          account_type: :group
+          plan: :family_4
         })
 
       conn =
@@ -168,7 +168,7 @@ defmodule MealPlannerApiWeb.CalendarControllerTest do
         Identity.ensure_persistent_identity(%{
           id: "u_slot_no_date",
           account_id: "acct_slot_no_date",
-          account_type: :group
+          plan: :family_4
         })
 
       conn =
@@ -190,7 +190,7 @@ defmodule MealPlannerApiWeb.CalendarControllerTest do
         Identity.ensure_persistent_identity(%{
           id: "u_slot_no_slot",
           account_id: "acct_slot_no_slot",
-          account_type: :group
+          plan: :family_4
         })
 
       conn =
@@ -216,7 +216,7 @@ defmodule MealPlannerApiWeb.CalendarControllerTest do
         Identity.ensure_persistent_identity(%{
           id: "u_idx_filled",
           account_id: "acct_idx_filled",
-          account_type: :group
+          plan: :family_4
         })
 
       today = Date.utc_today()
@@ -273,7 +273,7 @@ defmodule MealPlannerApiWeb.CalendarControllerTest do
         Identity.ensure_persistent_identity(%{
           id: "u_idx_empty",
           account_id: "acct_idx_empty",
-          account_type: :group
+          plan: :family_4
         })
 
       tomorrow = Date.add(Date.utc_today(), 10)
@@ -308,7 +308,7 @@ defmodule MealPlannerApiWeb.CalendarControllerTest do
         Identity.ensure_persistent_identity(%{
           id: "u_meals_list",
           account_id: "acct_meals_list",
-          account_type: :group
+          plan: :family_4
         })
 
       today = Date.utc_today()

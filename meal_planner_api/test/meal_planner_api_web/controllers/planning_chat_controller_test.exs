@@ -17,7 +17,7 @@ defmodule MealPlannerApiWeb.PlanningChatControllerTest do
       Identity.ensure_persistent_identity(%{
         id: "u_chat",
         account_id: "acct_chat",
-        account_type: :group
+        plan: :family_4
       })
 
     {:ok, breakfast_recipe} =
@@ -96,7 +96,7 @@ defmodule MealPlannerApiWeb.PlanningChatControllerTest do
       Identity.ensure_persistent_identity(%{
         id: "u_fav",
         account_id: "acct_fav",
-        account_type: :group
+        plan: :family_4
       })
 
     {:ok, recipe} =

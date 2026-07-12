@@ -22,7 +22,7 @@ defmodule MealPlannerApi.Persistence.ShoppingTest do
         Identity.ensure_persistent_identity(%{
           id: "u_session_items_#{:rand.uniform(10000)}",
           account_id: "acct_session_items_#{:rand.uniform(10000)}",
-          account_type: :group
+          plan: :family_4
         })
 
       account_id = identity.account_id
@@ -110,7 +110,7 @@ defmodule MealPlannerApi.Persistence.ShoppingTest do
         Identity.ensure_persistent_identity(%{
           id: "u_empty_session_#{:rand.uniform(10000)}",
           account_id: "acct_empty_session_#{:rand.uniform(10000)}",
-          account_type: :group
+          plan: :family_4
         })
 
       account_id = identity.account_id
@@ -126,7 +126,7 @@ defmodule MealPlannerApi.Persistence.ShoppingTest do
         Identity.ensure_persistent_identity(%{
           id: "u_other_session_#{:rand.uniform(10000)}",
           account_id: "acct_other_session_#{:rand.uniform(10000)}",
-          account_type: :group
+          plan: :family_4
         })
 
       account_id = identity.account_id

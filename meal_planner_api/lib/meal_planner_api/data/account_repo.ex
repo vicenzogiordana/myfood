@@ -33,7 +33,7 @@ defmodule MealPlannerApi.Data.AccountRepo do
   def get_account_with_users!(id) do
     Account
     |> Repo.get!(id)
-    |> Repo.preload(:users)
+    |> Repo.preload(memberships: :user)
   end
 
   @spec update_account(Account.t(), map()) :: {:ok, Account.t()} | {:error, Ecto.Changeset.t()}

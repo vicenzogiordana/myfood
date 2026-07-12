@@ -74,16 +74,85 @@ defmodule MealPlannerApiWeb.UserSocket do
 
   @impl true
   def connect(%{"token" => token}, socket, _connect_info) do
-    case MealPlannerApi.Auth.Guardian.resource_from_token(token) do
-      {:ok, user, _claims} ->
-        {:ok, assign(socket, :current_user, user)}
+    with {:ok, user, claims} <- MealPlannerApi.Auth.Guardian.resource_from_token(token),
+         {:ok, membership} <- load_membership_for_socket(socket, user, claims) do
+      socket =
+        socket
+        |> assign(:current_user, user)
+        |> assign(:claims, claims)
+        |> assign(:current_membership, membership)
 
-      {:error, _reason} ->
-        :error
+      {:ok, socket}
+    else
+      _ -> :error
     end
   end
 
   def connect(_params, _socket, _connect_info), do: :error
+
+  # Loads the membership for a freshly-connected socket. Populates both
+  # the legacy `claims` assign (for any caller that reads it directly)
+  # and the canonical `current_membership` assign that channels consume.
+  defp load_membership_for_socket(socket, user, claims) do
+    case Map.get(claims, "typ", "access") do
+      "access_v2" ->
+        # Load via the plug's loader so behaviour is identical to the
+        # HTTP path.
+        socket_with_claims = assign(socket, :claims, claims)
+
+        case MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket.membership_from_socket(socket_with_claims) do
+          %MealPlannerApi.Persistence.Accounts.AccountMembership{} = m -> {:ok, m}
+          _ -> {:error, :membership_id_required}
+        end
+
+      "access" ->
+        # Synthesize a legacy membership from current_user.account_id +
+        # Account.plan (Q1 / design §10).
+        {:ok, synthesize_legacy_membership(user, claims)}
+
+      _ ->
+        {:error, :unsupported_token_type}
+    end
+  end
+
+  defp synthesize_legacy_membership(user, _claims) do
+    account_id = Map.get(user, :account_id)
+    role = Map.get(user, :role, :member)
+
+    plan =
+      case account_id do
+        nil ->
+          :individual
+
+        id when is_binary(id) ->
+          case Ecto.UUID.cast(id) do
+            {:ok, uuid} ->
+              case MealPlannerApi.Repo.get(MealPlannerApi.Persistence.Accounts.Account, uuid) do
+                %MealPlannerApi.Persistence.Accounts.Account{plan: p} -> p
+                _ -> :individual
+              end
+
+            _ ->
+              :individual
+          end
+
+        _ ->
+          :individual
+      end
+
+    base = %MealPlannerApi.Persistence.Accounts.AccountMembership{
+      id: nil,
+      account_id: account_id,
+      user_id: Map.get(user, :id),
+      role: role,
+      status: :active,
+      joined_at: nil
+    }
+
+    base
+    |> Map.put(:plan, plan)
+    |> Map.put(:__synthesized__, true)
+  end
 
   @impl true
   def id(socket) do

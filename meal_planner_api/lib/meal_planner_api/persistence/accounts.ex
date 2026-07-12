@@ -30,7 +30,7 @@ defmodule MealPlannerApi.Persistence.Accounts do
 
   def get_account!(id), do: Repo.get!(Account, id)
 
-  def get_account_with_users!(id), do: Account |> Repo.get!(id) |> Repo.preload(:users)
+  def get_account_with_users!(id), do: Account |> Repo.get!(id) |> Repo.preload(memberships: :user)
 
   def create_user(attrs), do: %User{} |> User.changeset(attrs) |> Repo.insert()
 
@@ -138,9 +138,9 @@ defmodule MealPlannerApi.Persistence.Accounts do
     if Map.has_key?(attrs, :subscription_plan_id) do
       attrs
     else
-      account_type = Map.get(attrs, :account_type, :individual)
+      plan = Map.get(attrs, :plan, :individual)
 
-      case Subscriptions.ensure_default_plan_id(account_type) do
+      case Subscriptions.ensure_default_plan_id(plan) do
         {:ok, plan_id} -> Map.put(attrs, :subscription_plan_id, plan_id)
         {:error, _} -> attrs
       end
