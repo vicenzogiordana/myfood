@@ -3,11 +3,18 @@ defmodule MealPlannerApiWeb.AccountsController do
 
   alias MealPlannerApi.Services.AccountService
 
+  # Phase A — Tenancy Refactor (PR 3c task 3.22): tenancy scope is always
+  # resolved from `conn.assigns.current_membership.account_id`, never
+  # from the legacy `current_user.account_id` field. This task only
+  # updates this existing controller's own reads — roster/remove is
+  # handled by `MembershipController` (PR 3a).
+
   def me(conn, _params) do
     user = Guardian.Plug.current_resource(conn)
+    membership = conn.assigns.current_membership
 
     case AccountService.me(%{
-           account_id: user.account_id,
+           account_id: membership.account_id,
            user_id: user.id
          }) do
       {:ok, account_data} ->
@@ -22,7 +29,7 @@ defmodule MealPlannerApiWeb.AccountsController do
           account: account_data,
           claims: %{
             sub: user.id,
-            account_id: user.account_id,
+            account_id: membership.account_id,
             subscription_tier: to_string(user.subscription_tier || :free)
           }
         })
@@ -34,9 +41,10 @@ defmodule MealPlannerApiWeb.AccountsController do
 
   def context(conn, _params) do
     user = Guardian.Plug.current_resource(conn)
+    membership = conn.assigns.current_membership
 
     case AccountService.context(%{
-           account_id: user.account_id,
+           account_id: membership.account_id,
            user_id: user.id
          }) do
       {:ok, data} ->
