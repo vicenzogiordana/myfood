@@ -2,9 +2,17 @@ defmodule MealPlannerApiWeb.PlanningController do
   use MealPlannerApiWeb, :controller
 
   alias MealPlannerApi.Services.PlanningService
+  alias MealPlannerApiWeb.Controllers.AccountScopeHelpers
+
+  # Phase A — Tenancy Refactor (PR 3c task 3.15): tenancy scope is always
+  # resolved from `conn.assigns.current_membership.account_id`, never
+  # from the legacy `current_user.account_id` field. See
+  # `AccountScopeHelpers.scope_user_to_membership/2` for why the User
+  # struct is corrected at the controller boundary rather than rewriting
+  # every downstream service signature.
 
   def weekly(conn, params) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case PlanningService.generate_weekly_plan(user, params) do
       {:ok, plan} ->
@@ -17,10 +25,11 @@ defmodule MealPlannerApiWeb.PlanningController do
 
   def confirm(conn, payload) do
     user = Guardian.Plug.current_resource(conn)
+    membership = conn.assigns.current_membership
     meals = Map.get(payload, "meals", [])
 
     if is_list(meals) do
-      case PlanningService.save_plan(user.account_id, user.id, meals) do
+      case PlanningService.save_plan(membership.account_id, user.id, meals) do
         {:ok, %{proposal_id: _proposal_id, meal_ids: meal_ids}} ->
           json(conn, %{data: %{scheduled_meals_count: length(meal_ids)}})
 
@@ -35,7 +44,7 @@ defmodule MealPlannerApiWeb.PlanningController do
   end
 
   def toggle_slot_favorite(conn, payload) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case PlanningService.toggle_slot_favorite(user, payload) do
       {:ok, result} ->
@@ -46,6 +55,12 @@ defmodule MealPlannerApiWeb.PlanningController do
         |> put_status(error_status(reason))
         |> json(%{error: Atom.to_string(reason)})
     end
+  end
+
+  defp scoped_user(conn) do
+    conn
+    |> Guardian.Plug.current_resource()
+    |> AccountScopeHelpers.scope_user_to_membership(conn.assigns.current_membership)
   end
 
   defp error_status(:invalid_date), do: :bad_request
