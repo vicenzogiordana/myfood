@@ -1,12 +1,69 @@
 defmodule MealPlannerApiWeb.InventoryControllerTest do
   use MealPlannerApiWeb.ConnCase, async: false
 
+  import MealPlannerApi.FactoryHelpers
+
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApi.Persistence.Identity
   alias MealPlannerApi.Persistence.Inventory
   alias MealPlannerApi.Persistence.Planning
+
+  # ─── Phase A — Tenancy Refactor (PR 3c task 3.18) ───────────────────────────
+  # See calendar_controller_test.exs (task 3.14) for why a tampered
+  # `account_id` claim is the genuine RED-discriminating case here.
+  describe "multi-familia tenancy scoping (task 3.18)" do
+    test "GET /api/inventory resolves items via current_membership.account_id, not a tampered account_id claim",
+         %{conn: conn} do
+      user =
+        user_with_memberships(%{email: "inventory_tamper@example.com"}, [
+          {%{plan: :family_4, name: "Inventory Tamper Account A"}, :owner},
+          {%{plan: :family_4, name: "Inventory Tamper Account B"}, :member}
+        ])
+
+      [membership_a, membership_b] = user.memberships
+
+      {:ok, ingredient} =
+        Catalog.upsert_ingredient_by_name(%{
+          name: "Inventory Tamper Ingredient",
+          category: :no_perecederos,
+          calories_per_100: 260,
+          protein_g_per_100: Decimal.new("8.0"),
+          carbs_g_per_100: Decimal.new("49.0"),
+          fat_g_per_100: Decimal.new("3.2")
+        })
+
+      {:ok, _seed} =
+        Inventory.apply_delta_and_log(%{
+          account_id: membership_a.account_id,
+          ingredient_id: ingredient.id,
+          unit: :g,
+          source_kind: :planned,
+          delta: 1000,
+          source_user_id: user.id,
+          trigger_type: :purchase,
+          operation: :add
+        })
+
+      tampered_claims =
+        MealPlannerApi.AccountsMembership.claims_for(user, membership_a)
+        |> Map.put("account_id", to_string(membership_b.account_id))
+
+      {:ok, token, _claims} =
+        Guardian.encode_and_sign(user, tampered_claims, token_type: "access")
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> get("/api/inventory")
+
+      body = json_response(conn, 200)
+      all_ingredient_ids = Enum.map(body["data"]["sections"]["ok"], & &1["ingredient_id"])
+
+      assert ingredient.id in all_ingredient_ids
+    end
+  end
 
   test "inventory list, manual adjust, dispose and voice flow", %{conn: conn} do
     token = issue_token(conn, %{"user_id" => "u_inv", "account_id" => "acct_inv"})
