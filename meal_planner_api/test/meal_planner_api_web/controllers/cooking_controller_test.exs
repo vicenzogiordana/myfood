@@ -1,11 +1,63 @@
 defmodule MealPlannerApiWeb.CookingControllerTest do
   use MealPlannerApiWeb.ConnCase, async: false
 
+  import MealPlannerApi.FactoryHelpers
+
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApi.Persistence.Identity
   alias MealPlannerApi.Persistence.Planning
+
+  # ─── Phase A — Tenancy Refactor (PR 3c task 3.16) ───────────────────────────
+  # See calendar_controller_test.exs (task 3.14) for why a tampered
+  # `account_id` claim is the genuine RED-discriminating case here.
+  describe "multi-familia tenancy scoping (task 3.16)" do
+    test "POST /api/cooking/start resolves the scheduled meal via current_membership.account_id, not a tampered account_id claim",
+         %{conn: conn} do
+      user =
+        user_with_memberships(%{email: "cooking_tamper@example.com"}, [
+          {%{plan: :family_4, name: "Cooking Tamper Account A"}, :owner},
+          {%{plan: :family_4, name: "Cooking Tamper Account B"}, :member}
+        ])
+
+      [membership_a, membership_b] = user.memberships
+
+      {:ok, recipe} =
+        Catalog.create_recipe(%{
+          account_id: membership_a.account_id,
+          created_by_user_id: user.id,
+          name: "Cooking Tamper Recipe",
+          source: :user_created,
+          servings: 2,
+          suitable_for_slots: [:dinner]
+        })
+
+      {:ok, meal} =
+        Planning.schedule_meal(%{
+          account_id: membership_a.account_id,
+          date: ~D[2026-03-24],
+          slot: :dinner,
+          recipe_id: recipe.id,
+          is_cooked: false
+        })
+
+      tampered_claims =
+        MealPlannerApi.AccountsMembership.claims_for(user, membership_a)
+        |> Map.put("account_id", to_string(membership_b.account_id))
+
+      {:ok, token, _claims} =
+        Guardian.encode_and_sign(user, tampered_claims, token_type: "access")
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> post("/api/cooking/start", %{"scheduled_meal_id" => meal.id})
+
+      body = json_response(conn, 200)
+      assert body["data"]["scheduled_meal_id"] == meal.id
+    end
+  end
 
   test "start step finish cooking session", %{conn: conn} do
     token = issue_token(conn, %{"user_id" => "u_cook", "account_id" => "acct_cook"})
