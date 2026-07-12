@@ -15,21 +15,52 @@ defmodule MealPlannerApiWeb.PlanningControllerTest do
   # `account_id` straight from claims for dual-write compatibility, so a
   # well-formed claim alone can't distinguish `current_user.account_id`
   # from `current_membership.account_id`).
-  #
-  # `GET /api/planning/weekly` is deliberately NOT covered by a dedicated
-  # `user_with_memberships/2`-based test here: `PlanningService.
-  # generate_weekly_plan/3` routes through the legacy
-  # `Identity.ensure_persistent_identity/1` bridge, which mints a
-  # *second*, stable-UUID-derived shadow `User` row from `user.email` —
-  # colliding with the `users.email` unique index for any User who
-  # already has a real row (as every `user_with_memberships/2` fixture
-  # does). This is a pre-existing bridge limitation, orthogonal to
-  # tenancy scoping and out of PR 3c's scope; the mechanical
-  # `current_membership.account_id` fix is still applied to `weekly/2`
-  # (same code path as `confirm/2`, proven below), but is only exercised
-  # indirectly (via the existing non-multi-familia `weekly` tests further
-  # down this file, which keep passing).
   describe "multi-familia tenancy scoping (task 3.15)" do
+    test "GET /api/planning/weekly resolves candidates via current_membership.account_id, not a tampered account_id claim",
+         %{conn: conn} do
+      user =
+        user_with_memberships(%{email: "plan_weekly_tamper@example.com"}, [
+          {%{plan: :family_4, name: "Planning Weekly Account A"}, :owner},
+          {%{plan: :family_4, name: "Planning Weekly Account B"}, :member}
+        ])
+
+      [membership_a, membership_b] = user.memberships
+
+      {:ok, recipe_a} =
+        Catalog.create_recipe(%{
+          name: "Weekly Breakfast Only In A",
+          account_id: membership_a.account_id,
+          created_by_user_id: user.id,
+          source: :user_created,
+          servings: 1,
+          calories_per_serving: 400,
+          prep_time_minutes: 10,
+          suitable_for_slots: [:breakfast]
+        })
+
+      tampered_claims =
+        MealPlannerApi.AccountsMembership.claims_for(user, membership_a)
+        |> Map.put("account_id", to_string(membership_b.account_id))
+
+      {:ok, token, _claims} =
+        Guardian.encode_and_sign(user, tampered_claims, token_type: "access")
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> get("/api/planning/weekly")
+
+      body = json_response(conn, 200)
+
+      breakfast_recipe_ids =
+        body["data"]["days"]
+        |> Enum.flat_map(& &1["meals"])
+        |> Enum.filter(&(&1["slot"] == "breakfast"))
+        |> Enum.map(& &1["recipe_id"])
+
+      assert recipe_a.id in breakfast_recipe_ids
+    end
+
     test "POST /api/planning/confirm persists via current_membership.account_id, not a tampered account_id claim",
          %{conn: conn} do
       user =
