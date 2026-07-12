@@ -2693,3 +2693,144 @@ feature/phase-a-pr-3b..feature/phase-a-pr-3c`), based on
 `feature/phase-a-pr-3b`. **498 tests, 0 failures** (+19 over the 479
 baseline, 0 regressions). Pushed to `origin`. Ready for `sdd-verify` /
 review.
+
+## Post-PR-3c review fix pass (1 BLOCKER + 1 WARNING)
+
+A 5-agent review of this PR found 2 issues before it could be
+considered done. Both fixed on the same branch, in order, each its own
+commit.
+
+### Fix 1 (BLOCKER) — `AIChannel` passed an unscoped `current_user` to `AI.stream_response/4`
+
+`AIChannel` (task 3.12, PR 3b) was the one Phase A surface never
+brought into the "single choke point" pattern tasks 3.14–3.22
+established for every controller: `handle_in("new_message", ...)` read
+`socket.assigns.current_user` straight off the JWT and handed it to
+`AI.stream_response/4`, which resolves `BudgetService.resolve(user)`
+and `SubscriptionService.policy_for(user.account_id)` from
+`user.account_id` — the claim-derived value, not the DB-resolved
+`current_membership.account_id` `LoadCurrentMembershipSocket` already
+enforces in `join/3`. For a multi-membership user this is a real
+cross-tenant leak (budget/subscription resolved against a stale or
+tampered account) and, since real multi-membership users legitimately
+carry `account_id: nil` on the `User` struct (per this PR's own
+`Identity.ensure_persistent_identity/1` prerequisite fix),
+`SubscriptionService.policy_for/1`'s missing catch-all clause can also
+raise `FunctionClauseError`.
+
+**Fix**: `handle_in/3` now scopes the user the same way every PR 3c
+controller does, via the shared `AccountScopeHelpers.
+scope_user_to_membership/2`:
+
+```elixir
+user =
+  AccountScopeHelpers.scope_user_to_membership(socket.assigns.current_user, membership)
+```
+
+**Test-quality note (be honest, per launch instructions)**: this is
+**not** a full end-to-end behavioral test asserting on the
+`ai_response_started` broadcast. While writing the RED test, two
+SEPARATE, pre-existing bugs — unrelated to tenancy, discovered but
+deliberately NOT fixed here (out of this task's authorized scope) —
+were found to make `AIChannel`'s "new_message" happy path crash
+unconditionally, for any user, tenancy-correct or not:
+
+1. `MealPlannerApi.AI.stream_response/4` pattern-matches its 3rd arg on
+   `%MealPlannerApi.Accounts.User{}` — a plain DTO struct that is never
+   constructed anywhere in the codebase (`ai.ex:13`). The one and only
+   real caller (`AIChannel`) always passes a
+   `MealPlannerApi.Persistence.Accounts.User` struct, whose
+   `__struct__` can never match — so this always raises
+   `FunctionClauseError`, independent of tenancy scoping.
+2. Even past that, `MockClient.stream_chat_completion/3`
+   (`mock_client.ex:14`) and the real `GeminiClient`
+   (`gemini_client.ex:16`) both do
+   `get_in(opts, [:user, :account_id])` on `opts[:user]`, which is an
+   Ecto struct — `get_in/2` requires the `Access` behaviour, which Ecto
+   schemas don't implement, so this raises `UndefinedFunctionError`.
+
+Both bugs mean the AI chat "new_message" flow has apparently never
+been exercised end-to-end in this codebase (only `join/3` and
+invalid-payload `handle_in/3` branches had prior test coverage — see
+`ai_channel_test.exs`'s pre-existing tests). They are flagged here as a
+**new, separate, high-severity finding for follow-up** — not fixed in
+this pass, since fixing them is outside the 2 items this review
+authorized and risks unbounded scope creep (there may be further
+issues past bug 2, unverified).
+
+Given that constraint, the test proves the ONE thing actually in
+scope — which `account_id` `handle_in/3` threads into
+`AI.stream_response/4` — via the crash report `Logger` emits for bug 1
+(still present, still pre-existing, still unrelated to this fix): a
+multi-membership user joins with a token whose `membership_id` claim
+points at the real, active membership in Account B, but whose
+redundant `account_id` claim is tampered to Account A (same
+tampered-claim RED-discriminator technique as the rest of this PR —
+see calendar_controller_test.exs task 3.14). `ExUnit.CaptureLog`
+captures the crash log; the test asserts the log contains Account B's
+id and not Account A's — i.e., the crashing call itself proves which
+account was actually threaded through, regardless of the unrelated
+crash reason.
+
+RED (`git stash` of the `ai_channel.ex` fix, re-run, `git stash pop`):
+log shows the tampered Account A id. GREEN (fix applied): log shows
+the real, membership-resolved Account B id.
+
+**Files**: `lib/meal_planner_api_web/channels/ai_channel.ex`,
+`test/meal_planner_api_web/channels/ai_channel_test.exs` (+1 test,
+498→499).
+
+### Fix 2 (WARNING) — weak `or` assertion in `cross_account_isolation_test.exs`
+
+`own.breakfast_recipe_id` is seeded via `Calendar.
+upsert_scheduled_meal/2`, `own.dinner_recipe_id` via `Planning.
+schedule_meal/1` — two different write paths into the same
+`scheduled_meals` table, both read by the same `GET /api/calendar`
+call this test exercises. The original assertion used `or`, so a
+regression that broke visibility for only ONE of the two write paths
+would not have been caught by this, the single most load-bearing test
+in the 6-PR chain. Changed `or` to `and` so both write paths are
+independently proven visible under the correct account scope. Verified
+the test still passes after the change (both fixtures are genuinely
+written and genuinely visible) — no test count change (assertion-only
+edit to an existing test).
+
+**Files**: `test/meal_planner_api_web/cross_account_isolation_test.exs`.
+
+## TDD Cycle Evidence (review fix pass)
+
+| Item | RED | GREEN | REFACTOR | Notes |
+|---|---|---|---|---|
+| Fix 1 (BLOCKER — AIChannel tenancy scoping) | ✅ (`git stash`-verified: log shows tampered Account A id) | ✅ (log shows real Account B id) | n/a | Full end-to-end broadcast assertion blocked by 2 separate, pre-existing, out-of-scope bugs (documented above, not fixed) — test observes the crash-log account_id instead |
+| Fix 2 (WARNING — `or`→`and`) | n/a — assertion-only strengthening of an already-passing test, no separate RED/GREEN cycle applicable | ✅ (test still passes with `and`) | n/a | |
+
+## `mix test` summary (review fix pass)
+
+```
+498 tests, 0 failures   (baseline, feature/phase-a-pr-3c tip pre-review)
+499 tests, 0 failures   (+1 — Fix 1: AIChannel tenancy scoping test)
+499 tests, 0 failures   (Fix 2 — assertion-only change, no new test)
+```
+
+**Final: 499 tests, 0 failures** (+1 over the 498 baseline, 0
+regressions).
+
+## New out-of-scope finding (not fixed, flagged for follow-up)
+
+`AIChannel`'s "new_message" happy path is currently non-functional in
+both `:test` and `:prod` environments, independent of tenancy, due to
+2 stacked pre-existing bugs:
+
+1. `lib/meal_planner_api/ai.ex:13` — `stream_response/4`'s `%User{}`
+   guard aliases `MealPlannerApi.Accounts.User` (a DTO struct never
+   constructed anywhere in `lib/`), not the real
+   `MealPlannerApi.Persistence.Accounts.User` struct every real caller
+   passes.
+2. `lib/meal_planner_api/ai/mock_client.ex:14` and
+   `lib/meal_planner_api/ai/gemini_client.ex:16` —
+   `get_in(opts, [:user, :account_id])` on an Ecto struct, which does
+   not implement the `Access` behaviour `get_in/2` requires.
+
+Recommend a dedicated follow-up task/PR to fix both (and verify no
+further issues exist past bug 2) with its own RED→GREEN coverage —
+out of scope for this review fix pass.
