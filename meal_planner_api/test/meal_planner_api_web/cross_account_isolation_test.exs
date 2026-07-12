@@ -230,7 +230,15 @@ defmodule MealPlannerApiWeb.CrossAccountIsolationTest do
     body = json_response(resp, 200)
     recipe_ids = Enum.map(body["data"]["meals"], & &1["recipe_id"])
 
-    assert own.breakfast_recipe_id in recipe_ids or own.dinner_recipe_id in recipe_ids
+    # Post-PR-3c review — WARNING fix: `own.breakfast_recipe_id` is
+    # written via `Calendar.upsert_scheduled_meal/2` and
+    # `own.dinner_recipe_id` via `Planning.schedule_meal/1` — two
+    # different write paths into `scheduled_meals`, both read by this
+    # same `GET /api/calendar` call. An `or` here would let a regression
+    # that broke visibility for only ONE of the two paths go uncaught
+    # (the other fixture alone would satisfy the assertion). `and` proves
+    # both write paths are independently visible under the correct scope.
+    assert own.breakfast_recipe_id in recipe_ids and own.dinner_recipe_id in recipe_ids
     refute other.breakfast_recipe_id in recipe_ids
     refute other.dinner_recipe_id in recipe_ids
   end
