@@ -2,9 +2,15 @@ defmodule MealPlannerApiWeb.PlanningChatController do
   use MealPlannerApiWeb, :controller
 
   alias MealPlannerApi.Services.PlanningChatService
+  alias MealPlannerApiWeb.Controllers.AccountScopeHelpers
+
+  # Phase A — Tenancy Refactor (PR 3c task 3.19): tenancy scope is always
+  # resolved from `conn.assigns.current_membership.account_id`, never
+  # from the legacy `current_user.account_id` field. See
+  # `AccountScopeHelpers.scope_user_to_membership/2`.
 
   def create(conn, payload) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case PlanningChatService.generate_menu(user, payload) do
       {:ok, result} ->
@@ -18,7 +24,7 @@ defmodule MealPlannerApiWeb.PlanningChatController do
   end
 
   def favorites(conn, params) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
     limit = parse_limit(Map.get(params, "limit"))
 
     case PlanningChatService.quick_favorites(user, limit) do
@@ -33,7 +39,7 @@ defmodule MealPlannerApiWeb.PlanningChatController do
   end
 
   def confirm(conn, %{"proposal_id" => proposal_id}) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case PlanningChatService.confirm_proposal(user, proposal_id) do
       {:ok, result} ->
@@ -47,7 +53,7 @@ defmodule MealPlannerApiWeb.PlanningChatController do
   end
 
   def reject(conn, %{"proposal_id" => proposal_id}) do
-    user = Guardian.Plug.current_resource(conn)
+    user = scoped_user(conn)
 
     case PlanningChatService.reject_proposal(user, proposal_id) do
       {:ok, result} ->
@@ -58,6 +64,12 @@ defmodule MealPlannerApiWeb.PlanningChatController do
         |> put_status(:unprocessable_entity)
         |> json(%{error: serialize_reason(reason)})
     end
+  end
+
+  defp scoped_user(conn) do
+    conn
+    |> Guardian.Plug.current_resource()
+    |> AccountScopeHelpers.scope_user_to_membership(conn.assigns.current_membership)
   end
 
   defp parse_limit(nil), do: 10

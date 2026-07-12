@@ -1,6 +1,7 @@
 defmodule MealPlannerApiWeb.PlanningChatControllerTest do
   use MealPlannerApiWeb.ConnCase, async: false
   import Ecto.Query
+  import MealPlannerApi.FactoryHelpers
 
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.Auth.Guardian
@@ -9,6 +10,51 @@ defmodule MealPlannerApiWeb.PlanningChatControllerTest do
   alias MealPlannerApi.Persistence.Identity
   alias MealPlannerApi.Persistence.Planning.ScheduledMeal
   alias MealPlannerApi.Repo
+
+  # ─── Phase A — Tenancy Refactor (PR 3c task 3.19) ───────────────────────────
+  # See calendar_controller_test.exs (task 3.14) for why a tampered
+  # `account_id` claim is the genuine RED-discriminating case here.
+  describe "multi-familia tenancy scoping (task 3.19)" do
+    test "GET /api/planning/favorites resolves favorites via current_membership.account_id, not a tampered account_id claim",
+         %{conn: conn} do
+      user =
+        user_with_memberships(%{email: "chat_tamper@example.com"}, [
+          {%{plan: :family_4, name: "Chat Tamper Account A"}, :owner},
+          {%{plan: :family_4, name: "Chat Tamper Account B"}, :member}
+        ])
+
+      [membership_a, membership_b] = user.memberships
+
+      {:ok, recipe} =
+        Catalog.create_recipe(%{
+          account_id: membership_a.account_id,
+          created_by_user_id: user.id,
+          name: "Chat Tamper Favorite Recipe",
+          source: :user_created,
+          servings: 2,
+          suitable_for_slots: [:lunch]
+        })
+
+      {:ok, _favorite} = Calendar.toggle_favorite(membership_a.account_id, user.id, recipe.id)
+
+      tampered_claims =
+        MealPlannerApi.AccountsMembership.claims_for(user, membership_a)
+        |> Map.put("account_id", to_string(membership_b.account_id))
+
+      {:ok, token, _claims} =
+        Guardian.encode_and_sign(user, tampered_claims, token_type: "access")
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> get("/api/planning/favorites")
+
+      body = json_response(conn, 200)
+      recipe_ids = Enum.map(body["data"], & &1["recipe_id"])
+
+      assert recipe.id in recipe_ids
+    end
+  end
 
   test "planning chat creates a proposal and confirms scheduled meals", %{conn: conn} do
     token = issue_token(conn, %{"user_id" => "u_chat", "account_id" => "acct_chat"})
