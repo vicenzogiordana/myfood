@@ -66,15 +66,12 @@ defmodule MealPlannerApi.FactoryHelpers do
 
   @doc """
   Mints an `access_v2` JWT for the given user + membership. The claim set
-  matches design §3.2 exactly.
-
-  In PR 1 the helper computes the claims inline (the canonical
-  `MealPlannerApi.AccountsMembership.claims_for/2` builder lands in PR 2
-  task 2.1 — once that builder exists, this macro delegates to it).
+  matches design §3.2 exactly via the canonical
+  `MealPlannerApi.AccountsMembership.claims_for/2` builder (PR 2a task 2.1).
   """
   @spec issue_access_v2_token(PersistenceUser.t(), AccountMembership.t()) :: String.t()
   def issue_access_v2_token(user, membership) do
-    claims = Map.put(access_v2_claims_for(user, membership), "typ", "access_v2")
+    claims = MealPlannerApi.AccountsMembership.claims_for(user, membership)
 
     {:ok, token, _claims} =
       Guardian.encode_and_sign(user, claims, token_type: "access")
@@ -131,21 +128,4 @@ defmodule MealPlannerApi.FactoryHelpers do
   defp plan_name(:family_6), do: "family_6"
   defp plan_name(:trial), do: "trial"
   defp plan_name(plan) when is_binary(plan), do: plan
-
-  # PR 1 inline claim builder. PR 2 task 2.1 will replace this with
-  # MealPlannerApi.AccountsMembership.claims_for/2 once the membership
-  # context module lands.
-  defp access_v2_claims_for(user, membership) do
-    account = Repo.preload(membership, :account).account
-
-    %{
-      "membership_id" => Ecto.UUID.cast!(membership.id),
-      "account_id" => Ecto.UUID.cast!(account.id),
-      "role" => Atom.to_string(membership.role),
-      "plan" => Atom.to_string(account.plan),
-      "status" => Atom.to_string(membership.status),
-      "email" => user.email,
-      "name" => user.name
-    }
-  end
 end
