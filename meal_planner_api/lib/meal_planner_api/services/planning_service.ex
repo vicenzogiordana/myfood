@@ -238,7 +238,8 @@ defmodule MealPlannerApi.Services.PlanningService do
             "inventory_hit_count" => 0,
             "protein_g_per_serving" => 0,
             "carbs_g_per_serving" => 0,
-            "fat_g_per_serving" => 0
+            "fat_g_per_serving" => 0,
+            "calories_per_serving" => 0
           }
         end)
 
@@ -317,7 +318,8 @@ defmodule MealPlannerApi.Services.PlanningService do
     %{
       "protein_g" => %{"min" => 100.0, "max" => 150.0},
       "carbs_g" => %{"min" => 225.0, "max" => 325.0},
-      "fat_g" => %{"min" => 44.44, "max" => 77.78}
+      "fat_g" => %{"min" => 44.44, "max" => 77.78},
+      "calories" => %{"min" => 1800.0, "max" => 2500.0}
     }
   end
 

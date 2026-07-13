@@ -74,7 +74,7 @@ def _validate_payload(payload):
     if not isinstance(macro_bounds, dict):
         return "invalid_macro_bounds"
 
-    for key in ["protein_g", "carbs_g", "fat_g"]:
+    for key in ["protein_g", "carbs_g", "fat_g", "calories"]:
         bounds = macro_bounds.get(key)
         if not isinstance(bounds, dict):
             return "invalid_macro_bounds"
@@ -143,6 +143,7 @@ def _solve(payload):
         "protein_g": "protein_g_per_serving",
         "carbs_g": "carbs_g_per_serving",
         "fat_g": "fat_g_per_serving",
+        "calories": "calories_per_serving",
     }
 
     for day in days:

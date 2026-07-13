@@ -34,7 +34,8 @@ defmodule MealPlannerApi.Optimization.OptimizerPort do
   @type macro_bounds :: %{
           protein_g: %{min: float(), max: float()},
           carbs_g: %{min: float(), max: float()},
-          fat_g: %{min: float(), max: float()}
+          fat_g: %{min: float(), max: float()},
+          calories: %{min: float(), max: float()}
         }
 
   @type candidate_recipe :: %{
@@ -46,7 +47,8 @@ defmodule MealPlannerApi.Optimization.OptimizerPort do
           inventory_hit_count: integer(),
           protein_g_per_serving: float(),
           carbs_g_per_serving: float(),
-          fat_g_per_serving: float()
+          fat_g_per_serving: float(),
+          calories_per_serving: float()
         }
 
   @type selected_meal :: %{
