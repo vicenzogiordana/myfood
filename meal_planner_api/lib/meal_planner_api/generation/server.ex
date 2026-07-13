@@ -17,6 +17,7 @@ defmodule MealPlannerApi.Generation.Server do
   """
 
   use GenServer, restart: :temporary
+  require Logger
 
   alias MealPlannerApi.Data.{
     PlanningRepo,
@@ -52,8 +53,10 @@ defmodule MealPlannerApi.Generation.Server do
   # -------------------------------------------------------------------------
 
   @doc "Construye el registro `{:via, Registry, {Generations, key}}` para este account."
-  @spec via(pos_integer()) :: GenServer.name()
-  def via(account_id) when is_integer(account_id) and account_id > 0 do
+  @spec via(pos_integer() | String.t()) :: GenServer.name()
+  def via(account_id)
+      when (is_integer(account_id) and account_id > 0) or
+             (is_binary(account_id) and account_id != "") do
     key = {:generation, account_id}
     {:via, Registry, {MealPlannerApi.Generation.Generations, key}}
   end
@@ -186,7 +189,7 @@ defmodule MealPlannerApi.Generation.Server do
 
   defp start_and_call(account_id, user_id, constraints, channel_pid) do
     case DynamicSupervisor.start_child(
-           MealPlannerApi.Generation.Supervisor,
+           MealPlannerApi.Generation.DynamicSupervisor,
            {__MODULE__, [account_id: account_id, user_id: user_id]}
          ) do
       {:ok, pid} ->
@@ -217,14 +220,14 @@ defmodule MealPlannerApi.Generation.Server do
       GenerationService.build_constraints(user_profile, constraints)
       |> Map.put(:favorite_recipe_ids, favorite_recipe_ids)
 
-    # 3. Slot list
-    slots_input = build_slots_input(resolved)
+    # 3. Slot list (with real candidate recipe ids per slot type)
+    slots_input = build_slots_input(resolved, account_id, user_id)
 
     # 4. Recipe prices + macros
+    # Recipe ids are UUIDs (binary_id), not integers — keep them as strings.
     all_recipe_ids =
       slots_input
-      |> Enum.flat_map(&(&1["available_recipe_ids"] || []))
-      |> Enum.map(&String.to_integer/1)
+      |> Enum.flat_map(&(&1[:available_recipe_ids] || []))
       |> Enum.uniq()
 
     recipe_prices = PriceService.fetch_recipe_prices_float(all_recipe_ids)
@@ -255,7 +258,12 @@ defmodule MealPlannerApi.Generation.Server do
         handle_optimization_error(run_id, reason, state)
     end
   rescue
-    _ ->
+    e ->
+      Logger.error(
+        "Generation.Server pipeline crashed account_id=#{inspect(state.account_id)} " <>
+          "run_id=#{inspect(state.current_run_id)} kind=#{inspect(e.__struct__)}"
+      )
+
       broadcast(state, "generation_error", %{reason: "pipeline_error"})
       %{state | phase: :error}
   end
@@ -398,7 +406,17 @@ defmodule MealPlannerApi.Generation.Server do
     {profile, favorite_ids}
   end
 
-  defp build_slots_input(constraints) do
+  # Public (not `defp`) so the test suite can exercise the REAL production
+  # slot/candidate wiring directly — building the exact `available_recipe_ids`
+  # per slot that reaches `PayloadAdapter.build_optimizer_payload/3` — instead
+  # of re-deriving an equivalent query by hand. Same rationale as
+  # `Accounts.build_identity_multi/4`: the private helper stays the single
+  # source of truth, only visibility changes.
+  @doc false
+  @spec build_slots_input(map(), pos_integer() | String.t(), pos_integer() | String.t()) :: [
+          map()
+        ]
+  def build_slots_input(constraints, account_id, user_id) do
     date_from =
       constraints["date_from"] || constraints[:date_from] ||
         Date.utc_today() |> Date.to_iso8601()
@@ -415,13 +433,17 @@ defmodule MealPlannerApi.Generation.Server do
       (constraints[:favorite_recipe_ids] || [])
       |> Enum.map(&to_string/1)
 
+    candidates_by_slot_type = build_candidates_by_slot_type(account_id, user_id, slot_types)
+
     for date <- Date.range(Date.from_iso8601!(date_from), Date.from_iso8601!(date_to)),
         slot <- slot_types do
+      slot_str = to_string(slot)
+
       %{
-        "date" => Date.to_iso8601(date),
-        "slot" => to_string(slot),
-        "available_recipe_ids" => [],
-        "constraints" => %{
+        date: Date.to_iso8601(date),
+        slot: slot_str,
+        available_recipe_ids: Map.get(candidates_by_slot_type, slot_str, []),
+        constraints: %{
           "budget_cents" => constraints["budget_cents"] || 10_000,
           "protein_g" => constraints["protein_g"] || 25,
           "max_calories" => constraints["max_calories"] || 800,
@@ -433,20 +455,44 @@ defmodule MealPlannerApi.Generation.Server do
     end
   end
 
-  defp load_recipe_macros(recipe_ids) do
+  # Resolves real candidate recipe ids per (unique) slot type, scoped to the
+  # account (owned or global recipes) and filtered against the requesting
+  # user's excluded ingredients — reusing the same query the legacy
+  # PlanningService pipeline already relies on
+  # (`PlanningRepo.candidate_recipe_ids_for_slots/3`). Computed once per slot
+  # type (not per date) since candidates don't vary by date.
+  @spec build_candidates_by_slot_type(pos_integer() | String.t(), pos_integer() | String.t(), [
+          atom() | String.t()
+        ]) :: %{String.t() => [String.t()]}
+  defp build_candidates_by_slot_type(account_id, user_id, slot_types) do
+    slot_types
+    |> Enum.map(&to_string/1)
+    |> Enum.uniq()
+    |> Enum.into(%{}, fn slot_str ->
+      ids =
+        PlanningRepo.candidate_recipe_ids_for_slots(account_id, [user_id], [slot_str])
+        |> Enum.map(&to_string/1)
+
+      {slot_str, ids}
+    end)
+  end
+
+  # Public (not `defp`) — same rationale as `build_slots_input/3` above.
+  @doc false
+  def load_recipe_macros(recipe_ids) do
     recipe_ids
     |> RecipeRepo.list_by_ids()
     |> Enum.into(%{}, fn recipe ->
       {to_string(recipe.id),
        %{
-         protein_g: recipe.protein_g_per_serving || 0,
-         calories: recipe.calories_per_serving || 0,
-         carbs_g: recipe.carbs_g_per_serving || 0
+         protein_g: to_float(recipe.protein_g_per_serving),
+         calories: to_float(recipe.calories_per_serving),
+         carbs_g: to_float(recipe.carbs_g_per_serving)
        }}
     end)
   end
 
-  @spec load_recipe_data_for_response([pos_integer()]) :: %{String.t() => map()}
+  @spec load_recipe_data_for_response([String.t()]) :: %{String.t() => map()}
   defp load_recipe_data_for_response(recipe_ids) do
     recipe_ids
     |> RecipeRepo.list_by_ids_with_prices()
@@ -455,9 +501,9 @@ defmodule MealPlannerApi.Generation.Server do
        %{
          name: recipe.name,
          price_cents: (recipe.recipe_price && recipe.recipe_price.price_per_serving_cents) || 0,
-         protein_g: recipe.protein_g_per_serving || 0,
-         calories: recipe.calories_per_serving || 0,
-         carbs_g: recipe.carbs_g_per_serving || 0
+         protein_g: to_float(recipe.protein_g_per_serving),
+         calories: to_float(recipe.calories_per_serving),
+         carbs_g: to_float(recipe.carbs_g_per_serving)
        }}
     end)
   end
@@ -504,9 +550,17 @@ defmodule MealPlannerApi.Generation.Server do
     %{state | phase: :error}
   end
 
+  # `state.channel_pid` is the raw pid of the joined PlanningChannel process
+  # (`socket.channel_pid`), not a `%Phoenix.Socket{}` struct, so we can't use
+  # `Phoenix.Channel.broadcast!/3` (it requires a joined socket). Instead we
+  # broadcast straight to the channel's topic via the Endpoint's PubSub —
+  # every socket joined to `"planning:#{account_id}"` (including the one
+  # backed by `channel_pid`) receives it through the channel's default
+  # `handle_out/3`, which is exactly how GenerationServer -> Channel -> client
+  # push is meant to work in Phoenix.
   defp broadcast(state, event, payload) do
     if state.channel_pid && Process.alive?(state.channel_pid) do
-      Phoenix.Channel.broadcast!(state.channel_pid, event, payload)
+      MealPlannerApiWeb.Endpoint.broadcast("planning:#{state.account_id}", event, payload)
     end
   end
 
@@ -572,15 +626,20 @@ defmodule MealPlannerApi.Generation.Server do
     }
   end
 
+  # Recipe ids are UUIDs (binary_id) post-tenancy-refactor, not integers —
+  # pass them through as-is instead of attempting `Integer.parse/1` (which
+  # would always fail on a UUID and silently null out every scheduled meal's
+  # recipe_id).
   defp parse_recipe_id(nil), do: nil
-  defp parse_recipe_id(id) when is_integer(id), do: id
-
-  defp parse_recipe_id(id) when is_binary(id) do
-    case Integer.parse(id) do
-      {int, _} -> int
-      :error -> nil
-    end
-  end
-
+  defp parse_recipe_id(id) when is_binary(id), do: id
   defp parse_recipe_id(_), do: nil
+
+  # Recipe macro columns (protein_g/carbs_g/fat_g) are `:decimal` — Jason
+  # encodes `Decimal` as a JSON *string*, which the Python optimizer's
+  # `_candidate_num` treats as 0 (it only accepts int/float), silently
+  # zeroing out real macros. Normalize to float before they ever reach the
+  # optimizer payload.
+  defp to_float(nil), do: 0
+  defp to_float(%Decimal{} = d), do: Decimal.to_float(d)
+  defp to_float(n) when is_number(n), do: n
 end

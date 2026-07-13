@@ -17,7 +17,8 @@ defmodule MealPlannerApi.Generation.Supervisor do
   def init(_opts) do
     children = [
       {Registry, keys: :unique, name: MealPlannerApi.Generation.Generations},
-      {DynamicSupervisor, strategy: :one_for_one, max_seconds: 5}
+      {DynamicSupervisor,
+       strategy: :one_for_one, max_seconds: 5, name: MealPlannerApi.Generation.DynamicSupervisor}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

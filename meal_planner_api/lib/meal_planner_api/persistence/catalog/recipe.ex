@@ -31,6 +31,7 @@ defmodule MealPlannerApi.Persistence.Catalog.Recipe do
     has_many(:recipe_ingredients, MealPlannerApi.Persistence.Catalog.RecipeIngredient)
     has_many(:daily_costs, MealPlannerApi.Persistence.Catalog.RecipeDailyCost)
     has_many(:favorite_recipes, MealPlannerApi.Persistence.Catalog.FavoriteRecipe)
+    has_one(:recipe_price, MealPlannerApi.Persistence.Shopping.RecipePrice)
 
     timestamps(type: :utc_datetime_usec)
   end
