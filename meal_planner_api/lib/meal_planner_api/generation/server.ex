@@ -25,10 +25,15 @@ defmodule MealPlannerApi.Generation.Server do
     UserPreferenceRepo
   }
 
+  alias Ecto.Multi
   alias MealPlannerApi.Optimization.OptimizerServer
   alias MealPlannerApi.Optimization.PayloadAdapter
+  alias MealPlannerApi.Persistence.Planning.PlanningGenerationRun
+  alias MealPlannerApi.Persistence.Planning.PlanningProposal
+  alias MealPlannerApi.Persistence.Planning.ScheduledMeal
   alias MealPlannerApi.Services.GenerationService
   alias MealPlannerApi.Services.PriceService
+  alias MealPlannerApi.Services.ShoppingService
   alias MealPlannerApi.Repo
 
   # -------------------------------------------------------------------------
@@ -161,8 +166,18 @@ defmodule MealPlannerApi.Generation.Server do
 
   @impl true
   def handle_call({:confirm, proposal_id}, _from, state) do
-    reply = do_confirm(state, proposal_id)
-    {:reply, reply, state}
+    case do_confirm(state, proposal_id) do
+      {:ok, _result} = reply ->
+        # Post-review fix (item 3, continued): the pre-existing code called
+        # `reset_state(state)` here but discarded its result instead of
+        # returning it, so the GenServer's own `phase`/`current_run_id`/etc.
+        # were never actually reset after a successful confirm — only fixed
+        # now because this whole function is being made atomic anyway.
+        {:reply, reply, reset_state(state)}
+
+      {:error, _reason} = reply ->
+        {:reply, reply, state}
+    end
   end
 
   @impl true
@@ -272,26 +287,132 @@ defmodule MealPlannerApi.Generation.Server do
   # Confirm / reject
   # -------------------------------------------------------------------------
 
+  # Post-review fix (CRITICAL item 3): confirm used to run 3 independent
+  # Repo calls (`update_proposal` -> `:accepted`, then N `schedule_meal`
+  # inserts, filtering out `{:error, _}` results with `Enum.filter`) with NO
+  # rollback. Any single conflicting `ScheduledMeal` (unique constraint on
+  # `[:account_id, :date, :slot]` — e.g. a slot already scheduled by another
+  # confirm/manual edit) silently dropped just THAT meal while the proposal
+  # still ended up `:accepted` with fewer meals than the client was shown —
+  # exactly the bug this fix exists to eliminate. Wrapped in `Ecto.Multi` so
+  # any failure (proposal update, any one meal insert, or the run status
+  # update) rolls back everything: proposal stays at its prior status, ZERO
+  # meals persisted.
   defp do_confirm(state, proposal_id) do
     with :ok <- verify_ownership(proposal_id, state.account_id),
-         {:ok, proposal, run} <- fetch_proposal_with_run(proposal_id),
-         {:ok, _} <- PlanningRepo.update_proposal(proposal, %{status: :accepted}),
-         {:ok, scheduled} <- persist_scheduled_meals(proposal, state) do
-      PlanningRepo.update_generation_run(run, %{
-        status: :completed,
-        completed_at: DateTime.utc_now()
-      })
-
-      broadcast(state, "proposal_confirmed", %{
-        proposal_id: proposal_id,
-        scheduled_meals_count: length(scheduled)
-      })
-
-      reset_state(state)
-      {:ok, %{scheduled_meals_count: length(scheduled)}}
+         {:ok, proposal, run} <- fetch_proposal_with_run(proposal_id) do
+      proposal
+      |> build_confirm_multi(run, state)
+      |> Repo.transaction()
+      |> handle_confirm_transaction(state, proposal_id)
     else
       {:error, _} = error -> error
     end
+  end
+
+  defp build_confirm_multi(proposal, run, state) do
+    slots = get_in(proposal.proposal_json, ["slots"]) || []
+
+    Multi.new()
+    |> Multi.update(:proposal, PlanningProposal.changeset(proposal, %{status: :accepted}))
+    |> add_scheduled_meal_steps(slots, state)
+    |> Multi.update(
+      :generation_run,
+      PlanningGenerationRun.changeset(run, %{
+        status: :completed,
+        completed_at: DateTime.utc_now()
+      })
+    )
+  end
+
+  defp add_scheduled_meal_steps(multi, slots, state) do
+    slots
+    |> Enum.with_index()
+    |> Enum.reduce(multi, fn {slot, index}, acc ->
+      Multi.insert(acc, {:scheduled_meal, index}, scheduled_meal_changeset(slot, state))
+    end)
+  end
+
+  defp scheduled_meal_changeset(slot, state) do
+    [date, slot_name] = String.split(slot["slot_key"], "_", parts: 2)
+
+    %ScheduledMeal{}
+    |> ScheduledMeal.changeset(%{
+      account_id: state.account_id,
+      date: Date.from_iso8601!(date),
+      slot: String.to_existing_atom(slot_name),
+      recipe_id: parse_recipe_id(slot["recipe_id"]),
+      is_cooked: false
+    })
+  end
+
+  defp handle_confirm_transaction({:ok, changes}, state, proposal_id) do
+    scheduled_count = count_scheduled_meal_steps(changes)
+
+    broadcast(state, "proposal_confirmed", %{
+      proposal_id: proposal_id,
+      scheduled_meals_count: scheduled_count
+    })
+
+    trigger_shopping_list_sync(state.account_id, changes)
+
+    {:ok, %{scheduled_meals_count: scheduled_count}}
+  end
+
+  defp handle_confirm_transaction({:error, step, reason, _changes_so_far}, _state, proposal_id) do
+    log_confirm_transaction_failure(proposal_id, step, reason)
+    {:error, :confirm_failed}
+  end
+
+  defp count_scheduled_meal_steps(changes) do
+    changes
+    |> Map.keys()
+    |> Enum.count(&match?({:scheduled_meal, _index}, &1))
+  end
+
+  # Item 4: accepting the plan must also load the shopping list with the
+  # week's ingredients — eagerly, not just on next lazy read. Runs AFTER the
+  # confirm transaction commits (deliberately outside the Multi): if this
+  # fails, the confirm itself still stands (meals are safely persisted) and
+  # `ShoppingService.get_shopping_list/2`'s existing lazy
+  # `ensure_shopping_items_from_schedule/3` call self-heals on next read —
+  # only the "eager" convenience is lost, never the confirm.
+  defp trigger_shopping_list_sync(account_id, changes) do
+    dates =
+      changes
+      |> Enum.filter(fn {key, _} -> match?({:scheduled_meal, _}, key) end)
+      |> Enum.map(fn {_key, meal} -> meal.date end)
+
+    case dates do
+      [] ->
+        :ok
+
+      _ ->
+        from_date = Enum.min(dates, Date)
+        to_date = Enum.max(dates, Date)
+        ShoppingService.ensure_shopping_items_from_schedule(account_id, from_date, to_date)
+    end
+  rescue
+    e ->
+      Logger.error(
+        "Generation.Server post-confirm shopping list sync failed account_id=#{inspect(account_id)} kind=#{inspect(e.__struct__)}"
+      )
+
+      :ok
+  end
+
+  defp log_confirm_transaction_failure(proposal_id, step, %Ecto.Changeset{errors: errors}) do
+    Logger.error(
+      "Generation.Server confirm transaction failed proposal_id=#{inspect(proposal_id)} " <>
+        "step=#{inspect(step)} changeset_errors=#{inspect(errors)}"
+    )
+  end
+
+  defp log_confirm_transaction_failure(proposal_id, step, reason) do
+    Logger.error(
+      "Generation.Server confirm transaction failed proposal_id=#{inspect(proposal_id)} " <>
+        "step=#{inspect(step)} reason=#{inspect(reason)}"
+    )
   end
 
   defp handle_reject(state, proposal_id) do
@@ -564,20 +685,28 @@ defmodule MealPlannerApi.Generation.Server do
     end
   end
 
+  # Post-review fix (item 3): both used to be `Repo.get!/2` — raising
+  # `Ecto.NoResultsError` for a bogus/deleted `proposal_id` instead of
+  # returning `{:error, :not_found}`. Since `do_confirm/2` and
+  # `handle_reject/2` run inside a live GenServer's `handle_call`/`handle_cast`
+  # callback (not wrapped in a `rescue`), that exception used to CRASH the
+  # entire per-account GenServer — losing its in-flight state for any other
+  # legitimate concurrent operation — instead of gracefully erroring back to
+  # the caller the way the `PlanningChatService` fallback path already does.
   defp fetch_proposal(id) do
-    Repo.get!(MealPlannerApi.Persistence.Planning.PlanningProposal, id)
+    case Repo.get(PlanningProposal, id) do
+      nil -> {:error, :not_found}
+      proposal -> {:ok, proposal}
+    end
   end
 
   defp fetch_proposal_with_run(proposal_id) do
-    proposal = fetch_proposal(proposal_id)
-
-    run =
-      Repo.get!(
-        MealPlannerApi.Persistence.Planning.PlanningGenerationRun,
-        proposal.generation_run_id
-      )
-
-    {:ok, proposal, run}
+    with {:ok, proposal} <- fetch_proposal(proposal_id) do
+      case Repo.get(PlanningGenerationRun, proposal.generation_run_id) do
+        nil -> {:error, :not_found}
+        run -> {:ok, proposal, run}
+      end
+    end
   end
 
   defp verify_ownership(proposal_id, account_id) do
@@ -588,30 +717,6 @@ defmodule MealPlannerApi.Generation.Server do
       _ ->
         {:error, :not_found}
     end
-  end
-
-  defp persist_scheduled_meals(proposal, state) do
-    slots = get_in(proposal.proposal_json, ["slots"]) || []
-
-    results =
-      Enum.map(slots, fn slot ->
-        [date, slot_name] = String.split(slot["slot_key"], "_", parts: 2)
-
-        PlanningRepo.schedule_meal(%{
-          account_id: state.account_id,
-          user_id: state.user_id,
-          generation_run_id: proposal.generation_run_id,
-          planning_proposal_id: proposal.id,
-          date: Date.from_iso8601!(date),
-          slot: String.to_existing_atom(slot_name),
-          recipe_id: parse_recipe_id(slot["recipe_id"]),
-          is_cooked: false
-        })
-      end)
-      |> Enum.filter(&match?({:ok, _}, &1))
-      |> Enum.map(fn {:ok, meal} -> meal end)
-
-    {:ok, results}
   end
 
   defp reset_state(state) do

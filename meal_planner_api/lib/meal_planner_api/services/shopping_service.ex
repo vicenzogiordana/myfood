@@ -50,6 +50,7 @@ defmodule MealPlannerApi.Services.ShoppingService do
 
         # Group items by ingredient_id, aggregating quantities and prices
         all_items = items ++ in_cart ++ archived
+
         grouped =
           Enum.group_by(all_items, & &1.ingredient_id)
           |> Enum.map(fn {_ingredient_id, grouped_items} ->
@@ -107,8 +108,17 @@ defmodule MealPlannerApi.Services.ShoppingService do
     _ -> :ok
   end
 
-  # Ensure shopping items exist for all scheduled meals in the date range
-  defp ensure_shopping_items_from_schedule(account_id, from_date, to_date) do
+  # Ensure shopping items exist for all scheduled meals in the date range.
+  #
+  # Public (not `defp`) — item 4 of the planning-pipeline-plumbing fix reuses
+  # this exact, already-idempotent function to eagerly populate the shopping
+  # list right after a plan is confirmed (Generation.Server.do_confirm/2 and
+  # PlanningChatService.confirm_proposal/2), instead of only building it
+  # lazily on the next `get_shopping_list/2` read. Same visibility rationale
+  # as `Accounts.build_identity_multi/4`.
+  @doc false
+  @spec ensure_shopping_items_from_schedule(binary(), Date.t(), Date.t()) :: :ok
+  def ensure_shopping_items_from_schedule(account_id, from_date, to_date) do
     scheduled_meals =
       from(m in MealPlannerApi.Persistence.Planning.ScheduledMeal,
         where: m.account_id == ^account_id,
@@ -528,18 +538,34 @@ defmodule MealPlannerApi.Services.ShoppingService do
   defp serialize_shopping_item(i) do
     # Handle Ecto.Association.NotLoaded case
     ingredient = i.ingredient
-    ingredient_map = cond do
-      is_nil(ingredient) -> nil
-      Map.has_key?(ingredient, :__struct__) and String.contains?(inspect(ingredient.__struct__), "NotLoaded") -> nil
-      true -> ingredient
-    end
+
+    ingredient_map =
+      cond do
+        is_nil(ingredient) ->
+          nil
+
+        Map.has_key?(ingredient, :__struct__) and
+            String.contains?(inspect(ingredient.__struct__), "NotLoaded") ->
+          nil
+
+        true ->
+          ingredient
+      end
 
     assigned_supermarket = i.assigned_supermarket
-    supermarket_map = cond do
-      is_nil(assigned_supermarket) -> nil
-      Map.has_key?(assigned_supermarket, :__struct__) and String.contains?(inspect(assigned_supermarket.__struct__), "NotLoaded") -> nil
-      true -> assigned_supermarket
-    end
+
+    supermarket_map =
+      cond do
+        is_nil(assigned_supermarket) ->
+          nil
+
+        Map.has_key?(assigned_supermarket, :__struct__) and
+            String.contains?(inspect(assigned_supermarket.__struct__), "NotLoaded") ->
+          nil
+
+        true ->
+          assigned_supermarket
+      end
 
     category =
       case ingredient_map do

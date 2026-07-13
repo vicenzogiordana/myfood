@@ -6,11 +6,18 @@ defmodule MealPlannerApi.Services.PlanningChatService do
   It coordinates identity resolution, proposal creation, and the confirm/reject lifecycle.
   """
 
+  require Logger
+
+  alias Ecto.Multi
   alias MealPlannerApi.Data.PlanningRepo
   alias MealPlannerApi.Data.RecipeRepo
   alias MealPlannerApi.Persistence.Identity
+  alias MealPlannerApi.Persistence.Planning.PlanningProposal
+  alias MealPlannerApi.Persistence.Planning.ScheduledMeal
+  alias MealPlannerApi.Repo
   alias MealPlannerApi.Services.BudgetService
   alias MealPlannerApi.Services.PlanningService
+  alias MealPlannerApi.Services.ShoppingService
 
   # -------------------------------------------------------------------------
   # Quick favorites
@@ -100,68 +107,141 @@ defmodule MealPlannerApi.Services.PlanningChatService do
   # Proposal confirmation / rejection
   # -------------------------------------------------------------------------
 
+  # Post-review fix (CRITICAL item 3, second confirm path): this used to
+  # update the proposal to `:accepted` and then insert each scheduled meal
+  # independently via `Enum.flat_map`, silently dropping any `{:error, _}`
+  # result — the exact same non-atomic bug as `Generation.Server.
+  # do_confirm/2`. Now wrapped in the same `Ecto.Multi`/`Repo.transaction`
+  # pattern: any failure (proposal update or any one meal insert) rolls back
+  # everything.
   @spec confirm_proposal(map(), binary()) :: {:ok, map()} | {:error, term()}
   def confirm_proposal(current_user, proposal_id) when is_binary(proposal_id) do
     with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
          {:ok, proposal} <-
            PlanningRepo.get_proposal_with_run!(proposal_id) |> then(fn {p, _} -> {:ok, p} end),
          :ok <- verify_ownership(proposal, ids.account_id),
-         {:ok, scheduled_meals} <- parse_scheduled_meals(proposal),
-         {:ok, _updated} <-
-           PlanningRepo.update_proposal(proposal, %{status: :accepted}) do
-      confirmed =
-        Enum.flat_map(scheduled_meals, fn meal ->
-          # Build clean attrs map from string-keyed meal data
-          slot_atom =
-            meal
-            |> Map.get("slot")
-            |> case do
-              s when is_binary(s) -> String.to_existing_atom(s)
-              a when is_atom(a) -> a
-              _ -> :dinner
-            end
-
-          date_value =
-            meal
-            |> Map.get("date")
-            |> case do
-              d when is_binary(d) ->
-                case Date.from_iso8601(d) do
-                  {:ok, parsed} -> parsed
-                  :error -> Date.utc_today()
-                end
-
-              %Date{} = d ->
-                d
-
-              _ ->
-                Date.utc_today()
-            end
-
-          attrs = %{
-            account_id: ids.account_id,
-            user_id: ids.user_id,
-            date: date_value,
-            slot: slot_atom,
-            recipe_id: meal["recipe_id"]
-          }
-
-          case PlanningRepo.schedule_meal(attrs) do
-            {:ok, sm} -> [sm]
-            {:error, _} -> []
-          end
-        end)
-
-      {:ok,
-       %{
-         proposal_id: proposal_id,
-         generation_run_id: proposal.generation_run_id,
-         scheduled_meals_count: length(confirmed),
-         scheduled_meals: confirmed
-       }}
+         {:ok, scheduled_meals} <- parse_scheduled_meals(proposal) do
+      proposal
+      |> build_confirm_multi(scheduled_meals, ids)
+      |> Repo.transaction()
+      |> handle_confirm_transaction(proposal_id)
     else
       {:error, _} = error -> error
     end
+  end
+
+  defp build_confirm_multi(proposal, scheduled_meals, ids) do
+    Multi.new()
+    |> Multi.update(:proposal, PlanningProposal.changeset(proposal, %{status: :accepted}))
+    |> add_scheduled_meal_steps(scheduled_meals, ids)
+  end
+
+  defp add_scheduled_meal_steps(multi, scheduled_meals, ids) do
+    scheduled_meals
+    |> Enum.with_index()
+    |> Enum.reduce(multi, fn {meal, index}, acc ->
+      Multi.insert(acc, {:scheduled_meal, index}, scheduled_meal_changeset(meal, ids))
+    end)
+  end
+
+  defp scheduled_meal_changeset(meal, ids) do
+    # Build clean attrs map from string-keyed meal data
+    slot_atom =
+      meal
+      |> Map.get("slot")
+      |> case do
+        s when is_binary(s) -> String.to_existing_atom(s)
+        a when is_atom(a) -> a
+        _ -> :dinner
+      end
+
+    date_value =
+      meal
+      |> Map.get("date")
+      |> case do
+        d when is_binary(d) ->
+          case Date.from_iso8601(d) do
+            {:ok, parsed} -> parsed
+            :error -> Date.utc_today()
+          end
+
+        %Date{} = d ->
+          d
+
+        _ ->
+          Date.utc_today()
+      end
+
+    %ScheduledMeal{}
+    |> ScheduledMeal.changeset(%{
+      account_id: ids.account_id,
+      date: date_value,
+      slot: slot_atom,
+      recipe_id: meal["recipe_id"]
+    })
+  end
+
+  defp handle_confirm_transaction({:ok, changes}, proposal_id) do
+    confirmed =
+      changes
+      |> Enum.filter(fn {key, _} -> match?({:scheduled_meal, _index}, key) end)
+      |> Enum.map(fn {_key, meal} -> meal end)
+
+    trigger_shopping_list_sync(changes.proposal, confirmed)
+
+    {:ok,
+     %{
+       proposal_id: proposal_id,
+       generation_run_id: changes.proposal.generation_run_id,
+       scheduled_meals_count: length(confirmed),
+       scheduled_meals: confirmed
+     }}
+  end
+
+  defp handle_confirm_transaction({:error, step, reason, _changes_so_far}, proposal_id) do
+    log_confirm_transaction_failure(proposal_id, step, reason)
+    {:error, :confirm_failed}
+  end
+
+  # Item 4: accepting the plan must also load the shopping list with the
+  # week's ingredients — eagerly, not just on next lazy read. Runs AFTER the
+  # confirm transaction commits (deliberately outside the Multi): if this
+  # fails, the confirm itself still stands (meals are safely persisted) and
+  # `ShoppingService.get_shopping_list/2`'s existing lazy
+  # `ensure_shopping_items_from_schedule/3` call self-heals on next read —
+  # only the "eager" convenience is lost, never the confirm.
+  defp trigger_shopping_list_sync(_proposal, []), do: :ok
+
+  defp trigger_shopping_list_sync(proposal, confirmed_meals) do
+    # `PlanningProposal` itself has no `account_id` (it belongs to a
+    # generation_run, not an account directly) — every confirmed
+    # `ScheduledMeal` already carries the account_id it was inserted with.
+    account_id = hd(confirmed_meals).account_id
+    dates = Enum.map(confirmed_meals, & &1.date)
+    from_date = Enum.min(dates, Date)
+    to_date = Enum.max(dates, Date)
+    ShoppingService.ensure_shopping_items_from_schedule(account_id, from_date, to_date)
+  rescue
+    e ->
+      Logger.error(
+        "PlanningChatService post-confirm shopping list sync failed proposal_id=#{inspect(proposal.id)} kind=#{inspect(e.__struct__)}"
+      )
+
+      :ok
+  end
+
+  defp log_confirm_transaction_failure(proposal_id, step, %Ecto.Changeset{errors: errors}) do
+    Logger.error(
+      "PlanningChatService confirm transaction failed proposal_id=#{inspect(proposal_id)} " <>
+        "step=#{inspect(step)} changeset_errors=#{inspect(errors)}"
+    )
+  end
+
+  defp log_confirm_transaction_failure(proposal_id, step, reason) do
+    Logger.error(
+      "PlanningChatService confirm transaction failed proposal_id=#{inspect(proposal_id)} " <>
+        "step=#{inspect(step)} reason=#{inspect(reason)}"
+    )
   end
 
   @spec reject_proposal(map(), binary()) :: {:ok, map()} | {:error, term()}
