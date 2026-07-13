@@ -1,0 +1,118 @@
+---
+project: myfood
+description: Project-root SDD configuration for the MyFood monorepo (Elixir/Phoenix API + planned React Native app + Python optimizer).
+sdd_version: "1.0"
+created: "2026-06-16"
+scope: monorepo_root
+
+# Artifacts
+artifacts:
+  store: openspec
+
+# Preflight decisions (cached for this session)
+preflight:
+  execution_mode: auto
+  artifact_store: openspec
+  chained_pr_strategy: ask-always
+  review_budget_lines: 400
+
+# Boundaries
+# IMPORTANT: the Phoenix API sub-project owns its own SDD state.
+# Do NOT touch meal_planner_api/openspec/ from project-root SDD phases.
+excluded_from_index:
+  - skill-registry
+  - _shared
+  - "sdd-*"
+
+# Sub-projects
+sub_projects:
+  - name: meal_planner_api
+    path: meal_planner_api/
+    sdd_owns_its_own: true
+    sdd_config: meal_planner_api/openspec/config.yaml
+    test_runner: mix test
+    strict_tdd: true
+  - name: mobile
+    path: (not yet scaffolded)
+    sdd_owns_its_own: false
+    status: pending
+  - name: python_optimizer
+    path: ./  # generador.py and optimizador.py live at repo root
+    sdd_owns_its_own: false
+    status: external_dependency
+
+# External integrations (whole-system view)
+external_integrations:
+  ai:
+    type: Behaviour injection
+    provider: Gemini
+    streaming: SSE
+    owner_sub_project: meal_planner_api
+  optimizer:
+    type: GenServer + Port (stdio)
+    language: Python (OR-Tools)
+    protocol: JSON over stdin/stdout
+    scripts:
+      - ./optimizador.py
+      - ./generador.py
+    owner_sub_project: meal_planner_api
+  billing:
+    type: Webhook + entitlement sync
+    provider: RevenueCat
+    owner_sub_project: meal_planner_api
+  auth:
+    type: JWT
+    library: Guardian
+    owner_sub_project: meal_planner_api
+
+# Constraints
+constraints:
+  multi_tenancy: Account (individual | group)
+  budget_constrained_ai_planning: true
+  zero_waste_inventory_priority: true
+  freemium_tiers: true
+  keep_python_optimizer: true
+  keep_or_tools: true
+
+# Testing strategy (project-root view — sub-projects have their own)
+test_runner: "mix test"
+test_runner_cwd: meal_planner_api/
+strict_tdd: true
+
+# Review budget
+max_changed_lines: 400
+chained_pr_recommended_above: 400
+
+# Phase rules
+rules:
+  proposal:
+    - "Use root-context vocabulary from context.md (Account, MealPlan, Meal, Budget, ShoppingItem, Inventory, PlanningSession, Message)."
+    - "State which sub-project the change lands in (api | mobile | repo-wide)."
+    - "Include a rollback plan whenever the change touches live integrations (Gemini, OR-Tools, RevenueCat)."
+  specs:
+    - "Use Given/When/Then for scenarios."
+    - "Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)."
+    - "Delta specs MUST declare ADDED | MODIFIED | REMOVED | RENAMED sections explicitly."
+  design:
+    - "Include sequence diagrams for flows that cross sub-projects or external integrations."
+    - "Document architecture decisions with rationale; link to the relevant context (root | api | mobile)."
+    - "For changes owned by meal_planner_api, defer architecture detail to meal_planner_api/ARCHITECTURE.md and link to it."
+  tasks:
+    - "Group by phase, use hierarchical numbering."
+    - "Keep tasks completable in one session."
+    - "Each task MUST declare its owner_sub_project so the orchestrator can route to sdd-apply in the right worktree."
+    - "Forecast changed lines; if forecast > 400, recommend chained PRs."
+  apply:
+    - "Follow existing code patterns; respect sub-project boundaries (do not edit meal_planner_api/ from the project root)."
+    - "Run the test command from test_runner_cwd."
+    tdd: true
+    test_command: "mix test"
+    test_command_cwd: meal_planner_api/
+  verify:
+    test_command: "mix test"
+    test_command_cwd: meal_planner_api/
+    build_command: ""
+    coverage_threshold: 0
+  archive:
+    - "Warn before merging destructive deltas."
+    - "For sub-project-owned changes, archive under meal_planner_api/openspec/, not at the project root."
