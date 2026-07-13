@@ -202,11 +202,24 @@ defmodule MealPlannerApi.AccountsMembership do
     end
   end
 
+  # Requires status: :active, mirroring the legacy branch below and
+  # `LoadCurrentMembership.load_access_v2_membership/1` (tenancy debt
+  # cleanup item 2) — this function has no status-aware caller
+  # downstream (unlike the Channel join path, which re-checks status
+  # itself), so it must enforce active-only here.
   defp load_v2_membership(claims) do
     case Map.get(claims, "membership_id") do
-      nil -> nil
-      "" -> nil
-      membership_id -> AccountMembershipQueries.load_membership_by_id(membership_id)
+      nil ->
+        nil
+
+      "" ->
+        nil
+
+      membership_id ->
+        case AccountMembershipQueries.load_membership_by_id(membership_id) do
+          %AccountMembership{status: :active} = membership -> membership
+          _ -> nil
+        end
     end
   end
 

@@ -73,6 +73,17 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket do
     end
   end
 
+  # Deliberately does NOT check `status: :active` here (tenancy debt
+  # cleanup item 2 investigated adding it and reverted — it broke
+  # channel joins). `UserSocket.connect/3` must succeed even for a
+  # non-`:active` (e.g. `:invited`) membership; each channel's
+  # `join/3` re-fetches the membership via `membership_from_socket/1`
+  # and checks `status != :active` itself so it can return a specific
+  # `{:error, %{reason: "forbidden"}}` — see e.g.
+  # `MealPlannerApiWeb.CalendarChannel.join/3`. If you need active-only
+  # semantics with NO status-aware caller downstream, that's the HTTP
+  # plug's job (`LoadCurrentMembership.load_access_v2_membership/1`) or
+  # `AccountsMembership.load_v2_membership/1`, not this module.
   defp load_access_v2_membership(claims) do
     case Map.get(claims, "membership_id") do
       nil ->

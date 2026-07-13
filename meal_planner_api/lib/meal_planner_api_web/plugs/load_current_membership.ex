@@ -7,8 +7,14 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
 
     * When the JWT is `typ: "access_v2"` the plug loads the
       `AccountMembership` row identified by `claims["membership_id"]`
-      (no association preload). Missing/invalid → halt with
-      `401 unauthorized, %{error: "membership_id_required"}`.
+      (no association preload) and requires `status: :active`. A
+      missing/invalid `membership_id`, no matching row, or a row whose
+      status is not `:active` (e.g. `:suspended` — a real, currently
+      unused enum value reserved for a future re-invitation flow) all
+      halt with `401 unauthorized, %{error: "membership_id_required"}`.
+      Unlike the Phoenix Channel path (`LoadCurrentMembershipSocket`),
+      no downstream HTTP layer re-checks membership status (tenancy
+      debt cleanup item 2), so this plug must enforce it itself.
 
     * When the JWT is `typ: "access"` (legacy fallback) the plug loads
       the real, `:active` `AccountMembership` row for
@@ -99,7 +105,7 @@ defmodule MealPlannerApiWeb.Plugs.LoadCurrentMembership do
 
       membership_id ->
         case AccountMembershipQueries.load_membership_by_id(membership_id) do
-          %AccountMembership{} = membership -> {:ok, membership}
+          %AccountMembership{status: :active} = membership -> {:ok, membership}
           _ -> {:error, :membership_id_required}
         end
     end

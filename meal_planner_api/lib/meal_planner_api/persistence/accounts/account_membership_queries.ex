@@ -48,8 +48,29 @@ defmodule MealPlannerApi.Persistence.Accounts.AccountMembershipQueries do
   Loads the `AccountMembership` row identified by its primary key — the
   `access_v2` token path.
 
+  Deliberately does NOT filter by `status` (unlike
+  `load_active_membership/3`'s legacy path). This is intentional, not
+  an oversight (tenancy debt cleanup item 2 investigated adding a
+  blanket `status: :active` filter here and found it breaks Phoenix
+  Channel joins — see `MealPlannerApiWeb.Plugs.
+  LoadCurrentMembershipSocket` moduledoc and each channel's `join/3`,
+  e.g. `MealPlannerApiWeb.CalendarChannel`): channels re-fetch the
+  membership via `LoadCurrentMembershipSocket.membership_from_socket/1`
+  inside `join/3` and explicitly check `membership.status != :active`
+  themselves so they can return a specific `{:error, %{reason:
+  "forbidden"}}` at JOIN time, while the socket CONNECT itself must
+  still succeed for a non-`:active` (e.g. `:invited`) membership (Q8 —
+  design §7; regression-locked by the "invited (non-active) membership
+  join is rejected" tests in each channel's test file).
+
+  Callers that DO need active-only, fail-closed semantics with no
+  status-aware caller downstream (the HTTP plug's `access_v2` branch,
+  `AccountsMembership.load_v2_membership/1`) must check
+  `membership.status == :active` themselves on the returned row —
+  see those modules.
+
   Returns `nil` when `membership_id` is not a valid UUID or no row
-  matches.
+  exists at all.
   """
   @spec load_membership_by_id(String.t(), keyword()) :: AccountMembership.t() | nil
   def load_membership_by_id(membership_id, opts \\ []) when is_binary(membership_id) do
