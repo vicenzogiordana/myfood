@@ -11,7 +11,7 @@ defmodule MealPlannerApi.AI.MockClient do
   def stream_chat_completion(topic, prompt, opts) do
     Task.start(fn ->
       request_id = Keyword.get(opts, :request_id) || "req_stream"
-      account_id = get_in(opts, [:user, :account_id])
+      account_id = opts |> Keyword.get(:user) |> then(&(&1 && &1.account_id))
 
       Endpoint.broadcast(topic, "ai_response_started", %{
         request_id: request_id,

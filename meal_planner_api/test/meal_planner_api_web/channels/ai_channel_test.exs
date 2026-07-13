@@ -1,7 +1,6 @@
 defmodule MealPlannerApiWeb.AIChannelTest do
   use MealPlannerApiWeb.ChannelCase, async: false
 
-  import ExUnit.CaptureLog
   import MealPlannerApi.FactoryHelpers
 
   alias MealPlannerApi.Auth.Guardian
@@ -123,24 +122,19 @@ defmodule MealPlannerApiWeb.AIChannelTest do
     # tampered to point at a DIFFERENT account (Account A) the socket
     # has no active membership in.
     #
-    # Test-level note (apply-progress.md has the full writeup): a full
-    # end-to-end assertion on the `ai_response_started` broadcast is
-    # blocked by two SEPARATE, pre-existing bugs unrelated to tenancy —
-    # `AI.stream_response/4`'s `%MealPlannerApi.Accounts.User{}` guard
-    # can never match the real `Persistence.Accounts.User` struct every
-    # caller passes, and (once past that) `MockClient`/`GeminiClient`'s
-    # `get_in(opts, [:user, :account_id])` cannot traverse an Ecto
-    # struct (no `Access` behaviour). Both crash unconditionally,
-    # independent of whether the user is correctly scoped, so
-    # `AIChannel`'s "new_message" happy path never actually completes
-    # today, tenancy bug or not. Fixing either is out of this task's
-    # authorized scope (only the tenancy blocker + the weak-assertion
-    # warning), so this test observes the ONE thing in scope — which
-    # `account_id` `handle_in/3` actually threads into
-    # `AI.stream_response/4` — via the crash report `Logger` emits for
-    # the (still pre-existing, unrelated) `FunctionClauseError`: before
-    # the fix the crashing call carries the tampered Account A id, after
-    # the fix it carries the real, membership-resolved Account B id.
+    # Test-level note: this test originally could only assert the
+    # tenancy fix indirectly (via a crash-log capture) because two
+    # SEPARATE, pre-existing bugs unrelated to tenancy made the
+    # "new_message" happy path crash unconditionally — see
+    # `fix/ai-chat-stream-crash` — `AI.stream_response/4`'s
+    # `%MealPlannerApi.Accounts.User{}` guard could never match the real
+    # `Persistence.Accounts.User` struct every caller passes, and (once
+    # past that) `MockClient`/`GeminiClient`'s
+    # `get_in(opts, [:user, :account_id])` could not traverse an Ecto
+    # struct (no `Access` behaviour). Now that both are fixed, this test
+    # asserts the real, positive outcome directly: the
+    # `ai_response_started` broadcast carries the DB-resolved Account B
+    # id, never the tampered Account A claim.
     test "new_message threads current_membership.account_id into AI.stream_response/4, not a tampered account_id claim" do
       user =
         user_with_memberships(%{email: "ai_tamper@example.com"}, [
@@ -164,16 +158,11 @@ defmodule MealPlannerApiWeb.AIChannelTest do
 
       assert socket.assigns.current_membership.account_id == membership_b.account_id
 
-      Process.flag(:trap_exit, true)
+      push(socket, "new_message", %{"message" => "hola"})
 
-      log =
-        capture_log(fn ->
-          push(socket, "new_message", %{"message" => "hola"})
-          assert_receive {:EXIT, _pid, _reason}, 1_000
-        end)
+      account_id_b = membership_b.account_id
 
-      assert log =~ membership_b.account_id
-      refute log =~ membership_a.account_id
+      assert_broadcast("ai_response_started", %{account_id: ^account_id_b})
     end
   end
 end
