@@ -58,6 +58,22 @@ defmodule MealPlannerApi.Services.PlanningServiceTest do
       assert macro_bounds["carbs_g"]["min"] == 225.0
       assert macro_bounds["fat_g"]["max"] == 77.78
     end
+
+    test "builds macro bounds with a calories constraint" do
+      days = ["monday"]
+      candidates = %{"breakfast" => [], "lunch" => [], "dinner" => []}
+      user = %{}
+
+      payload = PlanningService.build_optimization_payload(days, candidates, user)
+
+      macro_bounds = payload["constraints"]["macro_bounds"]
+      calories_bounds = macro_bounds["calories"]
+
+      assert is_map(calories_bounds)
+      assert is_float(calories_bounds["min"])
+      assert is_float(calories_bounds["max"])
+      assert calories_bounds["min"] < calories_bounds["max"]
+    end
   end
 
   describe "build_candidates/3" do

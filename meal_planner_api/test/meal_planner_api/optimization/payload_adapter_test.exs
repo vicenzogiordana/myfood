@@ -154,6 +154,7 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
       candidate_1 = Enum.find(candidates, fn c -> c[:recipe_id] == "1" end)
       assert candidate_1[:estimated_cost_cents] == 1250
       assert candidate_1[:protein_g_per_serving] == 25
+      assert candidate_1[:calories_per_serving] == 450
     end
 
     test "handles missing recipe data with defaults" do
@@ -172,6 +173,48 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
       assert candidate[:estimated_cost_cents] == 0
       # default
       assert candidate[:protein_g_per_serving] == 25
+      # default
+      assert candidate[:calories_per_serving] == 450
+    end
+
+    test "computes calories macro bounds from max_calories constraint with buffer" do
+      slots = [
+        %{
+          date: "2026-06-03",
+          slot: :lunch,
+          available_recipe_ids: ["1"],
+          constraints: %{max_calories: 800}
+        },
+        %{
+          date: "2026-06-04",
+          slot: :lunch,
+          available_recipe_ids: ["2"],
+          constraints: %{max_calories: 800}
+        }
+      ]
+
+      result = PayloadAdapter.build_optimizer_payload(slots, %{}, %{})
+
+      calories_bounds = result[:constraints][:macro_bounds][:calories]
+      assert calories_bounds[:min] == 1600 * 0.7
+      assert calories_bounds[:max] == 1600 * 1.3
+    end
+
+    test "defaults calories bounds when max_calories constraint missing" do
+      slots = [
+        %{
+          date: "2026-06-03",
+          slot: :lunch,
+          available_recipe_ids: ["1"],
+          constraints: %{}
+        }
+      ]
+
+      result = PayloadAdapter.build_optimizer_payload(slots, %{}, %{})
+
+      calories_bounds = result[:constraints][:macro_bounds][:calories]
+      assert calories_bounds[:min] == 800 * 0.7
+      assert calories_bounds[:max] == 800 * 1.3
     end
   end
 

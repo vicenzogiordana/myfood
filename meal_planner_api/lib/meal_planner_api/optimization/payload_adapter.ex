@@ -155,22 +155,25 @@ defmodule MealPlannerApi.Optimization.PayloadAdapter do
     # Sum per-slot constraints for weekly bounds
     totals =
       slots
-      |> Enum.reduce({0, 0, 0}, fn slot, {p, c, f} ->
+      |> Enum.reduce({0, 0, 0, 0}, fn slot, {p, c, f, cal} ->
         constraints = slot.constraints || %{}
         protein = constraints[:protein_g] || constraints["protein_g"] || 25
         # default: 3x protein
         carbs = protein * 3
         # default: 40% of protein
         fat = protein * 0.4
-        {p + protein, c + carbs, f + fat}
+        # default: 800 kcal/slot (matches GenerationServer's default slot constraint)
+        calories = constraints[:max_calories] || constraints["max_calories"] || 800
+        {p + protein, c + carbs, f + fat, cal + calories}
       end)
 
-    {protein_sum, carbs_sum, fat_sum} = totals
+    {protein_sum, carbs_sum, fat_sum, calories_sum} = totals
 
     %{
       protein_g: %{min: protein_sum * 0.7, max: protein_sum * 1.3},
       carbs_g: %{min: carbs_sum * 0.7, max: carbs_sum * 1.3},
-      fat_g: %{min: fat_sum * 0.7, max: fat_sum * 1.3}
+      fat_g: %{min: fat_sum * 0.7, max: fat_sum * 1.3},
+      calories: %{min: calories_sum * 0.7, max: calories_sum * 1.3}
     }
   end
 
@@ -195,7 +198,8 @@ defmodule MealPlannerApi.Optimization.PayloadAdapter do
             estimated_cost_cents: round(price * 100),
             protein_g_per_serving: macros[:protein_g] || 25,
             carbs_g_per_serving: macro_estimate(macros, :carbs_g),
-            fat_g_per_serving: macro_estimate(macros, :fat)
+            fat_g_per_serving: macro_estimate(macros, :fat),
+            calories_per_serving: macros[:calories] || 450
           }
         end)
 
