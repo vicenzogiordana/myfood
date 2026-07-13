@@ -13,7 +13,7 @@ defmodule MealPlannerApi.AI.GeminiClient do
   @impl true
   def stream_chat_completion(topic, prompt, opts) do
     request_id = Keyword.get(opts, :request_id) || "req_stream"
-    account_id = get_in(opts, [:user, :account_id])
+    account_id = opts |> Keyword.get(:user) |> then(&(&1 && &1.account_id))
 
     Task.start(fn ->
       Endpoint.broadcast(topic, "ai_response_started", %{
