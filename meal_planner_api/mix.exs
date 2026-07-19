@@ -53,7 +53,6 @@ defmodule MealPlannerApi.MixProject do
       {:phoenix, "~> 1.8.5"},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
-      {:hackney, "~> 1.18"},
       {:tesla, "~> 1.7"},
       {:jason, "~> 1.2"},
       {:guardian, "~> 2.4"},
