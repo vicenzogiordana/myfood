@@ -39,6 +39,18 @@ if config_env() != :test do
   config :meal_planner_api, :ai_client, ai_client_module
 end
 
+# Tenancy v2 cutover flag. Off by default; flip MEAL_PLANNER_TENANCY_V2=true as a
+# separate post-deploy operation to start minting access_v2 tokens. Tests manage
+# :tenancy_v2_only themselves, so the binding is skipped in the test environment.
+if config_env() != :test do
+  config :meal_planner_api,
+         :tenancy_v2_only,
+         System.get_env("MEAL_PLANNER_TENANCY_V2", "")
+         |> String.trim()
+         |> String.downcase()
+         |> Kernel.in(["true", "1", "yes", "on"])
+end
+
 config :meal_planner_api,
   gemini_model: System.get_env("GEMINI_MODEL", "gemini-2.5-flash-lite"),
   gemini_base_url: System.get_env("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"),
