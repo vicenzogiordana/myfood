@@ -1,2 +1,5 @@
 # Local Pi runtime state
 .atl/
+
+# macOS Finder metadata
+.DS_Store
