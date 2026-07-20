@@ -7,6 +7,8 @@
 > **TDD mode**: `strict_tdd: true`, `test_runner: "mix test"`, `max_changed_lines: 400` (chained PRs required).
 > **Delivery strategy** (cached at session preflight C1): **ask-always** — the orchestrator confirms chain strategy at `sdd-apply` time per task.
 
+> **sdd-verify reconciliation (2026-07-20)**: all 55/55 tasks confirmed IMPLEMENTED against code + `mix test` (512 passed, 0 failures). PR 1 (1.1–1.14) and PR 2 (2.1–2.16) checkboxes above were stale (shown incomplete despite being fully landed per `apply-progress.md`) and have been reconciled to `[x]` in this pass. See `apply-progress.md` for per-task commit SHAs and TDD evidence — not duplicated inline here. Two post-landing fixes (`chore/tenancy-debt-cleanup` PR #9 and the `tenancy_v2_only` → `MEAL_PLANNER_TENANCY_V2` env-var wiring commit) are not documented in `apply-progress.md`; see the verify report for details.
+
 ## Overview
 
 - **Total tasks**: 55 (per-PR subtotals: 14 / 16 / 25 — see "Task Count Summary")
@@ -50,7 +52,7 @@ Chain strategy: feature-branch-chain
 **Env var at deploy**: `MEAL_PLANNER_TENANCY_V2=false` (default — `access_v1` is the only minted type).
 **Forecast**: ~400 LOC (Medium risk; lands at the 400-line threshold).
 
-### Task 1.1 — Create `account_memberships` table
+### Task 1.1 — Create `account_memberships` table ✅
 
 - **Files**:
   - `meal_planner_api/priv/repo/migrations/2026XXXX_create_account_memberships.exs` (new)
@@ -58,13 +60,13 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: DDL per design §2.1 — `id :binary_id`, FKs to `accounts` / `users` (`on_delete: :delete_all` for both), `role`/`, `:string` with CHECK constraints, `:string` `status` with CHECK constraint, `invited_by_user_id` (`on_delete: :nilify_all`), `invite_token_hash`, `invite_expires_at`, `joined_at`, `timestamps`. Three lookup indexes (`user_id, account_id`), `(account_id, status)`, `(user_id, status)`) plus the partial unique index `account_memberships_active_account_user_unique_index` on `(account_id, user_id) WHERE status = 'active'`. Index names aligned with the existing migration history (`meal_planner_api/priv/repo/migrations/20260322090000_create_accounts_and_users.exs`).
 - **Acceptance criteria**:
-  - [ ] test added at `test/support/migration_shape_test.exs` asserting the table, the CHECK constraints, and the partial unique index exist (RED — migration not yet created)
-  - [ ] migration file written; `mix ecto.migrate` runs GREEN
-  - [ ] test asserts `INSERT … ON CONFLICT` of a second `:active` row for the same `(account, user)` raises `unique_violation`
+  - [x] test added at `test/support/migration_shape_test.exs` asserting the table, the CHECK constraints, and the partial unique index exist (RED — migration not yet created)
+  - [x] migration file written; `mix ecto.migrate` runs GREEN
+  - [x] test asserts `INSERT … ON CONFLICT` of a second `:active` row for the same `(account, user)` raises `unique_violation`
 - **Estimated lines**: +60 / -0
 - **Depends on**: none
 
-### Task 1.2 — Migrate `accounts.account_type` → `accounts.plan` + seed `:family_6` / `:trial`
+### Task 1.2 — Migrate `accounts.account_type` → `accounts.plan` + seed `:family_6` / `:trial` ✅
 
 - **Files**:
   - `meal_planner_api/priv/repo/migrations/2026XXXX_alter_accounts_to_plan_enum.exs` (new)
@@ -72,13 +74,13 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: `ALTER TABLE accounts DROP COLUMN account_type`, `ADD COLUMN plan :string NOT NULL DEFAULT 'individual'`, CHECK constraint `plan IN ('individual', 'family_4', 'family_6', 'trial')`. Data migration: any legacy `account_type: :group` rows → `plan: 'family_4'` (per design §2.2). Seed two `subscription_plans` rows (`name: 'family_6'`, `max_users: 6`, `max_planning_days: 30`, `revenuecat_entitlement_id: 'family_6'`; same for `'trial'`); existing `:individual` and `:family_4` rows preserved via `on_conflict: :nothing`. Reuse the existing `SubscriptionPlan` changeset.
 - **Acceptance criteria**:
-  - [ ] test asserts all four `subscription_plans.name` rows exist after migration (RED)
-  - [ ] migration runs; all four rows present; legacy `:group` data is rewritten to `:family_4`; CHECK constraint rejects unknown plan values
-  - [ ] `:group` value in `account_type` column is gone (column dropped)
+  - [x] test asserts all four `subscription_plans.name` rows exist after migration (RED)
+  - [x] migration runs; all four rows present; legacy `:group` data is rewritten to `:family_4`; CHECK constraint rejects unknown plan values
+  - [x] `:group` value in `account_type` column is gone (column dropped)
 - **Estimated lines**: +70 / -5
 - **Depends on**: 1.1
 
-### Task 1.3 — Make `users.account_id` nullable
+### Task 1.3 — Make `users.account_id` nullable ✅
 
 - **Files**:
   - `meal_planner_api/priv/repo/migrations/2026XXXX_make_user_account_id_nullable.exs` (new)
@@ -86,13 +88,13 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Per decision 5.1, relax `users.account_id` to nullable for the dual-write window. `modify :account_id, references(:accounts, type: :binary_id, on_delete: :delete_all), null: true`. Down migration restores `NOT NULL` after backfilling from the membership rows (backfill-from-membership SQL ships with this migration's down, not its up — the down only fires in catastrophic rollback).
 - **Acceptance criteria**:
-  - [ ] test inserts a `User` row with `account_id: nil` and asserts it persists (RED — column is NOT NULL today)
-  - [ ] migration applied; test GREEN
-  - [ ] down migration restores NOT NULL after a backfill SQL runs in the down step
+  - [x] test inserts a `User` row with `account_id: nil` and asserts it persists (RED — column is NOT NULL today)
+  - [x] migration applied; test GREEN
+  - [x] down migration restores NOT NULL after a backfill SQL runs in the down step
 - **Estimated lines**: +30 / -2
 - **Depends on**: 1.1
 
-### Task 1.4 — Backfill `account_memberships` from `users.account_id` + invariant function
+### Task 1.4 — Backfill `account_memberships` from `users.account_id` + invariant function ✅
 
 - **Files**:
   - `meal_planner_api/priv/repo/migrations/2026XXXX_add_account_memberships_backfill.exs` (new)
@@ -100,14 +102,14 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Design §2.4 batched `DO $$ … LOOP … END $$` backfill in 1,000-row batches with `pg_sleep(0.05)` and `FOR UPDATE SKIP LOCKED`. Maps each legacy `(user, account)` to one `:active` `:owner` membership with `joined_at = users.inserted_at`. Defines `CREATE OR REPLACE FUNCTION check_account_membership_invariants()` (design §2.5) and invokes it at the end of the migration's transaction. Raises if (a) any legacy `(user, account)` lacks an `:active` membership, (b) any Account has no `:owner`, (c) any Account has >1 `:owner`.
 - **Acceptance criteria**:
-  - [ ] test seeds 3 legacy `users` with `account_id`s, runs the migration in a transaction, then asserts `check_account_membership_invariants()` returns `void` and one `:active :owner` membership exists per user (RED — migration not yet written)
-  - [ ] migration runs; assertion GREEN
-  - [ ] test deliberately inserts a user with a missing membership and asserts the function raises (`backfill_invariant_failed`) (RED → GREEN)
-  - [ ] test runs `mix ecto.rollback` then `mix ecto.migrate` and re-asserts invariants
+  - [x] test seeds 3 legacy `users` with `account_id`s, runs the migration in a transaction, then asserts `check_account_membership_invariants()` returns `void` and one `:active :owner` membership exists per user (RED — migration not yet written)
+  - [x] migration runs; assertion GREEN
+  - [x] test deliberately inserts a user with a missing membership and asserts the function raises (`backfill_invariant_failed`) (RED → GREEN)
+  - [x] test runs `mix ecto.rollback` then `mix ecto.migrate` and re-asserts invariants
 - **Estimated lines**: +90 / -3
 - **Depends on**: 1.1, 1.2, 1.3
 
-### Task 1.5 — `AccountMembership` Ecto schema
+### Task 1.5 — `AccountMembership` Ecto schema ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/persistence/accounts/account_membership.ex` (new)
@@ -115,14 +117,14 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: `schema "account_memberships"` with the columns from migration 1.1. `Ecto.Enum` for `role` (`:owner | :member`) and `status` (`:active | :invited | :suspended`). `belongs_to :account`, `belongs_to :user`, `belongs_to :invited_by, ...:User, foreign_key: :invited_by_user_id`. Changeset: required `account_id`, `user_id`, `role`, `status`; validates enum membership; unique_constraint on `invite_token_hash` (allow_nil). **No tenancy logic** (Clean Architecture: schema is dumb data).
 - **Acceptance criteria**:
-  - [ ] test asserts valid changeset for `:active :owner` (RED — schema missing)
-  - [ ] test asserts invalid changeset for unknown role / status
-  - [ ] test asserts FK constraints surface as `Ecto.Changeset`'s errors when account_id / user_id is bogus
-  - [ ] schema file written; all tests GREEN
+  - [x] test asserts valid changeset for `:active :owner` (RED — schema missing)
+  - [x] test asserts invalid changeset for unknown role / status
+  - [x] test asserts FK constraints surface as `Ecto.Changeset`'s errors when account_id / user_id is bogus
+  - [x] schema file written; all tests GREEN
 - **Estimated lines**: +70 / -0
 - **Depends on**: 1.1
 
-### Task 1.6 — `Account` schema: drop `account_type`, add `plan`, swap `has_many`
+### Task 1.6 — `Account` schema: drop `account_type`, add `plan`, swap `has_many` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/persistence/accounts/account.ex` (modify)
@@ -130,14 +132,14 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Drop `:account_type` field; add `:plan` `Ecto.Enum` with `:individual | :family_4 | :family_6 | :trial`. Drop `has_many :users`; add `has_many :memberships, MealPlannerApi.Persistence.Accounts.AccountMembership`. Keep `belongs_to :subscription_plan` if present, otherwise leave FK as-is and resolve via `subscription_plans` (design §2.6 — Q10).
 - **Acceptance criteria**:
-  - [ ] test asserts `Account.changeset(%{}, %{plan: :family_4})` is valid (RED — `plan` field absent)
-  - [ ] test asserts `Account.changeset(%{}, %{plan: :unknown})` fails enum validation
-  - [ ] test asserts the new `has_many :memberships` preloads without error
-  - [ ] schema file updated; all tests GREEN; existing tests still pass (no `:account_type` references in app code — verified by `grep`)
+  - [x] test asserts `Account.changeset(%{}, %{plan: :family_4})` is valid (RED — `plan` field absent)
+  - [x] test asserts `Account.changeset(%{}, %{plan: :unknown})` fails enum validation
+  - [x] test asserts the new `has_many :memberships` preloads without error
+  - [x] schema file updated; all tests GREEN; existing tests still pass (no `:account_type` references in app code — verified by `grep`)
 - **Estimated lines**: +20 / -10
 - **Depends on**: 1.2, 1.5
 
-### Task 1.7 — `User` schema: nullable `account_id`, add `has_many :memberships`
+### Task 1.7 — `User` schema: nullable `account_id`, add `has_many :memberships` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/persistence/accounts/user.ex` (modify)
@@ -145,13 +147,13 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Make `:account_id` nullable in the schema (`field :account_id, :binary_id` — no longer required). Add `has_many :memberships, MealPlannerApi.Persistence.Accounts.AccountMembership`. Drop `:role` if it duplicates `AccountMembership.role` (per proposal §Stream A — keep `:role` for now; treat as legacy until 1.8 removes it).
 - **Acceptance criteria**:
-  - [ ] test asserts `User.changeset(%{}, %{email: "x@y", account_id: nil})` is valid (RED — schema requires account_id today)
-  - [ ] test asserts preloading `memberships` works
-  - [ ] schema file updated; tests GREEN; existing tests still pass
+  - [x] test asserts `User.changeset(%{}, %{email: "x@y", account_id: nil})` is valid (RED — schema requires account_id today)
+  - [x] test asserts preloading `memberships` works
+  - [x] schema file updated; tests GREEN; existing tests still pass
 - **Estimated lines**: +15 / -5
 - **Depends on**: 1.3, 1.5
 
-### Task 1.8 — Factory macro `create_user_with_memberships/2`
+### Task 1.8 — Factory macro `create_user_with_memberships/2` ✅
 
 - **Files**:
   - `meal_planner_api/test/support/factory.ex` (extend)
@@ -159,13 +161,13 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Per design §8.2 (Q6) — add `user_with_memberships/2` that accepts `[{account_attrs, role}, ...]` and inserts a User + N Accounts + N `:active :owner | :member` memberships. Returns `User` preloaded with `memberships: :account`. Existing macros preserved.
 - **Acceptance criteria**:
-  - [ ] test asserts `user_with_memberships(%{email: "x@y"}, [{ %{plan: :family_4, name: "F"}, :owner }, { %{plan: :individual, name: "P"}, :member }])` returns a User with 2 memberships (RED — macro not yet written)
-  - [ ] macro written; test GREEN
-  - [ ] test asserts preloading round-trips Account.plan enum values
+  - [x] test asserts `user_with_memberships(%{email: "x@y"}, [{ %{plan: :family_4, name: "F"}, :owner }, { %{plan: :individual, name: "P"}, :member }])` returns a User with 2 memberships (RED — macro not yet written)
+  - [x] macro written; test GREEN
+  - [x] test asserts preloading round-trips Account.plan enum values
 - **Estimated lines**: +40 / -0
 - **Depends on**: 1.5, 1.6
 
-### Task 1.9 — Factory macro `issue_access_v2_token/2`
+### Task 1.9 — Factory macro `issue_access_v2_token/2` ✅
 
 - **Files**:
   - `meal_planner_api/test/support/factory.ex` (extend)
@@ -173,12 +175,12 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Per design §8.2 — `issue_access_v2_token(user, membership)` calls `AccountsMembership.claims_for/2` (which does not exist yet — stub it inside the task as a private helper that builds the `access_v2` claim map by hand using `Account.plan`, then promote to `AccountsMembership.claims_for/2` in PR 2 task 2.1). Encodes via `Guardian.encode_and_sign/3` with `token_type: "access"`. Returns the JWT string.
 - **Acceptance criteria**:
-  - [ ] test decodes the token via `Guardian.decode_and_verify/2` and asserts `claims["typ"] == "access_v2"`, `claims["membership_id"] == membership.id`, `claims["account_id"] == account.id`, `claims["plan"] == "family_4"` (RED)
-  - [ ] helper written; test GREEN
+  - [x] test decodes the token via `Guardian.decode_and_verify/2` and asserts `claims["typ"] == "access_v2"`, `claims["membership_id"] == membership.id`, `claims["account_id"] == account.id`, `claims["plan"] == "family_4"` (RED)
+  - [x] helper written; test GREEN
 - **Estimated lines**: +25 / -0
 - **Depends on**: 1.5, 1.8
 
-### Task 1.10 — `LoadCurrentMembership` plug
+### Task 1.10 — `LoadCurrentMembership` plug ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api_web/plugs/load_current_membership.ex` (new)
@@ -187,14 +189,14 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Plug + sibling for the WebSocket. Reads `conn.assigns.current_user` and JWT claims from `Guardian.Plug.Pipeline`. If `claims["typ"] == "access_v2"` → load `AccountMembership` by `claims["membership_id"]`, preload `:account`. If missing/invalid → halt with `401 unauthorized`, body `%{error: "membership_id_required"}`. If `claims["typ"] == "access"` (legacy) → synthesize `%AccountMembership{id: nil, account_id: user.account_id, role: user.role, status: :active, joined_at: nil, __synthesized__: true}` after reading `Account.plan`. No row inserted. Exposes `LoadCurrentMembership.membership_from_socket/1` (Q8).
 - **Acceptance criteria**:
-  - [ ] test issues an `access_v2` token, hits a `:auth`-piped conn, asserts `conn.assigns.current_membership.id == membership.id` and `account_id` matches (RED)
-  - [ ] test issues a legacy `access` token (with `account_id` in claim), asserts the synthesized membership has `__synthesized__: true` and `account_id == user.account_id` (RED)
-  - [ ] test issues an `access_v2` token with no `membership_id`, asserts halt with `401 membership_id_required` (RED)
-  - [ ] plug written; all tests GREEN
+  - [x] test issues an `access_v2` token, hits a `:auth`-piped conn, asserts `conn.assigns.current_membership.id == membership.id` and `account_id` matches (RED)
+  - [x] test issues a legacy `access` token (with `account_id` in claim), asserts the synthesized membership has `__synthesized__: true` and `account_id == user.account_id` (RED)
+  - [x] test issues an `access_v2` token with no `membership_id`, asserts halt with `401 membership_id_required` (RED)
+  - [x] plug written; all tests GREEN
 - **Estimated lines**: +95 / -0
 - **Depends on**: 1.5, 1.9
 
-### Task 1.11 — `AuthPipeline` accepts both token types
+### Task 1.11 — `AuthPipeline` accepts both token types ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api_web/auth_pipeline.ex` (modify)
@@ -202,13 +204,13 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: `Guardian.Plug.VerifyHeader` currently uses `claims: %{"typ" => "access"}`. Change to `claims: %{"typ" => "access"}` AND register an additional VerifyHeader step that also accepts `"access_v2"`. Add `MealPlannerApiWeb.Plugs.LoadCurrentMembership` to the pipeline (after `LoadResource`). Reject unknown `typ` with `401 unauthorized, reason: "unsupported_token_type"`.
 - **Acceptance criteria**:
-  - [ ] test asserts an `access_v1` token verifies (RED → GREEN)
-  - [ ] test asserts an `access_v2` token verifies and `current_membership` is populated (RED → GREEN)
-  - [ ] test asserts an `access_v3` token halts with `unsupported_token_type` (RED → GREEN)
+  - [x] test asserts an `access_v1` token verifies (RED → GREEN)
+  - [x] test asserts an `access_v2` token verifies and `current_membership` is populated (RED → GREEN)
+  - [x] test asserts an `access_v3` token halts with `unsupported_token_type` (RED → GREEN)
 - **Estimated lines**: +25 / -5
 - **Depends on**: 1.10
 
-### Task 1.12 — `UserSocket.connect/3` populates `current_membership`
+### Task 1.12 — `UserSocket.connect/3` populates `current_membership` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api_web/user_socket.ex` (modify)
@@ -216,34 +218,34 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: `connect/3` reads `params["token"]` (existing), runs `Guardian.resource_from_token/1` for `current_user` (existing), then calls `LoadCurrentMembership.call_for_socket/2` (the sibling from task 1.10) to assign `current_membership`. On failure returns `:error`.
 - **Acceptance criteria**:
-  - [ ] test connects with an `access_v2` token and asserts `socket.assigns.current_membership.id == membership.id` (RED)
-  - [ ] test connects with an `access_v1` token and asserts `current_membership.__synthesized__ == true` (RED)
-  - [ ] change applied; tests GREEN
+  - [x] test connects with an `access_v2` token and asserts `socket.assigns.current_membership.id == membership.id` (RED)
+  - [x] test connects with an `access_v1` token and asserts `current_membership.__synthesized__ == true` (RED)
+  - [x] change applied; tests GREEN
 - **Estimated lines**: +20 / -2
 - **Depends on**: 1.10
 
-### Task 1.13 — Migration sanity test (dedicated checkpoint)
+### Task 1.13 — Migration sanity test (dedicated checkpoint) ✅
 
 - **Files**:
   - `meal_planner_api/test/support/migration_sanity_test.exs` (new)
 - **Type**: dedicated test (checkpoint)
 - **Description**: Per design §8.3 — runs `mix ecto.drop && mix ecto.create && mix ecto.migrate` from a clean DB; asserts all four `subscription_plans` rows exist; inserts fixture `users` + `accounts` matching the pre-Phase-A shape; runs `check_account_membership_invariants()` and asserts zero violations. Then `mix ecto.rollback` to the pre-Phase-A snapshot, re-runs `migrate`, re-asserts. (Implementation: pure test code using `Mix.Task.run/2`; no migration files of its own.)
 - **Acceptance criteria**:
-  - [ ] test passes GREEN on a fresh DB after PR 1's four migrations land
-  - [ ] test passes GREEN after a rollback + re-migrate cycle
+  - [x] test passes GREEN on a fresh DB after PR 1's four migrations land
+  - [x] test passes GREEN after a rollback + re-migrate cycle
 - **Estimated lines**: +55 / -0
 - **Depends on**: 1.1, 1.2, 1.3, 1.4
 
-### Task 1.14 — Dual-write token issuance test (dedicated checkpoint)
+### Task 1.14 — Dual-write token issuance test (dedicated checkpoint) ✅
 
 - **Files**:
   - `meal_planner_api/test/meal_planner_api/auth/guardian_test.exs` (new)
 - **Type**: dedicated test (checkpoint)
 - **Description**: Per design §8.4 — encode two JWTs via `Guardian` directly: one with `typ: "access"` (manual claim map) and one with `typ: "access_v2"` (also manual, including `membership_id`). Decode both and assert the claim sets match design §3.1 and §3.2 exactly. Also assert an `access_v2` token without `membership_id` triggers `Guardian.decode_and_verify` but is rejected by `LoadCurrentMembership` (this part delegates to task 1.10's test). This task proves the JWT shape independent of any controller — it is the bridge between spec §3 and the pipeline in 1.11.
 - **Acceptance criteria**:
-  - [ ] test asserts `access_v1` claim set per design §3.1
-  - [ ] test asserts `access_v2` claim set per design §3.2 (including `membership_id`, `plan`, `role`, `status`)
-  - [ ] test asserts an unknown `typ` is rejected by the pipeline (delegated to task 1.11)
+  - [x] test asserts `access_v1` claim set per design §3.1
+  - [x] test asserts `access_v2` claim set per design §3.2 (including `membership_id`, `plan`, `role`, `status`)
+  - [x] test asserts an unknown `typ` is rejected by the pipeline (delegated to task 1.11)
 - **Estimated lines**: +45 / -0
 - **Depends on**: 1.5, 1.10
 
@@ -258,7 +260,7 @@ Chain strategy: feature-branch-chain
 **Env var at deploy**: `MEAL_PLANNER_TENANCY_V2=false` (unchanged).
 **Forecast**: ~520 LOC (High risk; exceeds 400-line budget by ~120 LOC — the orchestrator may split into two sub-PRs at apply time if maintainers push back).
 
-### Task 2.1 — `AccountsMembership.claims_for/2`
+### Task 2.1 — `AccountsMembership.claims_for/2` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/accounts_membership.ex` (new, scaffold)
@@ -266,13 +268,13 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Public function `claims_for(user, membership) :: %{sub, typ: "access_v2", membership_id, account_id, role, plan, status, email, name, iat, exp}` per design §3.2. Preloads membership.account if needed. Used by the `issue_access_v2_token/2` factory helper (task 1.9) and by `auth_controller.ex` in PR 3.
 - **Acceptance criteria**:
-  - [ ] test asserts the returned map has every key from design §3.2 (RED — function not yet written)
-  - [ ] function written; test GREEN
-  - [ ] test asserts `plan` is the string form (`"family_4"`, not `:family_4`)
+  - [x] test asserts the returned map has every key from design §3.2 (RED — function not yet written)
+  - [x] function written; test GREEN
+  - [x] test asserts `plan` is the string form (`"family_4"`, not `:family_4`)
 - **Estimated lines**: +30 / -0
 - **Depends on**: 1.5, 1.6
 
-### Task 2.2 — `AccountsMembership.current_membership/2`
+### Task 2.2 — `AccountsMembership.current_membership/2` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/accounts_membership.ex` (extend)
@@ -280,14 +282,14 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: `current_membership(user, claims) :: AccountMembership.t() | nil`. If `claims["typ"] == "access_v2"` → load by `membership_id`. If `claims["typ"] == "access"` → synthesize from `user.account_id` + `user.role` + `Account.plan` (Q1 marker `__synthesized__: true`). Returns `nil` if `user` is `nil` or the membership cannot be resolved.
 - **Acceptance criteria**:
-  - [ ] test asserts a real membership is returned for `access_v2` claims (RED)
-  - [ ] test asserts a synthesized membership is returned for legacy `access` claims with `__synthesized__: true` (RED)
-  - [ ] test asserts `nil` for an `access_v2` claim with no matching membership
-  - [ ] function written; tests GREEN
+  - [x] test asserts a real membership is returned for `access_v2` claims (RED)
+  - [x] test asserts a synthesized membership is returned for legacy `access` claims with `__synthesized__: true` (RED)
+  - [x] test asserts `nil` for an `access_v2` claim with no matching membership
+  - [x] function written; tests GREEN
 - **Estimated lines**: +40 / -0
 - **Depends on**: 2.1
 
-### Task 2.3 — `AccountsMembership.invite/3` (owner invites email)
+### Task 2.3 — `AccountsMembership.invite/3` (owner invites email) ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/accounts_membership.ex` (extend)
@@ -295,15 +297,15 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: `invite(account, inviter_membership, email) :: {:ok, %{token: plaintext, expires_at, membership}} | {:error, atom}`. Wraps `InviteService.mint_token/0` (task 2.7) and `enforce_seat_cap/2` (task 2.6). Refuses if `inviter_membership.role != :owner` (`:not_owner`), seat at cap (`:seat_cap_reached`), or invitee already has an `:invited` or `:active` membership (`:already_invited`). Runs inside a `Repo.transaction/1` with `SELECT … FOR UPDATE` on the Account row. Errors normalized per spec `invite-and-accept`.
 - **Acceptance criteria**:
-  - [ ] test asserts successful insert with plaintext token returned once and hash stored (RED)
-  - [ ] test asserts `:not_owner` when a `:member` calls
-  - [ ] test asserts `:seat_cap_reached` when the Account has 4 `:active` memberships and plan is `:family_4`
-  - [ ] test asserts `:already_invited` when an `:invited` membership already exists for the email
-  - [ ] function written; tests GREEN
+  - [x] test asserts successful insert with plaintext token returned once and hash stored (RED)
+  - [x] test asserts `:not_owner` when a `:member` calls
+  - [x] test asserts `:seat_cap_reached` when the Account has 4 `:active` memberships and plan is `:family_4`
+  - [x] test asserts `:already_invited` when an `:invited` membership already exists for the email
+  - [x] function written; tests GREEN
 - **Estimated lines**: +70 / -0
 - **Depends on**: 2.1, 2.6, 2.7
 
-### Task 2.4 — `AccountsMembership.accept_invite/2`
+### Task 2.4 — `AccountsMembership.accept_invite/2` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/accounts_membership.ex` (extend)
@@ -311,15 +313,15 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: `accept_invite(plaintext_token, current_user_or_attrs) :: {:ok, %{user, account, membership, claims}} | {:error, atom}`. Looks up membership by `invite_token_hash`, refuses if expired (`:invite_token_expired`) or already used (`:invite_token_used`) or no longer `:invited`. If `:invited` → flips to `:active`, sets `joined_at`, nulls `invite_token_hash` + `invite_expires_at`. If `current_user_or_attrs` is `nil` → creates a new `User` from the membership's email and provided attrs. Calls `claims_for/2` (task 2.1) to return the new `access_v2` claim map.
 - **Acceptance criteria**:
-  - [ ] test asserts existing User acceptance flips status and invalidates the token (RED)
-  - [ ] test asserts new User acceptance creates the user and flips status (RED)
-  - [ ] test asserts replay (second accept with same plaintext) returns `:invite_token_used`
-  - [ ] test asserts expired token returns `:invite_token_expired`
-  - [ ] function written; tests GREEN
+  - [x] test asserts existing User acceptance flips status and invalidates the token (RED)
+  - [x] test asserts new User acceptance creates the user and flips status (RED)
+  - [x] test asserts replay (second accept with same plaintext) returns `:invite_token_used`
+  - [x] test asserts expired token returns `:invite_token_expired`
+  - [x] function written; tests GREEN
 - **Estimated lines**: +80 / -0
 - **Depends on**: 2.1, 2.7
 
-### Task 2.5 — `AccountsMembership.list_memberships/1` + `remove_member/2` + `leave/1`
+### Task 2.5 — `AccountsMembership.list_memberships/1` + `remove_member/2` + `leave/1` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/accounts_membership.ex` (extend)
@@ -330,15 +332,15 @@ Chain strategy: feature-branch-chain
   - `remove_member(account, target_user_id, actor_membership) :: :ok | {:error, :not_owner | :cannot_remove_owner | :membership_not_found}`. Refuses when `actor_membership.role != :owner`. Refuses when target is the owner. Hard-deletes (Q3).
   - `leave(account, actor_membership) :: :ok | {:error, :cannot_leave_owned_account | :not_a_member}`. Refuses when `actor_membership.role == :owner`.
 - **Acceptance criteria**:
-  - [ ] test asserts list returns rows ordered owner-first (RED)
-  - [ ] test asserts remove refuses for non-owner actor
-  - [ ] test asserts remove refuses for owner target
-  - [ ] test asserts leave refuses for owner
-  - [ ] functions written; tests GREEN
+  - [x] test asserts list returns rows ordered owner-first (RED)
+  - [x] test asserts remove refuses for non-owner actor
+  - [x] test asserts remove refuses for owner target
+  - [x] test asserts leave refuses for owner
+  - [x] functions written; tests GREEN
 - **Estimated lines**: +60 / -0
 - **Depends on**: 2.2
 
-### Task 2.6 — `AccountsMembership.seat_usage/1` + `enforce_seat_cap/2`
+### Task 2.6 — `AccountsMembership.seat_usage/1` + `enforce_seat_cap/2` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/accounts_membership.ex` (extend)
@@ -346,13 +348,13 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: `seat_usage(account) :: %{active: N, invited: M, capacity: C}` (counts `:active + :invited`, capacity from `Account.plan` per spec `account-membership.md` §"Seat cap"). `enforce_seat_cap(account, count_to_add \\ 1) :: :ok | {:error, :seat_cap_reached}`. Called inside the invite transaction (task 2.3) under `SELECT … FOR UPDATE`.
 - **Acceptance criteria**:
-  - [ ] test asserts capacity for `:family_4` is 4, `:family_6` is 6, `:individual` is 1, `:trial` is 6 (RED)
-  - [ ] test asserts `enforce_seat_cap/2` returns `:seat_cap_reached` when `active + invited + count_to_add > capacity`
-  - [ ] functions written; tests GREEN
+  - [x] test asserts capacity for `:family_4` is 4, `:family_6` is 6, `:individual` is 1, `:trial` is 6 (RED)
+  - [x] test asserts `enforce_seat_cap/2` returns `:seat_cap_reached` when `active + invited + count_to_add > capacity`
+  - [x] functions written; tests GREEN
 - **Estimated lines**: +40 / -0
 - **Depends on**: 1.6
 
-### Task 2.7 — `InviteService` (token mint/verify/consume)
+### Task 2.7 — `InviteService` (token mint/verify/consume) ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/services/invite_service.ex` (new)
@@ -360,15 +362,15 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Three pure functions. `mint_token/0 :: {plaintext, hash}` — 32 bytes from `:crypto.strong_rand_bytes/1`, URL-safe base64 (no padding) → ~43-char string, `hash = :crypto.hash(:sha256, plaintext) |> Base.encode16(case: :lower)`. `hash_token/1` for external callers. `verify_and_consume/2` — `(plaintext, account_id) :: {:ok, %AccountMembership{}} | {:error, :invite_token_used | :invite_token_expired | :invite_token_unknown}`. Single-use: inside the transaction, sets `invite_token_hash: nil`, `invite_expires_at: nil`. Expiry: 7 days from mint.
 - **Acceptance criteria**:
-  - [ ] test asserts mint produces a plaintext ≥ 40 chars and hash is 64 hex chars (RED)
-  - [ ] test asserts `verify_and_consume/2` flips the row and a second call returns `:invite_token_used`
-  - [ ] test asserts an expired token returns `:invite_token_expired`
-  - [ ] test asserts a wrong-plaintext lookup returns `:invite_token_unknown`
-  - [ ] service written; tests GREEN
+  - [x] test asserts mint produces a plaintext ≥ 40 chars and hash is 64 hex chars (RED)
+  - [x] test asserts `verify_and_consume/2` flips the row and a second call returns `:invite_token_used`
+  - [x] test asserts an expired token returns `:invite_token_expired`
+  - [x] test asserts a wrong-plaintext lookup returns `:invite_token_unknown`
+  - [x] service written; tests GREEN
 - **Estimated lines**: +55 / -0
 - **Depends on**: 1.5
 
-### Task 2.8 — `AccountsMembership.switch_account/2`
+### Task 2.8 — `AccountsMembership.switch_account/2` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/accounts_membership.ex` (extend)
@@ -376,14 +378,14 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: `switch_account(user, target_membership_id) :: {:ok, %{user, account, membership, claims}} | {:error, :not_your_membership | :membership_not_active | :membership_not_found}`. Loads membership by id; refuses if `membership.user_id != user.id`. Refuses if `status != :active`. Returns the claim map from `claims_for/2` (task 2.1).
 - **Acceptance criteria**:
-  - [ ] test asserts a multi-familia User can switch to a second `:active` membership (RED)
-  - [ ] test asserts switch to another User's membership returns `:not_your_membership`
-  - [ ] test asserts switch to a `:suspended` membership returns `:membership_not_active`
-  - [ ] function written; tests GREEN
+  - [x] test asserts a multi-familia User can switch to a second `:active` membership (RED)
+  - [x] test asserts switch to another User's membership returns `:not_your_membership`
+  - [x] test asserts switch to a `:suspended` membership returns `:membership_not_active`
+  - [x] function written; tests GREEN
 - **Estimated lines**: +35 / -0
 - **Depends on**: 2.1
 
-### Task 2.9 — Rewrite `Accounts.authenticate_with_password/1` to issue `access_v2` only when flag is on
+### Task 2.9 — Rewrite `Accounts.authenticate_with_password/1` to issue `access_v2` only when flag is on ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/accounts.ex` (modify)
@@ -391,13 +393,13 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: `authenticate_with_password/1` consults `Application.get_env(:meal_planner_api, :tenancy_v2_only, false)` (env: `MEAL_PLANNER_TENANCY_V2`). If off → keep the existing `access` claim path. If on → call `AccountsMembership.claims_for/2` (task 2.1) with the User's first `:active` membership (newly inserted by `register_with_password/1` in task 2.10) and mint `access_v2`. Behavior of the `accounts.ex` `claims_for/2` (legacy `access_v1` builder) is preserved unchanged for the off path.
 - **Acceptance criteria**:
-  - [ ] test asserts `MEAL_PLANNER_TENANCY_V2=false` mints `access_v1` (existing behavior, regression test)
-  - [ ] test asserts `MEAL_PLANNER_TENANCY_V2=true` mints `access_v2` with `membership_id` claim (RED)
-  - [ ] change applied; tests GREEN
+  - [x] test asserts `MEAL_PLANNER_TENANCY_V2=false` mints `access_v1` (existing behavior, regression test)
+  - [x] test asserts `MEAL_PLANNER_TENANCY_V2=true` mints `access_v2` with `membership_id` claim (RED)
+  - [x] change applied; tests GREEN
 - **Estimated lines**: +25 / -5
 - **Depends on**: 2.1
 
-### Task 2.10 — Atomic `register_with_password/1`: Account + owner membership in one transaction
+### Task 2.10 — Atomic `register_with_password/1`: Account + owner membership in one transaction ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/accounts.ex` (modify)
@@ -405,13 +407,13 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: `register_with_password/1` MUST create the Account, the User, and the `:owner :active` membership atomically. If any step fails the entire registration rolls back (no orphan Account, no orphan User). Migration of pre-Phase-A users is separate (handled in 1.4) — this task only governs the **forward** registration path.
 - **Acceptance criteria**:
-  - [ ] test asserts successful registration yields exactly one `:owner :active` membership (RED)
-  - [ ] test asserts a forced failure (e.g. duplicate email) rolls back the Account row
-  - [ ] change applied; tests GREEN
+  - [x] test asserts successful registration yields exactly one `:owner :active` membership (RED)
+  - [x] test asserts a forced failure (e.g. duplicate email) rolls back the Account row
+  - [x] change applied; tests GREEN
 - **Estimated lines**: +30 / -5
 - **Depends on**: 1.5, 1.6
 
-### Task 2.11 — Rewrite `Subscriptions.policy_for_account/1` to read `Account.plan`
+### Task 2.11 — Rewrite `Subscriptions.policy_for_account/1` to read `Account.plan` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/subscriptions.ex` (modify)
@@ -419,14 +421,14 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: `policy_for_account(account)` reads `account.plan` and resolves through the `subscription_plans` table by `name` (decision Q3 / 5.3). Replaces the legacy `account_type`-based lookup. Caps from the `subscription_plans` row, not hard-coded.
 - **Acceptance criteria**:
-  - [ ] test asserts `:family_6` policy has `max_users: 6` (RED — current code reads `:group` and returns 5)
-  - [ ] test asserts `:trial` policy has `max_users: 6`
-  - [ ] test asserts missing `subscription_plans` row for an unknown plan returns an error tuple
-  - [ ] change applied; tests GREEN
+  - [x] test asserts `:family_6` policy has `max_users: 6` (RED — current code reads `:group` and returns 5)
+  - [x] test asserts `:trial` policy has `max_users: 6`
+  - [x] test asserts missing `subscription_plans` row for an unknown plan returns an error tuple
+  - [x] change applied; tests GREEN
 - **Estimated lines**: +30 / -10
 - **Depends on**: 1.2, 1.6
 
-### Task 2.12 — `account_repo.ex`: filter by `membership.account_id` instead of `user.account_id`
+### Task 2.12 — `account_repo.ex`: filter by `membership.account_id` instead of `user.account_id` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/data/account_repo.ex` (modify)
@@ -434,13 +436,13 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: All queries that filter `users.account_id = X` switch to preloading `memberships` for `:active` rows and filtering `memberships.account_id = X` (joined or sub-select). Add `list_active_memberships_for_account/1` helper used by PR 3 controllers.
 - **Acceptance criteria**:
-  - [ ] test asserts a User with two memberships (one in `Account_A`, one in `Account_B`) does not appear when querying `Account_B`-only resources via `user.account_id` path (RED)
-  - [ ] change applied; test GREEN
-  - [ ] test asserts the new `list_active_memberships_for_account/1` returns the right shape
+  - [x] test asserts a User with two memberships (one in `Account_A`, one in `Account_B`) does not appear when querying `Account_B`-only resources via `user.account_id` path (RED)
+  - [x] change applied; test GREEN
+  - [x] test asserts the new `list_active_memberships_for_account/1` returns the right shape
 - **Estimated lines**: +40 / -10
 - **Depends on**: 1.5, 1.7
 
-### Task 2.13 — `planning_repo.ex`: filter by `membership.account_id`
+### Task 2.13 — `planning_repo.ex`: filter by `membership.account_id` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/data/planning_repo.ex` (modify)
@@ -448,12 +450,12 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Same swap as 2.12. Specifically: `schedule_meal/1`, `monthly_overview/2`, `get_planning_period/2`, and any other functions that filter by `account_id`. Add a property test (`StreamData`) covering multi-familia scenarios (proposal §"Risks").
 - **Acceptance criteria**:
-  - [ ] test asserts multi-familia User cannot read planning data of an Account they aren't an `:active` member of (RED)
-  - [ ] change applied; test GREEN
+  - [x] test asserts multi-familia User cannot read planning data of an Account they aren't an `:active` member of (RED)
+  - [x] change applied; test GREEN
 - **Estimated lines**: +35 / -10
 - **Depends on**: 2.12
 
-### Task 2.14 — `inventory_repo.ex`: filter by `membership.account_id`
+### Task 2.14 — `inventory_repo.ex`: filter by `membership.account_id` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/data/inventory_repo.ex` (modify)
@@ -461,12 +463,12 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Same swap as 2.12.
 - **Acceptance criteria**:
-  - [ ] test asserts cross-Account inventory read is filtered out (RED)
-  - [ ] change applied; test GREEN
+  - [x] test asserts cross-Account inventory read is filtered out (RED)
+  - [x] change applied; test GREEN
 - **Estimated lines**: +25 / -8
 - **Depends on**: 2.12
 
-### Task 2.15 — `shopping_repo.ex`: filter by `membership.account_id`
+### Task 2.15 — `shopping_repo.ex`: filter by `membership.account_id` ✅
 
 - **Files**:
   - `meal_planner_api/lib/meal_planner_api/data/shopping_repo.ex` (modify)
@@ -474,21 +476,21 @@ Chain strategy: feature-branch-chain
 - **Type**: test-first (red→green)
 - **Description**: Same swap as 2.12.
 - **Acceptance criteria**:
-  - [ ] test asserts cross-Account shopping list read is filtered out (RED)
-  - [ ] change applied; test GREEN
+  - [x] test asserts cross-Account shopping list read is filtered out (RED)
+  - [x] change applied; test GREEN
 - **Estimated lines**: +25 / -8
 - **Depends on**: 2.12
 
-### Task 2.16 — `AccountsMembership` integration test (cross-vista)
+### Task 2.16 — `AccountsMembership` integration test (cross-vista) ✅
 
 - **Files**:
   - `meal_planner_api/test/meal_planner_api/accounts_membership_integration_test.exs` (new)
 - **Type**: dedicated test (checkpoint)
 - **Description**: End-to-end (in-process, no HTTP): seed two Accounts, two Users, full membership graph; exercise invite → accept → list → switch → leave. Asserts the entire Phase A use case chain (minus controllers) succeeds and respects invariants.
 - **Acceptance criteria**:
-  - [ ] test exercises invite → accept (existing User) → list → remove → leave flow
-  - [ ] test exercises switch-account for a multi-familia User and asserts the claim map updates
-  - [ ] test asserts concurrent invites on a full `:family_4` Account never produce >4 `:active + :invited` rows (race test using `Task.async_stream`)
+  - [x] test exercises invite → accept (existing User) → list → remove → leave flow
+  - [x] test exercises switch-account for a multi-familia User and asserts the claim map updates
+  - [x] test asserts concurrent invites on a full `:family_4` Account never produce >4 `:active + :invited` rows (race test using `Task.async_stream`)
 - **Estimated lines**: +90 / -0
 - **Depends on**: 2.1–2.8
 
