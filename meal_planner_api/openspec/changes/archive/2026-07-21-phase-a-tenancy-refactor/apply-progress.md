@@ -2834,3 +2834,46 @@ both `:test` and `:prod` environments, independent of tenancy, due to
 Recommend a dedicated follow-up task/PR to fix both (and verify no
 further issues exist past bug 2) with its own RED→GREEN coverage —
 out of scope for this review fix pass.
+
+---
+
+## Post-landing backfill (recorded 2026-07-21)
+
+> Added during the SDD reconstruction/archive pass. These three PRs landed on
+> `main` *after* the PR-3c review-fix pass above but were never recorded here.
+> Documented now so the artifact trail matches `main` at archive time. Commit
+> SHAs verified against `git log`.
+
+### Follow-up 1 — AIChannel `new_message` finding resolved (PR #8)
+
+The "New out-of-scope finding" flagged directly above was fixed by
+**PR #8 `fix/ai-chat-stream-crash`** (merge `43a3357`), exactly the dedicated
+follow-up recommended there:
+
+- `51436d8` — `fix(ai): accept the real Persistence.Accounts.User in stream_response/4`
+  (bug 1: the `%User{}` guard now matches the real persistence struct, not the
+  never-constructed DTO).
+- `44fac0f` — `fix(ai): replace unsafe get_in on Ecto struct with direct field access`
+  (bug 2: `get_in(opts, [:user, :account_id])` replaced with direct field access,
+  since Ecto structs do not implement `Access`).
+
+The AIChannel happy path is functional after this PR; the finding is closed.
+
+### Follow-up 2 — tenancy debt cleanup (PR #9)
+
+**PR #9 `chore/tenancy-debt-cleanup`** (merge `469e06c`) closed debt items this
+document had deferred:
+
+- `dd638fd` — `refactor(accounts): consolidate duplicated membership-lookup queries`.
+- `d7fd126` — `fix(accounts): require status: :active in access_v2 membership lookup`
+  (closes the gap where a non-active membership could resolve).
+- `b2ad23e` — `fix(seeds): create real AccountMembership rows for seed users`
+  (seeds.exs now produces valid tenancy state).
+
+### Follow-up 3 — cutover flag wired (PR #12)
+
+**PR #12 `feat/tenancy-v2-flag-wiring`** (`6df481c`) bound the
+`MEAL_PLANNER_TENANCY_V2` env var to `:tenancy_v2_only` in `config/runtime.exs`
+(trim/downcase, truthy set `true/1/yes/on`, fail-closed). Before this the flag
+was only settable in tests; this makes the documented post-deploy cutover
+(design §9.1) actually executable. See design.md §9.1 / §11 divergence 2.
