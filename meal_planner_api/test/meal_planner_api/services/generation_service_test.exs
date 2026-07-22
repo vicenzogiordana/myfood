@@ -170,4 +170,120 @@ defmodule MealPlannerApi.Services.GenerationServiceTest do
       assert hd(result).ingredient_name == "pollo"
     end
   end
+
+  describe "build_cart_lines/2" do
+    test "two scheduled meals with distinct recipes each produce one cart line per (meal, ingredient, unit)" do
+      meal_1 = %{id: "meal-1", recipe_id: "recipe-1", date: ~D[2026-07-01]}
+      meal_2 = %{id: "meal-2", recipe_id: "recipe-2", date: ~D[2026-07-02]}
+
+      by_recipe = %{
+        "recipe-1" => [%{ingredient_id: "flour", unit: :g, quantity_milli: 500_000}],
+        "recipe-2" => [%{ingredient_id: "milk", unit: :ml, quantity_milli: 250_000}]
+      }
+
+      result = GenerationService.build_cart_lines([meal_1, meal_2], by_recipe)
+
+      assert result == [
+               %{
+                 scheduled_meal_id: "meal-1",
+                 planned_date: ~D[2026-07-01],
+                 ingredient_id: "flour",
+                 unit: :g,
+                 quantity_milli: 500_000
+               },
+               %{
+                 scheduled_meal_id: "meal-2",
+                 planned_date: ~D[2026-07-02],
+                 ingredient_id: "milk",
+                 unit: :ml,
+                 quantity_milli: 250_000
+               }
+             ]
+    end
+
+    test "meal with nil recipe_id contributes nothing" do
+      meal = %{id: "meal-1", recipe_id: nil, date: ~D[2026-07-01]}
+      by_recipe = %{"recipe-1" => [%{ingredient_id: "flour", unit: :g, quantity_milli: 500_000}]}
+
+      assert GenerationService.build_cart_lines([meal], by_recipe) == []
+    end
+
+    test "recipe id absent from the by_recipe map contributes nothing" do
+      meal = %{id: "meal-1", recipe_id: "recipe-missing", date: ~D[2026-07-01]}
+      by_recipe = %{"recipe-1" => [%{ingredient_id: "flour", unit: :g, quantity_milli: 500_000}]}
+
+      assert GenerationService.build_cart_lines([meal], by_recipe) == []
+    end
+
+    test "two recipe_ingredients for the same ingredient in different units produce two separate lines" do
+      meal = %{id: "meal-1", recipe_id: "recipe-1", date: ~D[2026-07-01]}
+
+      by_recipe = %{
+        "recipe-1" => [
+          %{ingredient_id: "milk", unit: :ml, quantity_milli: 250_000},
+          %{ingredient_id: "milk", unit: :g, quantity_milli: 100_000}
+        ]
+      }
+
+      result = GenerationService.build_cart_lines([meal], by_recipe)
+
+      assert length(result) == 2
+      assert Enum.any?(result, &(&1.unit == :ml and &1.quantity_milli == 250_000))
+      assert Enum.any?(result, &(&1.unit == :g and &1.quantity_milli == 100_000))
+    end
+  end
+
+  describe "summarize_cart/1" do
+    test "two lines with the same (ingredient_id, unit) but different scheduled_meal_id are summed into one" do
+      lines = [
+        %{
+          scheduled_meal_id: "meal-1",
+          planned_date: ~D[2026-07-01],
+          ingredient_id: "flour",
+          unit: :g,
+          quantity_milli: 500_000
+        },
+        %{
+          scheduled_meal_id: "meal-2",
+          planned_date: ~D[2026-07-02],
+          ingredient_id: "flour",
+          unit: :g,
+          quantity_milli: 300_000
+        }
+      ]
+
+      assert GenerationService.summarize_cart(lines) == [
+               %{ingredient_id: "flour", unit: :g, quantity_milli: 800_000}
+             ]
+    end
+
+    test "same ingredient with different units yields two summary lines, no conversion" do
+      lines = [
+        %{
+          scheduled_meal_id: "meal-1",
+          planned_date: ~D[2026-07-01],
+          ingredient_id: "milk",
+          unit: :ml,
+          quantity_milli: 250_000
+        },
+        %{
+          scheduled_meal_id: "meal-2",
+          planned_date: ~D[2026-07-02],
+          ingredient_id: "milk",
+          unit: :g,
+          quantity_milli: 100_000
+        }
+      ]
+
+      result = GenerationService.summarize_cart(lines)
+
+      assert length(result) == 2
+      assert Enum.any?(result, &(&1.unit == :ml and &1.quantity_milli == 250_000))
+      assert Enum.any?(result, &(&1.unit == :g and &1.quantity_milli == 100_000))
+    end
+
+    test "empty list returns empty list" do
+      assert GenerationService.summarize_cart([]) == []
+    end
+  end
 end

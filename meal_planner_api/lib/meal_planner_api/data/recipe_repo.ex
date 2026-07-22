@@ -124,6 +124,28 @@ defmodule MealPlannerApi.Data.RecipeRepo do
   def add_recipe_ingredient(attrs),
     do: %RecipeIngredient{} |> RecipeIngredient.changeset(attrs) |> Repo.insert()
 
+  @doc """
+  Returns the recipe_ingredients for the given recipe ids grouped by recipe id.
+
+  Shape: `%{recipe_id => [%{ingredient_id, unit, quantity_milli}]}`. Recipe ids
+  with no `recipe_ingredients` are absent from the map (callers default via
+  `Map.get(map, id, [])`). Feeds `GenerationService.build_cart_lines/2`.
+  """
+  @spec list_ingredients_for_recipes([binary()]) :: %{binary() => [map()]}
+  def list_ingredients_for_recipes(recipe_ids) when is_list(recipe_ids) do
+    from(ri in RecipeIngredient,
+      where: ri.recipe_id in ^recipe_ids,
+      select: %{
+        recipe_id: ri.recipe_id,
+        ingredient_id: ri.ingredient_id,
+        unit: ri.unit,
+        quantity_milli: ri.quantity_milli
+      }
+    )
+    |> Repo.all()
+    |> Enum.group_by(& &1.recipe_id, &Map.delete(&1, :recipe_id))
+  end
+
   @spec delete_recipe_ingredient(pos_integer()) :: :ok
   def delete_recipe_ingredient(id) do
     Repo.delete!(Repo.get!(RecipeIngredient, id))

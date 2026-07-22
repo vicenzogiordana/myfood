@@ -190,6 +190,66 @@ defmodule MealPlannerApi.Services.GenerationService do
   end
 
   # -------------------------------------------------------------------------
+  # Shopping cart aggregation
+  # -------------------------------------------------------------------------
+
+  @doc """
+  Builds per-scheduled-meal cart lines from a confirmed proposal's scheduled
+  meals and their recipes' ingredients.
+
+  `by_recipe` is `%{recipe_id => [%{ingredient_id, unit, quantity_milli}]}`,
+  as returned by `Data.RecipeRepo.list_ingredients_for_recipes/1`.
+
+  A meal with a `nil` `recipe_id`, or whose `recipe_id` is absent from
+  `by_recipe` (no `recipe_ingredients`), contributes no lines.
+
+  No cross-meal summing — one line per `(scheduled_meal_id, ingredient_id,
+  unit)`. Pure function, no DB/Repo calls.
+  """
+  @spec build_cart_lines([map()], %{term() => [map()]}) :: [map()]
+  def build_cart_lines(scheduled_meals, by_recipe)
+      when is_list(scheduled_meals) and is_map(by_recipe) do
+    Enum.flat_map(scheduled_meals, fn meal ->
+      case meal.recipe_id do
+        nil ->
+          []
+
+        recipe_id ->
+          by_recipe
+          |> Map.get(recipe_id, [])
+          |> Enum.map(fn recipe_ingredient ->
+            %{
+              scheduled_meal_id: meal.id,
+              planned_date: meal.date,
+              ingredient_id: recipe_ingredient.ingredient_id,
+              unit: recipe_ingredient.unit,
+              quantity_milli: recipe_ingredient.quantity_milli
+            }
+          end)
+      end
+    end)
+  end
+
+  @doc """
+  Groups cart lines by `{ingredient_id, unit}` and sums `quantity_milli`.
+
+  Read-time dedup/summary — no unit conversion (same ingredient in different
+  units stays as separate summary lines). Pure function.
+  """
+  @spec summarize_cart([map()]) :: [map()]
+  def summarize_cart(cart_lines) when is_list(cart_lines) do
+    cart_lines
+    |> Enum.group_by(&{&1.ingredient_id, &1.unit})
+    |> Enum.map(fn {{ingredient_id, unit}, lines} ->
+      %{
+        ingredient_id: ingredient_id,
+        unit: unit,
+        quantity_milli: Enum.sum(Enum.map(lines, & &1.quantity_milli))
+      }
+    end)
+  end
+
+  # -------------------------------------------------------------------------
   # Private helpers
   # -------------------------------------------------------------------------
 
