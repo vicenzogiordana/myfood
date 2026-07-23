@@ -21,6 +21,7 @@ defmodule MealPlannerApi.Generation.Server do
   alias MealPlannerApi.Data.{
     PlanningRepo,
     RecipeRepo,
+    ShoppingRepo,
     UserPreferenceRepo
   }
 
@@ -52,8 +53,20 @@ defmodule MealPlannerApi.Generation.Server do
   # -------------------------------------------------------------------------
 
   @doc "Construye el registro `{:via, Registry, {Generations, key}}` para este account."
-  @spec via(pos_integer()) :: GenServer.name()
+  @spec via(pos_integer() | binary()) :: GenServer.name()
   def via(account_id) when is_integer(account_id) and account_id > 0 do
+    key = {:generation, account_id}
+    {:via, Registry, {MealPlannerApi.Generation.Generations, key}}
+  end
+
+  def via(account_id) when is_binary(account_id) and account_id != "" do
+    # Compatibility shim: Phase A — Tenancy Refactor migrated the
+    # `accounts.id` column from `:id` (integer) to `:binary_id` (UUID)
+    # without updating this guard. Production `PlanningChannel`
+    # passes `membership.account_id` (UUID) into `start_generation/4`,
+    # which on a cold start hits this `via/1` and would otherwise
+    # crash with `FunctionClauseError`. See planning-shopping-extraction
+    # design §2 + tasks.md @task 3.2.
     key = {:generation, account_id}
     {:via, Registry, {MealPlannerApi.Generation.Generations, key}}
   end
@@ -113,12 +126,18 @@ defmodule MealPlannerApi.Generation.Server do
   def init(opts) do
     account_id = Keyword.fetch!(opts, :account_id)
     user_id = Keyword.get(opts, :user_id)
+    # Optional pre-population for tests (channel-layer end-to-end coverage
+    # at @task 4.3 in `planning-shopping-extraction`). Production callers
+    # (`PlanningChannel.handle_in("generate_menu", ...)`) set this via
+    # the `:start_generation` cast flow; the test path registers the
+    # server directly with the test process as `channel_pid`.
+    initial_channel_pid = Keyword.get(opts, :channel_pid)
 
     {:ok,
      %{
        account_id: account_id,
        user_id: user_id,
-       channel_pid: nil,
+       channel_pid: initial_channel_pid,
        phase: :idle,
        current_run_id: nil,
        current_proposal_id: nil,
@@ -267,24 +286,60 @@ defmodule MealPlannerApi.Generation.Server do
   defp do_confirm(state, proposal_id) do
     with :ok <- verify_ownership(proposal_id, state.account_id),
          {:ok, proposal, run} <- fetch_proposal_with_run(proposal_id),
-         {:ok, _} <- PlanningRepo.update_proposal(proposal, %{status: :accepted}),
-         {:ok, scheduled} <- persist_scheduled_meals(proposal, state) do
+         :ok <- guard_not_already_confirmed(proposal),
+         {:ok, summary} <-
+           run_confirm_transaction(state, proposal, run) do
       PlanningRepo.update_generation_run(run, %{
         status: :completed,
         completed_at: DateTime.utc_now()
       })
 
-      broadcast(state, "proposal_confirmed", %{
-        proposal_id: proposal_id,
-        scheduled_meals_count: length(scheduled)
-      })
+      broadcast(state, "proposal_confirmed", summary)
 
       reset_state(state)
-      {:ok, %{scheduled_meals_count: length(scheduled)}}
+      {:ok, summary}
     else
       {:error, _} = error -> error
     end
   end
+
+  # Wraps the scheduled-meals + cart writes in a single DB transaction so
+  # either both persist or neither does. The proposal status update is the
+  # first write inside the transaction — if anything fails after that, the
+  # `:accepted` flip is also rolled back (planning-shopping-extraction
+  # design §4 / spec scenario "Cart persistence and scheduled-meal
+  # persistence are atomic").
+  defp run_confirm_transaction(state, proposal, _run) do
+    Repo.transaction(fn ->
+      with {:ok, _accepted} <-
+             PlanningRepo.update_proposal(proposal, %{status: :accepted}),
+           {:ok, scheduled} <- persist_scheduled_meals(proposal, state),
+           {:ok, cart_summary} <- persist_shopping_cart(scheduled, state) do
+        %{
+          proposal_id: proposal.id,
+          scheduled_meals_count: length(scheduled),
+          cart: cart_summary.cart,
+          shopping_items_count: cart_summary.lines_count,
+          checkout_session_id: cart_summary.checkout_session_id
+        }
+      else
+        {:error, _} = err -> Repo.rollback(err)
+      end
+    end)
+    |> case do
+      {:ok, summary} -> {:ok, summary}
+      {:error, {:error, _} = err} -> err
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Re-confirm idempotency guard (planning-shopping-extraction design §3 Decision 5).
+  # A proposal already in :accepted status must NOT trigger any write — no
+  # second `CheckoutSession` and no extra `ShoppingItem` rows. Concurrency:
+  # `update_proposal(:accepted)` in the next call serializes on the row,
+  # so a race between two confirms still terminates with at most one cart.
+  defp guard_not_already_confirmed(%{status: :accepted}), do: {:error, :already_confirmed}
+  defp guard_not_already_confirmed(_proposal), do: :ok
 
   defp handle_reject(state, proposal_id) do
     with :ok <- verify_ownership(proposal_id, state.account_id),
@@ -505,8 +560,25 @@ defmodule MealPlannerApi.Generation.Server do
   end
 
   defp broadcast(state, event, payload) do
-    if state.channel_pid && Process.alive?(state.channel_pid) do
-      Phoenix.Channel.broadcast!(state.channel_pid, event, payload)
+    # Compatibility fix (planning-shopping-extraction @task 4.3):
+    # `Phoenix.Channel.broadcast!/3` accepts a Socket struct only and
+    # calls `assert_joined!/1` on the first argument. The pre-existing
+    # call passed `state.channel_pid` (a pid), which crashes with
+    # `FunctionClauseError`. Switch to `Phoenix.Channel.Server.broadcast!/4`
+    # which takes `(pubsub_server, topic, event, payload)` and dispatches
+    # on topic directly — no Socket required, no need to track the
+    # channel pid at all.
+    with true <- state.account_id != nil,
+         :ok <-
+           Phoenix.Channel.Server.broadcast!(
+             MealPlannerApi.PubSub,
+             "planning:#{state.account_id}",
+             event,
+             payload
+           ) do
+      :ok
+    else
+      _ -> :ok
     end
   end
 
@@ -530,34 +602,104 @@ defmodule MealPlannerApi.Generation.Server do
     case fetch_proposal_with_run(proposal_id) do
       {:ok, _proposal, run} ->
         if run.account_id == account_id, do: :ok, else: {:error, :forbidden}
-
-      _ ->
-        {:error, :not_found}
     end
+  rescue
+    Ecto.NoResultsError -> {:error, :not_found}
   end
 
   defp persist_scheduled_meals(proposal, state) do
-    slots = get_in(proposal.proposal_json, ["slots"]) || []
+    slots = get_in(proposal.proposal_json, [:slots]) || []
+    slots = if slots == [], do: get_in(proposal.proposal_json, ["slots"]) || [], else: slots
 
-    results =
-      Enum.map(slots, fn slot ->
-        [date, slot_name] = String.split(slot["slot_key"], "_", parts: 2)
+    result =
+      Enum.reduce_while(slots, [], fn slot, acc ->
+        [date, slot_name] = split_slot_key(slot)
 
-        PlanningRepo.schedule_meal(%{
+        attrs = %{
           account_id: state.account_id,
           user_id: state.user_id,
           generation_run_id: proposal.generation_run_id,
           planning_proposal_id: proposal.id,
           date: Date.from_iso8601!(date),
           slot: String.to_existing_atom(slot_name),
-          recipe_id: parse_recipe_id(slot["recipe_id"]),
+          recipe_id: parse_recipe_id(Map.get(slot, :recipe_id) || Map.get(slot, "recipe_id")),
           is_cooked: false
-        })
-      end)
-      |> Enum.filter(&match?({:ok, _}, &1))
-      |> Enum.map(fn {:ok, meal} -> meal end)
+        }
 
-    {:ok, results}
+        case PlanningRepo.schedule_meal(attrs) do
+          {:ok, meal} -> {:cont, [meal | acc]}
+          {:error, _} = err -> {:halt, err}
+        end
+      end)
+
+    case result do
+      {:error, _} = err -> err
+      meals -> {:ok, Enum.reverse(meals)}
+    end
+  end
+
+  # `build_proposal_json/1` writes slots with atom keys (`slot_key:`,
+  # `recipe_id:`); legacy callers / tests may store string keys. Accept
+  # both shapes so the existing on-wire proposal format (atom-keyed from
+  # `build_proposal_json`) and the same shape expressed as a string map
+  # both flow through the confirm pipeline.
+  defp split_slot_key(%{slot_key: sk}) when is_binary(sk), do: String.split(sk, "_", parts: 2)
+  defp split_slot_key(%{"slot_key" => sk}) when is_binary(sk), do: String.split(sk, "_", parts: 2)
+
+  # Will fail loudly in `Date.from_iso8601!/1` / `String.to_existing_atom/1` rather than silently filter.
+  defp split_slot_key(_), do: [nil, nil]
+
+  # Builds and persists the shopping cart derived from the confirmed
+  # scheduled meals. Pure-Elixir aggregation inside the same `Repo.transaction`
+  # as `persist_scheduled_meals/2` (planning-shopping-extraction design §4).
+  #
+  # Returns `{:ok, %{cart, lines_count, checkout_session_id}}` so the
+  # caller can surface the deduped summary, the persisted row count, and the
+  # session id back to the client.
+  defp persist_shopping_cart(scheduled_meals, state) do
+    recipe_ids =
+      scheduled_meals
+      |> Enum.map(& &1.recipe_id)
+      |> Enum.reject(&is_nil/1)
+
+    by_recipe = RecipeRepo.list_ingredients_for_recipes(recipe_ids)
+
+    lines = GenerationService.build_cart_lines(scheduled_meals, by_recipe)
+
+    with {:ok, session} <-
+           ShoppingRepo.create_checkout_session(%{
+             account_id: state.account_id,
+             status: :draft,
+             checkout_type: :physical
+           }),
+         :ok <- insert_cart_items(lines, state.account_id, session.id) do
+      {:ok,
+       %{
+         cart: GenerationService.summarize_cart(lines),
+         lines_count: length(lines),
+         checkout_session_id: session.id
+       }}
+    end
+  end
+
+  defp insert_cart_items(lines, account_id, session_id) do
+    Enum.reduce_while(lines, :ok, fn line, :ok ->
+      attrs = %{
+        account_id: account_id,
+        scheduled_meal_id: line.scheduled_meal_id,
+        planned_date: line.planned_date,
+        ingredient_id: line.ingredient_id,
+        unit: line.unit,
+        quantity_milli: line.quantity_milli,
+        checkout_session_id: session_id,
+        status: :pending
+      }
+
+      case ShoppingRepo.create_shopping_item(attrs) do
+        {:ok, _} -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
   end
 
   defp reset_state(state) do
@@ -577,8 +719,8 @@ defmodule MealPlannerApi.Generation.Server do
 
   defp parse_recipe_id(id) when is_binary(id) do
     case Integer.parse(id) do
-      {int, _} -> int
-      :error -> nil
+      {int, ""} -> int
+      _ -> id
     end
   end
 
