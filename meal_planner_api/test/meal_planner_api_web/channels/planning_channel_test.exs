@@ -3,7 +3,10 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
 
   import MealPlannerApi.FactoryHelpers
 
+  alias MealPlannerApi.Data.{PlanningRepo, RecipeRepo, ShoppingRepo}
+  alias MealPlannerApi.Generation.Server
   alias MealPlannerApi.Persistence.Catalog
+  alias MealPlannerApi.Repo
   alias MealPlannerApiWeb.{PlanningChannel, UserSocket}
 
   import MealPlannerApiWeb.ChannelHelpers, only: [issue_identity_and_token: 2]
@@ -339,6 +342,206 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
       # Should get error due to invalid format
       assert_reply(ref, :error, %{reason: reason})
       assert reason in ["invalid_proposal_id", "not_found"]
+    end
+
+    # @task 4.3 — channel-layer end-to-end test: confirms that the cart
+    # fields (`shopping_items_count`, `checkout_session_id`, `cart`) flow
+    # through both the direct reply and the `proposal_confirmed`
+    # broadcast. This is the first test that exercises the registered
+    # `Generation.Server` path (not the `PlanningChatService` fallback).
+    test "confirm reply AND proposal_confirmed broadcast carry cart fields end-to-end", %{
+      account: account,
+      user: user,
+      token: token
+    } do
+      # Seed: a recipe with one ingredient, a proposal with one slot.
+      {:ok, recipe} =
+        Catalog.create_recipe(%{
+          account_id: account.id,
+          created_by_user_id: user.id,
+          name: "4-3 recipe",
+          source: :user_created,
+          servings: 2,
+          suitable_for_slots: [:lunch]
+        })
+
+      {:ok, flour} =
+        Catalog.create_ingredient(%{name: "4-3 flour", category: :granos})
+
+      {:ok, _ri} =
+        RecipeRepo.add_recipe_ingredient(%{
+          recipe_id: recipe.id,
+          ingredient_id: flour.id,
+          quantity_milli: 750_000,
+          unit: :g
+        })
+
+      {:ok, run} =
+        PlanningRepo.create_generation_run(%{
+          account_id: account.id,
+          user_id: user.id,
+          status: :processing,
+          started_at: DateTime.utc_now(),
+          input_context: %{}
+        })
+
+      {:ok, proposal} =
+        PlanningRepo.create_proposal(%{
+          generation_run_id: run.id,
+          status: :pending,
+          proposal_json: %{
+            slots: [
+              %{
+                slot_key: "2026-08-09_lunch",
+                date: "2026-08-09",
+                slot: "lunch",
+                recipe_id: recipe.id,
+                recipe_name: "4-3 recipe",
+                price_cents: 1000
+              }
+            ]
+          }
+        })
+
+      flour_id = flour.id
+
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+      {:ok, _reply, socket} =
+        subscribe_and_join(socket, PlanningChannel, "planning:#{account.id}")
+
+      # Register a Generation.Server under the account's registry with the
+      # joined channel's pid so `proposal_confirmed` is broadcast back
+      # onto `planning:<account_id>`, which the test process is subscribed
+      # to (via `subscribe_and_join`/`assert_broadcast`).
+      start_supervised!(
+        {Server, account_id: account.id, user_id: user.id, channel_pid: socket.channel_pid},
+        id: {:channel_server, account.id, :cart_payload_test}
+      )
+
+      ref =
+        push(socket, "confirm_proposal", %{
+          "proposal_id" => proposal.id
+        })
+
+      assert_reply(ref, :ok, %{
+        shopping_items_count: 1,
+        checkout_session_id: checkout_session_id,
+        cart: [%{ingredient_id: ingredient_id, unit: :g, quantity_milli: 750_000}]
+      })
+
+      assert is_binary(checkout_session_id)
+      assert ingredient_id == flour_id
+
+      assert_broadcast("proposal_confirmed", %{
+        shopping_items_count: 1,
+        checkout_session_id: broadcast_session_id,
+        cart: [%{ingredient_id: broadcast_ingredient_id, unit: :g, quantity_milli: 750_000}]
+      })
+
+      assert broadcast_session_id == checkout_session_id
+      assert broadcast_ingredient_id == flour_id
+    end
+
+    test "re-confirming an already-accepted proposal returns :already_confirmed and emits no proposal_confirmed",
+         %{
+           account: account,
+           user: user,
+           token: token
+         } do
+      {:ok, _recipe} =
+        Catalog.create_recipe(%{
+          account_id: account.id,
+          created_by_user_id: user.id,
+          name: "4-3 idemp",
+          source: :user_created,
+          servings: 2,
+          suitable_for_slots: [:lunch]
+        })
+
+      {:ok, run} =
+        PlanningRepo.create_generation_run(%{
+          account_id: account.id,
+          user_id: user.id,
+          status: :processing,
+          started_at: DateTime.utc_now(),
+          input_context: %{}
+        })
+
+      {:ok, proposal} =
+        PlanningRepo.create_proposal(%{
+          generation_run_id: run.id,
+          status: :accepted,
+          proposal_json: %{slots: []}
+        })
+
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+      {:ok, _reply, socket} =
+        subscribe_and_join(socket, PlanningChannel, "planning:#{account.id}")
+
+      start_supervised!(
+        {Server, account_id: account.id, user_id: user.id, channel_pid: socket.channel_pid},
+        id: {:channel_server, account.id, :already_confirmed_test}
+      )
+
+      ref =
+        push(socket, "confirm_proposal", %{
+          "proposal_id" => proposal.id
+        })
+
+      assert_reply(ref, :error, %{reason: "already_confirmed"})
+
+      # No `proposal_confirmed` broadcast should follow the rejection.
+      refute_receive %Phoenix.Socket.Broadcast{
+                       topic: "planning:" <> _,
+                       event: "proposal_confirmed"
+                     },
+                     100
+    end
+
+    # Regression for review blocker R4-001: a failed `schedule_meal/1`
+    # MUST roll back the proposal status flip and the cart writes.
+    test "failed scheduled_meal insert rolls back proposal status, meals, and cart",
+         %{account: account, user: user, token: token} do
+      missing_recipe_id = Ecto.UUID.generate()
+
+      {:ok, run} =
+        PlanningRepo.create_generation_run(%{
+          account_id: account.id,
+          user_id: user.id,
+          status: :processing,
+          started_at: DateTime.utc_now(),
+          input_context: %{}
+        })
+
+      {:ok, proposal} =
+        PlanningRepo.create_proposal(%{
+          generation_run_id: run.id,
+          status: :pending,
+          proposal_json: %{
+            slots: [%{slot_key: "2026-08-09_lunch", recipe_id: missing_recipe_id}]
+          }
+        })
+
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+      {:ok, _reply, socket} = subscribe_and_join(socket, PlanningChannel, "planning:#{account.id}")
+
+      start_supervised!(
+        {Server, account_id: account.id, user_id: user.id, channel_pid: socket.channel_pid},
+        id: {:channel_server, account.id, :rollback_test}
+      )
+
+      ref = push(socket, "confirm_proposal", %{"proposal_id" => proposal.id})
+
+      assert_reply(ref, :error, _payload)
+
+      reloaded = Repo.get!(MealPlannerApi.Persistence.Planning.PlanningProposal, proposal.id)
+      assert reloaded.status == :pending
+
+      assert PlanningRepo.list_scheduled_meals(account.id, ~D[2026-01-01], ~D[2026-12-31]) == []
+
+      assert ShoppingRepo.list_checkout_sessions(account.id) == []
     end
   end
 
