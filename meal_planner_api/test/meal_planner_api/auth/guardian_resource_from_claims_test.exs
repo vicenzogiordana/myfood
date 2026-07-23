@@ -231,7 +231,9 @@ defmodule MealPlannerApi.Auth.GuardianResourceFromClaimsTest do
         "name" => "Ghost"
       }
 
-      {:ok, token, _claims} = Guardian.encode_and_sign(%{id: claims_map["sub"]}, claims_map, token_type: "access")
+      {:ok, token, _claims} =
+        Guardian.encode_and_sign(%{id: claims_map["sub"]}, claims_map, token_type: "access")
+
       {:ok, decoded} = Guardian.decode_and_verify(token)
       assert {:error, :resource_not_found} = Guardian.resource_from_claims(decoded)
     end

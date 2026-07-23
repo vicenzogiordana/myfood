@@ -525,7 +525,9 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
         })
 
       {:ok, socket} = connect(UserSocket, %{"token" => token})
-      {:ok, _reply, socket} = subscribe_and_join(socket, PlanningChannel, "planning:#{account.id}")
+
+      {:ok, _reply, socket} =
+        subscribe_and_join(socket, PlanningChannel, "planning:#{account.id}")
 
       start_supervised!(
         {Server, account_id: account.id, user_id: user.id, channel_pid: socket.channel_pid},

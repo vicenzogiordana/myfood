@@ -33,13 +33,8 @@ defmodule MealPlannerApi.Services.RevenuecatService do
         end
 
       if account_id do
-        case handle_rc_event(event_type, account_id, event) do
-          {:ok, %{status: _} = result} ->
-            {:ok, Map.put(result, :event_id, event_id)}
-
-          other ->
-            other
-        end
+        {:ok, result} = handle_rc_event(event_type, account_id, event)
+        {:ok, Map.put(result, :event_id, event_id)}
       else
         {:ok, %{event_id: event_id, status: "ignored", reason: "unlinked_account"}}
       end

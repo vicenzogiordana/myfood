@@ -70,6 +70,7 @@ defmodule MealPlannerApi.AccountsMembershipIntegrationTest do
 
       # 3) List — owner + invitee
       rows = AccountsMembership.list_memberships(account)
+
       emails =
         rows
         |> Enum.map(& &1.user.email)

@@ -133,6 +133,7 @@ defmodule MealPlannerApi.MigrationShapeTest do
       columns = table_columns("accounts")
       assert "plan" in columns
       data_type = column_data_type("accounts", "plan")
+
       assert data_type in ["text", "character varying"],
              "expected plan to be text/varchar, got #{data_type}"
     end
@@ -156,7 +157,9 @@ defmodule MealPlannerApi.MigrationShapeTest do
 
   describe "subscription_plans seed (Q10)" do
     test "all four plan names are seeded" do
-      plan_names = Repo.all(from p in MealPlannerApi.Subscriptions.Plan, select: p.name) |> Enum.sort()
+      plan_names =
+        Repo.all(from(p in MealPlannerApi.Subscriptions.Plan, select: p.name)) |> Enum.sort()
+
       assert plan_names == ["family_4", "family_6", "individual", "trial"]
     end
 

@@ -82,6 +82,7 @@ defmodule MealPlannerApi.Data.InventoryRepoTest do
 
       assert length(list_a) == 2
       assert Enum.all?(list_a, &(&1.account_id == account_a.id))
+
       assert Enum.map(list_a, & &1.id) |> Enum.sort() ==
                Enum.sort([item_a1.id, item_a2.id])
 
@@ -174,8 +175,11 @@ defmodule MealPlannerApi.Data.InventoryRepoTest do
           last_mutation_at: DateTime.utc_now()
         })
 
-      found_a = InventoryRepo.find_inventory_item_by_ingredient(account_a.id, flour.id, :g, :planned)
-      found_b = InventoryRepo.find_inventory_item_by_ingredient(account_b.id, flour.id, :g, :planned)
+      found_a =
+        InventoryRepo.find_inventory_item_by_ingredient(account_a.id, flour.id, :g, :planned)
+
+      found_b =
+        InventoryRepo.find_inventory_item_by_ingredient(account_b.id, flour.id, :g, :planned)
 
       assert found_a.id == item_a.id
       assert found_a.account_id == account_a.id

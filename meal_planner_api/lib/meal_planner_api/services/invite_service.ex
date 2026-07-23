@@ -150,10 +150,11 @@ defmodule MealPlannerApi.Services.InviteService do
     now = DateTime.utc_now()
 
     query =
-      from m in AccountMembership,
+      from(m in AccountMembership,
         where: m.invite_token_hash == ^hash,
         where: m.account_id == ^expected_account_id,
         limit: 1
+      )
 
     case Repo.one(query) do
       nil ->

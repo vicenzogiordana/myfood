@@ -330,7 +330,7 @@ defmodule MealPlannerApi.Services.InventoryService do
   def rescue_plan(user, payload, _budget) do
     with {:ok, identity} <- Identity.ensure_persistent_identity(user),
          ingredient_ids <- normalize_rescue_ingredient_ids(payload),
-         false <- ingredient_ids == [] || ingredient_ids == nil,
+         false <- ingredient_ids == [],
          {:ok, recipe} <- pick_rescue_recipe(identity.account_id, ingredient_ids),
          {:ok, slot} <- first_available_slot(identity.account_id, Date.utc_today()),
          {:ok, scheduled} <-

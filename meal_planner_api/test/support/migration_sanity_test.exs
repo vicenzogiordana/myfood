@@ -119,45 +119,43 @@ defmodule MealPlannerApi.MigrationSanityTest do
 
       # Run the backfill loop manually. The NOT EXISTS guard makes it
       # idempotent (re-running it adds no duplicates).
-      Repo.query!(
-        """
-        DO $$
-        DECLARE
-          batch_size int := 1000;
-          inserted   int := 0;
-        BEGIN
-          LOOP
-            WITH batch AS (
-              SELECT u.id AS user_id, u.account_id, u.role, u.inserted_at
-              FROM users u
-              WHERE u.account_id IS NOT NULL
-                AND NOT EXISTS (
-                  SELECT 1 FROM account_memberships m
-                  WHERE m.user_id = u.id
-                    AND m.account_id = u.account_id
-                    AND m.status = 'active'
-                )
-              ORDER BY u.inserted_at
-              LIMIT batch_size
-              FOR UPDATE SKIP LOCKED
-            )
-            INSERT INTO account_memberships (
-              id, account_id, user_id, role, status,
-              invited_by_user_id, invite_token_hash,
-              invite_expires_at, joined_at,
-              inserted_at, updated_at
-            )
-            SELECT gen_random_uuid(), b.account_id, b.user_id,
-                   COALESCE(b.role, 'owner'), 'active', NULL, NULL, NULL,
-                   b.inserted_at, now(), now()
-            FROM batch b;
-            GET DIAGNOSTICS inserted = ROW_COUNT;
-            EXIT WHEN inserted = 0;
-            PERFORM pg_sleep(0.05);
-          END LOOP;
-        END $$;
-        """
-      )
+      Repo.query!("""
+      DO $$
+      DECLARE
+        batch_size int := 1000;
+        inserted   int := 0;
+      BEGIN
+        LOOP
+          WITH batch AS (
+            SELECT u.id AS user_id, u.account_id, u.role, u.inserted_at
+            FROM users u
+            WHERE u.account_id IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM account_memberships m
+                WHERE m.user_id = u.id
+                  AND m.account_id = u.account_id
+                  AND m.status = 'active'
+              )
+            ORDER BY u.inserted_at
+            LIMIT batch_size
+            FOR UPDATE SKIP LOCKED
+          )
+          INSERT INTO account_memberships (
+            id, account_id, user_id, role, status,
+            invited_by_user_id, invite_token_hash,
+            invite_expires_at, joined_at,
+            inserted_at, updated_at
+          )
+          SELECT gen_random_uuid(), b.account_id, b.user_id,
+                 COALESCE(b.role, 'owner'), 'active', NULL, NULL, NULL,
+                 b.inserted_at, now(), now()
+          FROM batch b;
+          GET DIAGNOSTICS inserted = ROW_COUNT;
+          EXIT WHEN inserted = 0;
+          PERFORM pg_sleep(0.05);
+        END LOOP;
+      END $$;
+      """)
 
       result = Repo.query!("SELECT check_account_membership_invariants()")
       assert result.command == :select
@@ -186,45 +184,43 @@ defmodule MealPlannerApi.MigrationSanityTest do
       assert active_member_count == 2
 
       # Idempotency: re-run the loop and confirm no duplicates.
-      Repo.query!(
-        """
-        DO $$
-        DECLARE
-          batch_size int := 1000;
-          inserted   int := 0;
-        BEGIN
-          LOOP
-            WITH batch AS (
-              SELECT u.id AS user_id, u.account_id, u.role, u.inserted_at
-              FROM users u
-              WHERE u.account_id IS NOT NULL
-                AND NOT EXISTS (
-                  SELECT 1 FROM account_memberships m
-                  WHERE m.user_id = u.id
-                    AND m.account_id = u.account_id
-                    AND m.status = 'active'
-                )
-              ORDER BY u.inserted_at
-              LIMIT batch_size
-              FOR UPDATE SKIP LOCKED
-            )
-            INSERT INTO account_memberships (
-              id, account_id, user_id, role, status,
-              invited_by_user_id, invite_token_hash,
-              invite_expires_at, joined_at,
-              inserted_at, updated_at
-            )
-            SELECT gen_random_uuid(), b.account_id, b.user_id,
-                   COALESCE(b.role, 'owner'), 'active', NULL, NULL, NULL,
-                   b.inserted_at, now(), now()
-            FROM batch b;
-            GET DIAGNOSTICS inserted = ROW_COUNT;
-            EXIT WHEN inserted = 0;
-            PERFORM pg_sleep(0.05);
-          END LOOP;
-        END $$;
-        """
-      )
+      Repo.query!("""
+      DO $$
+      DECLARE
+        batch_size int := 1000;
+        inserted   int := 0;
+      BEGIN
+        LOOP
+          WITH batch AS (
+            SELECT u.id AS user_id, u.account_id, u.role, u.inserted_at
+            FROM users u
+            WHERE u.account_id IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM account_memberships m
+                WHERE m.user_id = u.id
+                  AND m.account_id = u.account_id
+                  AND m.status = 'active'
+              )
+            ORDER BY u.inserted_at
+            LIMIT batch_size
+            FOR UPDATE SKIP LOCKED
+          )
+          INSERT INTO account_memberships (
+            id, account_id, user_id, role, status,
+            invited_by_user_id, invite_token_hash,
+            invite_expires_at, joined_at,
+            inserted_at, updated_at
+          )
+          SELECT gen_random_uuid(), b.account_id, b.user_id,
+                 COALESCE(b.role, 'owner'), 'active', NULL, NULL, NULL,
+                 b.inserted_at, now(), now()
+          FROM batch b;
+          GET DIAGNOSTICS inserted = ROW_COUNT;
+          EXIT WHEN inserted = 0;
+          PERFORM pg_sleep(0.05);
+        END LOOP;
+      END $$;
+      """)
 
       [[count_after_replay]] =
         Repo.query!(

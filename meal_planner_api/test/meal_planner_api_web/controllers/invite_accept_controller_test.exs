@@ -67,7 +67,9 @@ defmodule MealPlannerApiWeb.InviteAcceptControllerTest do
       assert body["user"]["email"] == "brand_new@example.com"
       assert body["membership"]["status"] == "active"
 
-      new_user = Repo.get_by(MealPlannerApi.Persistence.Accounts.User, email: "brand_new@example.com")
+      new_user =
+        Repo.get_by(MealPlannerApi.Persistence.Accounts.User, email: "brand_new@example.com")
+
       assert new_user.name == "Brand New"
       assert is_binary(new_user.password_hash)
     end

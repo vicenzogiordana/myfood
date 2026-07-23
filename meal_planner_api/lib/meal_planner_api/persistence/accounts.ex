@@ -30,7 +30,8 @@ defmodule MealPlannerApi.Persistence.Accounts do
 
   def get_account!(id), do: Repo.get!(Account, id)
 
-  def get_account_with_users!(id), do: Account |> Repo.get!(id) |> Repo.preload(memberships: :user)
+  def get_account_with_users!(id),
+    do: Account |> Repo.get!(id) |> Repo.preload(memberships: :user)
 
   def create_user(attrs), do: %User{} |> User.changeset(attrs) |> Repo.insert()
 

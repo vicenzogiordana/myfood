@@ -195,7 +195,8 @@ defmodule MealPlannerApi.AccountsRegistrationTest do
       email = "multi-rollback@example.com"
       name = "Multi Rollback"
 
-      {:ok, subscription_plan_id} = MealPlannerApi.Subscriptions.ensure_default_plan_id(:individual)
+      {:ok, subscription_plan_id} =
+        MealPlannerApi.Subscriptions.ensure_default_plan_id(:individual)
 
       account_attrs = %{
         name: name,
