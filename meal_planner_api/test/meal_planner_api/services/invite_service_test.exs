@@ -121,8 +121,11 @@ defmodule MealPlannerApi.Services.InviteServiceTest do
       {:ok, %{token: plaintext}} =
         InviteService.create_invite_row(owner_membership, "replay@example.com")
 
-      assert {:ok, _} = InviteService.verify_and_consume(plaintext, owner_membership.account_id, user)
-      assert {:error, :invite_token_used} = InviteService.verify_and_consume(plaintext, owner_membership.account_id, user)
+      assert {:ok, _} =
+               InviteService.verify_and_consume(plaintext, owner_membership.account_id, user)
+
+      assert {:error, :invite_token_used} =
+               InviteService.verify_and_consume(plaintext, owner_membership.account_id, user)
     end
 
     test "an expired token returns :invite_token_expired" do
@@ -141,6 +144,7 @@ defmodule MealPlannerApi.Services.InviteServiceTest do
         )
 
       [owner_membership] = owner.memberships
+
       {:ok, %{membership: invited, token: plaintext}} =
         InviteService.create_invite_row(owner_membership, "expired@example.com")
 
@@ -165,11 +169,16 @@ defmodule MealPlannerApi.Services.InviteServiceTest do
         )
 
       [owner_membership] = owner.memberships
+
       {:ok, %{token: _real_token}} =
         InviteService.create_invite_row(owner_membership, "unknown@example.com")
 
       assert {:error, :invite_token_unknown} =
-               InviteService.verify_and_consume("definitely-wrong-token", owner_membership.account_id, owner)
+               InviteService.verify_and_consume(
+                 "definitely-wrong-token",
+                 owner_membership.account_id,
+                 owner
+               )
     end
   end
 end

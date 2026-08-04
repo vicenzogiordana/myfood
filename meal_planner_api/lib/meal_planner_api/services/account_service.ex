@@ -186,7 +186,7 @@ defmodule MealPlannerApi.Services.AccountService do
       account_id: identity.account_id,
       plan: Map.get(identity, :plan, "individual"),
       account_type: Map.get(identity, :account_type, "individual"),
-      subscription_tier: identity.subscription_tier
+      subscription_tier: Map.get(identity, :subscription_tier, :free)
     }
   end
 

@@ -66,6 +66,7 @@ defmodule MealPlannerApi.Data.ShoppingRepoTest do
 
       assert length(list_a) == 2
       assert Enum.all?(list_a, &(&1.account_id == account_a.id))
+
       assert Enum.map(list_a, & &1.id) |> Enum.sort() ==
                Enum.sort([session_a.id, session_a2.id])
 

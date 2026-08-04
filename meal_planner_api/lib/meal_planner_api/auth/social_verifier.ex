@@ -148,8 +148,6 @@ defmodule MealPlannerApi.Auth.SocialVerifier do
     end
   end
 
-  defp validate_facebook_debug_token(_debug_data, _app_id), do: {:error, :invalid_social_token}
-
   defp validate_facebook_app_id(debug_data, app_id) do
     expected = normalize_optional_string(app_id)
     received = normalize_optional_string(Map.get(debug_data, "app_id"))

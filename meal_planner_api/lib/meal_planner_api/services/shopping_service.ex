@@ -50,6 +50,7 @@ defmodule MealPlannerApi.Services.ShoppingService do
 
         # Group items by ingredient_id, aggregating quantities and prices
         all_items = items ++ in_cart ++ archived
+
         grouped =
           Enum.group_by(all_items, & &1.ingredient_id)
           |> Enum.map(fn {_ingredient_id, grouped_items} ->
@@ -519,7 +520,7 @@ defmodule MealPlannerApi.Services.ShoppingService do
   defp parse_date(d, _default) when is_binary(d) do
     case Date.from_iso8601(d) do
       {:ok, date} -> date
-      :error -> nil
+      {:error, _} -> nil
     end
   end
 
@@ -528,18 +529,34 @@ defmodule MealPlannerApi.Services.ShoppingService do
   defp serialize_shopping_item(i) do
     # Handle Ecto.Association.NotLoaded case
     ingredient = i.ingredient
-    ingredient_map = cond do
-      is_nil(ingredient) -> nil
-      Map.has_key?(ingredient, :__struct__) and String.contains?(inspect(ingredient.__struct__), "NotLoaded") -> nil
-      true -> ingredient
-    end
+
+    ingredient_map =
+      cond do
+        is_nil(ingredient) ->
+          nil
+
+        Map.has_key?(ingredient, :__struct__) and
+            String.contains?(inspect(ingredient.__struct__), "NotLoaded") ->
+          nil
+
+        true ->
+          ingredient
+      end
 
     assigned_supermarket = i.assigned_supermarket
-    supermarket_map = cond do
-      is_nil(assigned_supermarket) -> nil
-      Map.has_key?(assigned_supermarket, :__struct__) and String.contains?(inspect(assigned_supermarket.__struct__), "NotLoaded") -> nil
-      true -> assigned_supermarket
-    end
+
+    supermarket_map =
+      cond do
+        is_nil(assigned_supermarket) ->
+          nil
+
+        Map.has_key?(assigned_supermarket, :__struct__) and
+            String.contains?(inspect(assigned_supermarket.__struct__), "NotLoaded") ->
+          nil
+
+        true ->
+          assigned_supermarket
+      end
 
     category =
       case ingredient_map do

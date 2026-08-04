@@ -117,7 +117,7 @@ defmodule MealPlannerApiWeb.ShoppingController do
   defp parse_date_param(d) when is_binary(d) do
     case Date.from_iso8601(d) do
       {:ok, date} -> date
-      :error -> Date.utc_today()
+      {:error, _} -> Date.utc_today()
     end
   end
 

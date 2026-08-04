@@ -508,6 +508,4 @@ defmodule MealPlannerApi.Services.PlanningService do
       _ -> nil
     end
   end
-
-  defp parse_slot_service(_), do: nil
 end

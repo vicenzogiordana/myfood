@@ -221,9 +221,9 @@ defmodule MealPlannerApiWeb.AuthController do
          %AccountMembership{} = membership
        ) do
     with resolved_tier <- RevenuecatService.resolve_tier(account.id, requested_tier),
-         user <- Map.put(user, :subscription_tier, resolved_tier),
          account <- Map.put(account, :subscription_tier, resolved_tier),
          claims <- AccountsMembership.claims_for(user, membership),
+         user <- Map.put(user, :subscription_tier, resolved_tier),
          {:ok, access_token, refresh_token} <- mint_token_pair(user, claims) do
       render_auth_json(conn, user, account, resolved_tier, access_token, refresh_token)
     end

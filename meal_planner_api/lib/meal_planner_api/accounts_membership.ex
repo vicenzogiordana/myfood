@@ -386,8 +386,6 @@ defmodule MealPlannerApi.AccountsMembership do
     end
   end
 
-  defp cast_uuid(_), do: {:error, :membership_not_found}
-
   defp accept_invite_with_lookup(plaintext, resolve_user) when is_binary(plaintext) do
     hash = InviteService.hash_token(plaintext)
 

@@ -128,7 +128,7 @@ defmodule MealPlannerApi.Services.PlanningChatService do
               d when is_binary(d) ->
                 case Date.from_iso8601(d) do
                   {:ok, parsed} -> parsed
-                  :error -> Date.utc_today()
+                  {:error, _} -> Date.utc_today()
                 end
 
               %Date{} = d ->
