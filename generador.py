@@ -3,15 +3,20 @@ from google.genai import types
 import psycopg2
 import uuid
 import json
+import os
 import time
 
 # =====================================================================
-# 1. CONFIGURACIÓN (¡Poné tu contraseña real de Supabase acá!)
+# 1. CONFIGURACIÓN
 # =====================================================================
-API_KEY = "AIzaSyC7s6MbypUeKaKW0z3CC5olMOZwFSULKZs" 
-# Ejemplo de cómo debe verse: "postgresql://postgres:MiContraSecreta123@db.jwikygmivcov...supabase.co:5432/postgres"
-# DB_URL = "postgresql://postgres:xEl3eTXfzx7bJf3H@db.jwikygmivcovsrrdbvwn.supabase.co:5432/postgres"
-DB_URL = "postgresql://postgres.jwikygmivcovsrrdbvwn:xEl3eTXfzx7bJf3H@aws-1-sa-east-1.pooler.supabase.com:5432/postgres?sslmode=require"
+# Credentials are read from environment variables — never hardcode secrets.
+API_KEY = os.environ.get("GEMINI_API_KEY")
+DB_URL = os.environ.get("DATABASE_URL")
+
+if not API_KEY:
+    raise RuntimeError("Environment variable GEMINI_API_KEY is not set")
+if not DB_URL:
+    raise RuntimeError("Environment variable DATABASE_URL is not set")
 
 # Inicializamos el nuevo cliente de Gemini
 client = genai.Client(api_key=API_KEY)
