@@ -73,14 +73,14 @@ defmodule MealPlannerApi.Integrations.GoScraperClient do
     query = String.downcase(ingredient_name)
     url = "#{@base_url}/?q=#{URI.encode_www_form(query)}"
 
-    case Tesla.get(url, receive_timeout: @timeout) do
+    case Req.get(url, receive_timeout: @timeout, retry: false) do
       {:ok, %{status: 200, body: body}} ->
         parse_response(body)
 
       {:ok, %{status: status}} when status >= 400 ->
         {:error, :unreachable}
 
-      {:error, :timeout} ->
+      {:error, %Req.TransportError{reason: :timeout}} ->
         {:error, :timeout}
 
       {:error, _} ->
