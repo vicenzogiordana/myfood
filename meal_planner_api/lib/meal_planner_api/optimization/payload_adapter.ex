@@ -24,12 +24,12 @@ defmodule MealPlannerApi.Optimization.PayloadAdapter do
       iex> recipe_prices = %{"1" => 12.50}
       iex> recipe_macros = %{"1" => %{protein_g: 25, calories: 450, carbs_g: 30}}
       iex> PayloadAdapter.build_optimizer_payload(slots, recipe_prices, recipe_macros)
-      %{
-        days: ["2026-06-03"],
-        slots: ["lunch"],
-        constraints: %{weekly_budget_cents: 5000, macro_bounds: %{...}},
-        candidates_by_slot: %{"lunch" => [%{recipe_id: "1", estimated_cost_cents: 1250, ...}]}
-      }
+       %{
+         "days" => ["2026-06-03"],
+         "slots" => ["lunch"],
+         "constraints" => %{"weekly_budget_cents" => 5000, "macro_bounds" => %{...}},
+         "candidates_by_slot" => %{"lunch" => [%{"recipe_id" => "1", "estimated_cost_cents" => 1250, ...}]}
+       }
   """
   @spec build_optimizer_payload(
           slots :: [
@@ -59,13 +59,13 @@ defmodule MealPlannerApi.Optimization.PayloadAdapter do
     candidates_by_slot = build_candidates_by_slot(slots, recipe_prices, recipe_macros)
 
     %{
-      days: days,
-      slots: slot_types,
-      constraints: %{
-        weekly_budget_cents: weekly_budget,
-        macro_bounds: macro_bounds
+      "days" => days,
+      "slots" => slot_types,
+      "constraints" => %{
+        "weekly_budget_cents" => weekly_budget,
+        "macro_bounds" => stringify_keys(macro_bounds)
       },
-      candidates_by_slot: candidates_by_slot
+      "candidates_by_slot" => stringify_keys(candidates_by_slot)
     }
   end
 
@@ -74,14 +74,14 @@ defmodule MealPlannerApi.Optimization.PayloadAdapter do
 
   ## Examples
 
-      iex> optimizer_result = {:ok, %{meals: [%{day: "2026-06-03", slot: "lunch", recipe_id: "1"}]}}
+       iex> optimizer_result = {:ok, %{"meals" => [%{"day" => "2026-06-03", "slot" => "lunch", "recipe_id" => "1"}]}}
       iex> recipe_data = %{"1" => %{name: "Pollo", price_cents: 1250, protein_g: 25, calories: 450, carbs_g: 30}}
       iex> PayloadAdapter.translate_response(optimizer_result, recipe_data)
       [%{date: "2026-06-03", slot: "lunch", recipe_id: "1", recipe_name: "Pollo", price_cents: 1250, macros: %{...}}]
   """
   @spec translate_response(
           optimizer_result ::
-            {:ok, %{meals: [%{day: String.t(), slot: String.t(), recipe_id: String.t()}]}}
+            {:ok, %{required(String.t()) => [map()]}}
             | {:error, term()},
           recipe_data :: %{
             String.t() => %{
@@ -105,9 +105,9 @@ defmodule MealPlannerApi.Optimization.PayloadAdapter do
              }
            ]}
           | {:error, term()}
-  def translate_response({:ok, %{meals: meals}}, recipe_data) do
+  def translate_response({:ok, %{"meals" => meals}}, recipe_data) do
     translated =
-      Enum.map(meals, fn %{day: day, slot: slot, recipe_id: recipe_id} ->
+      Enum.map(meals, fn %{"day" => day, "slot" => slot, "recipe_id" => recipe_id} ->
         recipe = Map.get(recipe_data, recipe_id, %{})
 
         %{
@@ -134,6 +134,13 @@ defmodule MealPlannerApi.Optimization.PayloadAdapter do
   # -------------------------------------------------------------------------
   # Private helpers
   # -------------------------------------------------------------------------
+
+  defp stringify_keys(value) when is_map(value) do
+    Map.new(value, fn {key, nested_value} -> {to_string(key), stringify_keys(nested_value)} end)
+  end
+
+  defp stringify_keys(value) when is_list(value), do: Enum.map(value, &stringify_keys/1)
+  defp stringify_keys(value), do: value
 
   defp compute_weekly_budget(slots) do
     slots

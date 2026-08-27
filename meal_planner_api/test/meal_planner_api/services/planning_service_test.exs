@@ -12,7 +12,17 @@ defmodule MealPlannerApi.Services.PlanningServiceTest do
 
   describe "run_optimizer/4" do
     test "returns empty meals for empty days list" do
-      assert {:ok, %{meals: []}} = PlanningService.run_optimizer(OptimizerPort, [], %{}, %{})
+      assert {:ok, %{"meals" => []}} = PlanningService.run_optimizer(OptimizerPort, [], %{}, %{})
+    end
+
+    test "uses the injected optimizer client" do
+      assert {:ok, %{"meals" => [%{"recipe_id" => "injected"}]}} =
+               PlanningService.run_optimizer(
+                 MealPlannerApi.TestSupport.InjectedOptimizer,
+                 ["monday"],
+                 %{"breakfast" => [], "lunch" => [], "dinner" => []},
+                 %{}
+               )
     end
 
     test "builds optimization payload correctly" do

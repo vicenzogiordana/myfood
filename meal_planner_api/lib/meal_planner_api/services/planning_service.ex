@@ -50,10 +50,10 @@ defmodule MealPlannerApi.Services.PlanningService do
          true <- requested_days_valid?(params, max_days),
          candidates_by_slot <- build_candidates(user, identity),
          {:ok, result} <- run_optimizer(optimizer, selected_days, candidates_by_slot, user) do
-      day_plans = build_day_plans(result.meals, selected_days)
+      day_plans = build_day_plans(result["meals"], selected_days)
 
       estimated_cost =
-        result.meals
+        result["meals"]
         |> Enum.reject(&is_nil/1)
         |> Enum.reduce(0, fn meal, acc -> acc + (meal["estimated_cost_cents"] || 0) end)
 
@@ -72,16 +72,13 @@ defmodule MealPlannerApi.Services.PlanningService do
   end
 
   @spec run_optimizer(module(), [String.t()], map(), planning_user()) ::
-          {:ok, %{meals: [map()]}} | {:error, :optimization_failed | :optimizer_unavailable}
-  def run_optimizer(OptimizerPort, days, candidates_by_slot, user) do
-    run_optimizer(client_module(), days, candidates_by_slot, user)
-  end
+          {:ok, %{required(String.t()) => [map()]}}
+          | {:error, :optimization_failed | :optimizer_unavailable}
+  def run_optimizer(_optimizer, [], _candidates, _user), do: {:ok, %{"meals" => []}}
 
-  def run_optimizer(_optimizer, [], _candidates, _user), do: {:ok, %{meals: []}}
-
-  def run_optimizer(_optimizer, days, candidates_by_slot, user) do
+  def run_optimizer(optimizer, days, candidates_by_slot, user) do
     payload = build_optimization_payload(days, candidates_by_slot, user)
-    client_module().select_weekly_menu(payload)
+    optimizer.select_weekly_menu(payload)
   end
 
   defp client_module,
