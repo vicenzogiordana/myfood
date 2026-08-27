@@ -21,7 +21,6 @@ defmodule MealPlannerApi.Optimization.OptimizerServer do
 
   @behaviour MealPlannerApi.Optimization.OptimizerPort
 
-  @default_timeout_ms 15_000
   @circuit_failure_threshold 3
   @circuit_reset_timeout_ms 30_000
 
@@ -45,7 +44,7 @@ defmodule MealPlannerApi.Optimization.OptimizerServer do
 
   @impl true
   def select_weekly_menu(payload) do
-    GenServer.call(__MODULE__, {:solve, payload}, @default_timeout_ms)
+    GenServer.call(__MODULE__, {:solve, payload}, optimizer_timeout_ms())
   rescue
     _ -> {:error, :optimizer_timeout}
   end
@@ -125,7 +124,7 @@ defmodule MealPlannerApi.Optimization.OptimizerServer do
         next_request_id: state.next_request_id + 1
     }
 
-    {:noreply, new_state, @default_timeout_ms}
+    {:noreply, new_state, optimizer_timeout_ms()}
   end
 
   @impl true
@@ -193,6 +192,10 @@ defmodule MealPlannerApi.Optimization.OptimizerServer do
   # ============================================================================
   # Private helpers
   # ============================================================================
+
+  defp optimizer_timeout_ms do
+    Application.get_env(:meal_planner_api, :optimizer_timeout_ms, 15_000)
+  end
 
   defp spawn_python(state) do
     python_executable = Application.get_env(:meal_planner_api, :optimizer_python, "python3")
