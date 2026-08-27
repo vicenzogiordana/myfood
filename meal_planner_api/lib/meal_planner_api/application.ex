@@ -18,9 +18,15 @@ defmodule MealPlannerApi.Application do
       # Start a worker by calling: MealPlannerApi.Worker.start_link(arg)
       # {MealPlannerApi.Worker, arg},
       # Start to serve requests, typically the last entry
-      MealPlannerApiWeb.Endpoint,
-      {MealPlannerApi.Optimization.OptimizerServer, []}
+      MealPlannerApiWeb.Endpoint
     ]
+
+    children =
+      if Application.get_env(:meal_planner_api, :start_optimizer_server, true) do
+        children ++ [{MealPlannerApi.Optimization.OptimizerServer, []}]
+      else
+        children
+      end
 
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options
