@@ -110,9 +110,10 @@ defmodule MealPlannerApi.Integrations.PythonClient do
       recipe_macros: recipe_macros
     }
 
-    case Tesla.post("#{@base_url}/api/v1/optimize-menu", body,
+    case Req.post("#{@base_url}/api/v1/optimize-menu",
+           json: body,
            receive_timeout: @timeout,
-           json: false
+           retry: false
          ) do
       {:ok, %{status: 200, body: %{"slots" => optimized_slots}}} ->
         {:ok, Enum.map(optimized_slots, &cast_optimized_slot/1)}
@@ -126,7 +127,7 @@ defmodule MealPlannerApi.Integrations.PythonClient do
       {:ok, %{status: status}} when status >= 400 ->
         {:error, :unreachable}
 
-      {:error, :timeout} ->
+      {:error, %Req.TransportError{reason: :timeout}} ->
         {:error, :timeout}
 
       {:error, _} ->
@@ -165,9 +166,10 @@ defmodule MealPlannerApi.Integrations.PythonClient do
       recipe_macros: recipe_macros
     }
 
-    case Tesla.post("#{@base_url}/api/v1/shopping-list", body,
+    case Req.post("#{@base_url}/api/v1/shopping-list",
+           json: body,
            receive_timeout: @timeout,
-           json: false
+           retry: false
          ) do
       {:ok, %{status: 200, body: %{"items" => items}}} ->
         {:ok, items}
@@ -175,7 +177,7 @@ defmodule MealPlannerApi.Integrations.PythonClient do
       {:ok, %{status: status}} when status >= 400 ->
         {:error, :unreachable}
 
-      {:error, :timeout} ->
+      {:error, %Req.TransportError{reason: :timeout}} ->
         {:error, :timeout}
 
       {:error, _} ->
