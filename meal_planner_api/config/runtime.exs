@@ -79,6 +79,15 @@ config :meal_planner_api,
   facebook_graph_url: System.get_env("FACEBOOK_GRAPH_URL", "https://graph.facebook.com")
 
 if config_env() == :prod do
+  guardian_secret_key =
+    System.get_env("GUARDIAN_SECRET_KEY") ||
+      raise """
+      environment variable GUARDIAN_SECRET_KEY is missing.
+      Set it to a securely generated secret before starting the application.
+      """
+
+  config :meal_planner_api, MealPlannerApi.Auth.Guardian, secret_key: guardian_secret_key
+
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you
   # want to use a different value for prod and you most likely don't want

@@ -15,7 +15,7 @@ config :meal_planner_api,
 
 config :meal_planner_api, MealPlannerApi.Auth.Guardian,
   issuer: "meal_planner_api",
-  secret_key: "change_this_for_prod_only_guardian_secret"
+  secret_key: "change_this_for_dev_only_guardian_secret"
 
 config :meal_planner_api,
   ai_client: MealPlannerApi.AI.GeminiClient
