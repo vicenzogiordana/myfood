@@ -15,7 +15,7 @@ defmodule MealPlannerApi.Optimization.OptimizerFallback do
 
   @impl true
   def select_weekly_menu(payload) do
-    %{days: days, candidates_by_slot: candidates_by_slot} = payload
+    %{"days" => days, "candidates_by_slot" => candidates_by_slot} = payload
 
     meals =
       Enum.flat_map(days, fn day ->
@@ -32,10 +32,10 @@ defmodule MealPlannerApi.Optimization.OptimizerFallback do
         end)
       end)
 
-    {:ok, %{meals: meals}}
+    {:ok, %{"meals" => meals}}
   rescue
     _ ->
-      {:ok, %{meals: empty_meals(payload)}}
+      {:ok, %{"meals" => empty_meals(payload)}}
   end
 
   @impl true
@@ -50,14 +50,16 @@ defmodule MealPlannerApi.Optimization.OptimizerFallback do
   end
 
   defp to_meal(day, slot, c) when is_map(c) do
-    %{"day" => day, "slot" => slot, "recipe_id" => c["recipe_id"]}
+    c
+    |> Map.put("day", day)
+    |> Map.put("slot", slot)
   end
 
   defp to_meal(day, slot, nil) do
     %{"day" => day, "slot" => slot, "recipe_id" => nil}
   end
 
-  defp empty_meals(%{days: days}) do
+  defp empty_meals(%{"days" => days}) do
     Enum.flat_map(days, fn day ->
       Enum.map(@slots, fn slot ->
         %{"day" => day, "slot" => Atom.to_string(slot), "recipe_id" => nil}
