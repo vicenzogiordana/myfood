@@ -87,6 +87,21 @@ defmodule MealPlannerApi.Persistence.Accounts do
     |> Repo.one()
   end
 
+  @doc """
+  Returns the `RevenuecatCustomer` (and its `rc_app_user_id`) for the
+  given Account. Added in PR 3 — HTTP capability and recovery — so the
+  `GET /billing/revenuecat/status` endpoint can return the
+  server-issued `app_user_id` for the Account's current membership
+  (`design.md` §"Interfaces / Contracts").
+  """
+  def get_revenuecat_customer_by_account_id(account_id) when is_binary(account_id) do
+    from(c in RevenuecatCustomer,
+      where: c.account_id == ^account_id,
+      limit: 1
+    )
+    |> Repo.one()
+  end
+
   def upsert_revenuecat_entitlement(attrs) do
     # Normalize status → is_active for backwards compatibility
     attrs =
