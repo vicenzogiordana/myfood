@@ -2,6 +2,7 @@ defmodule MealPlannerApiWeb.CalendarChannel do
   use MealPlannerApiWeb, :channel
 
   alias MealPlannerApi.Persistence.Calendar
+  alias MealPlannerApiWeb.ChannelCapability
   alias MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket
 
   @impl true
@@ -19,10 +20,16 @@ defmodule MealPlannerApiWeb.CalendarChannel do
         {:error, %{reason: "forbidden"}}
 
       true ->
-        {:ok,
-         socket
-         |> assign(:account_id, topic_account_id)
-         |> assign(:current_membership, membership)}
+        case ChannelCapability.authorize(membership) do
+          :ok ->
+            {:ok,
+             socket
+             |> assign(:account_id, topic_account_id)
+             |> assign(:current_membership, membership)}
+
+          {:error, :subscription_required} ->
+            {:error, %{reason: "subscription_required"}}
+        end
     end
   end
 
