@@ -20,6 +20,12 @@ defmodule MealPlannerApi.Persistence.Accounts.RevenuecatWebhookEvent do
     field(:error_message, :string)
     field(:payload, :map)
 
+    # PR 1 / Phase 1 — `revenuecat-access-enforcement`. REQUIRED
+    # provider-supplied timestamp. Used by Phase 2's locked ledger apply
+    # to enforce strict-newest ordering against
+    # `accounts.latest_provider_event_at`.
+    field(:provider_event_at, :utc_datetime_usec)
+
     belongs_to(:account, MealPlannerApi.Persistence.Accounts.Account)
 
     timestamps(type: :utc_datetime_usec)
@@ -36,7 +42,8 @@ defmodule MealPlannerApi.Persistence.Accounts.RevenuecatWebhookEvent do
       :received_at,
       :processed_at,
       :error_message,
-      :payload
+      :payload,
+      :provider_event_at
     ])
     |> validate_required([
       :event_id,
@@ -44,7 +51,8 @@ defmodule MealPlannerApi.Persistence.Accounts.RevenuecatWebhookEvent do
       :rc_app_user_id,
       :status,
       :received_at,
-      :payload
+      :payload,
+      :provider_event_at
     ])
     |> unique_constraint(:event_id)
     |> foreign_key_constraint(:account_id)
