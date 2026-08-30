@@ -41,6 +41,11 @@ defmodule MealPlannerApiWeb.Endpoint do
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
   plug CORSPlug, origin: ["http://localhost:8081", "exp://*", "*"]
 
+  # Capture the exact request bytes for the RevenueCat webhook endpoint
+  # (`revenuecat-access-enforcement`, PR 3). The HMAC is computed over the
+  # unparsed body, so the raw bytes must reach the controller intact.
+  plug MealPlannerApiWeb.Plugs.RawBodyReader
+
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],

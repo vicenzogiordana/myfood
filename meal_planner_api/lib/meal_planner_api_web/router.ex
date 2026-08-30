@@ -16,6 +16,16 @@ defmodule MealPlannerApiWeb.Router do
     plug(MealPlannerApiWeb.Plugs.EnforceAccountScope)
   end
 
+  # Phase 3 — `revenuecat-access-enforcement` (PR 3): Account-wide
+  # capability guard. Runs AFTER `:auth` (so `current_membership` is
+  # populated) and AFTER `:enforce_account_scope` (so the URL already
+  # matches the membership). Routes that are explicitly exempt — auth,
+  # `/me`, account context, the three billing recovery routes, and the
+  # webhook — are NOT behind this pipeline (see `scope "/api"` below).
+  pipeline :enforce_capability do
+    plug(MealPlannerApiWeb.Plugs.EnforceCapability)
+  end
+
   scope "/api", MealPlannerApiWeb do
     pipe_through(:api)
 
@@ -43,14 +53,59 @@ defmodule MealPlannerApiWeb.Router do
     post("/invites/:token/accept", InviteController, :accept)
   end
 
+  # Phase 3 — `revenuecat-access-enforcement` (PR 3) billing recovery
+  # pipeline: authenticated, NO `:enforce_capability`. These three routes
+  # MUST remain available to an expired Account so the React Native SDK
+  # can re-read server status and begin purchase/restore recovery without
+  # being gated by the same webhook that hasn't yet arrived
+  # (`design.md` §"Interfaces / Contracts").
   scope "/api", MealPlannerApiWeb do
     pipe_through([:api, :auth])
 
-    # User endpoints (auth required)
+    get("/billing/revenuecat/status", RevenuecatController, :status)
+    post("/billing/revenuecat/purchase", RevenuecatController, :purchase)
+    post("/billing/revenuecat/restore", RevenuecatController, :restore)
+
+    # Phase 3 — `revenuecat-access-enforcement` (PR 3): the client
+    # entitlement-grant endpoint has been REMOVED. The router returns
+    # 404 for any POST here. Clients must call the RevenueCat SDK and
+    # wait for the signed webhook — no client-to-backend operation can
+    # ever change eligibility again.
+    #
+    # NOTE: the previously-routed `POST /billing/revenuecat/sync` is
+    # intentionally not declared here. See `revenuecat_controller_test.exs`
+    # for the 404 guarantee.
+  end
+
+  # Phase 3 — `revenuecat-access-enforcement` (PR 3) design-exempt
+  # auth/context pipeline: authenticated (`current_membership` populated),
+  # capability-exempt. The four routes below (`/me`, `/auth/me`,
+  # `/account/context`, `/auth/switch-account`) MUST remain reachable
+  # for an expired Account so the React Native client can read auth
+  # context, switch memberships, and start billing recovery without
+  # being gated by the same webhook that hasn't yet arrived
+  # (`design.md` §"Interfaces / Contracts"). `:enforce_account_scope` is
+  # not applied because none of these routes carry `:account_id` in the
+  # URL (it is a no-op without that path param — see
+  # `enforce_account_scope.ex` §moduledoc).
+  scope "/api", MealPlannerApiWeb do
+    pipe_through([:api, :auth])
+
+    # User endpoints (auth required, capability-exempt by design)
     get("/me", AccountsController, :me)
     # Alias for frontend (G8)
     get("/auth/me", AccountsController, :me)
     get("/account/context", AccountsController, :context)
+
+    # Phase A — Tenancy Refactor (PR 3a task 3.5): no `:account_id` in
+    # the URL, so `:enforce_account_scope` does not apply (design §5.2).
+    post("/auth/switch-account", AccountLifecycleController, :switch_account)
+  end
+
+  scope "/api", MealPlannerApiWeb do
+    pipe_through([:api, :auth, :enforce_capability])
+
+    # User endpoints (auth required, capability required)
     get("/calendar", CalendarController, :index)
     get("/calendar/slot", CalendarController, :show_slot)
     get("/planning/weekly", PlanningController, :weekly)
@@ -85,17 +140,12 @@ defmodule MealPlannerApiWeb.Router do
     post("/inventory/voice/preview", InventoryController, :voice_preview)
     post("/inventory/voice/apply", InventoryController, :voice_apply)
     post("/planning/rescue", InventoryController, :rescue_plan)
-    post("/billing/revenuecat/sync", RevenuecatController, :sync)
-
-    # Phase A — Tenancy Refactor (PR 3a task 3.5): no `:account_id` in the
-    # URL, so `:enforce_account_scope` does not apply (design §5.2).
-    post("/auth/switch-account", AccountLifecycleController, :switch_account)
   end
 
   # Phase A — Tenancy Refactor (PR 3a): membership / invite / lifecycle
   # endpoints scoped to an Account via the URL (design §5.2, §6).
   scope "/api/accounts/:account_id", MealPlannerApiWeb do
-    pipe_through([:api, :auth, :enforce_account_scope])
+    pipe_through([:api, :auth, :enforce_account_scope, :enforce_capability])
 
     get("/memberships", MembershipController, :index)
     delete("/memberships/:user_id", MembershipController, :delete)
