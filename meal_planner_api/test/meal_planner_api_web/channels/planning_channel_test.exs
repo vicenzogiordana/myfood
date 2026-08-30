@@ -5,6 +5,7 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
 
   alias MealPlannerApi.Data.{PlanningRepo, RecipeRepo, ShoppingRepo}
   alias MealPlannerApi.Generation.Server
+  alias MealPlannerApi.Persistence.Accounts.Account, as: PersistenceAccount
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApi.Repo
   alias MealPlannerApiWeb.{PlanningChannel, UserSocket}
@@ -14,6 +15,32 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
   setup do
     {:ok, user, account, token} = issue_identity_and_token("u_plan_test", "acct_plan_test")
     %{user: user, account: account, token: token}
+  end
+
+  # Phase 4 — `revenuecat-access-enforcement` realtime enforcement
+  # (task 4.1). Trial-window helper used to mark the seeded Account
+  # `:eligible` or `:expired` for `AccountAccess.eligible?/1`.
+  defp persist_trial_window!(%PersistenceAccount{} = account, :eligible) do
+    started = DateTime.utc_now()
+    ends = DateTime.add(started, 7 * 86_400, :second)
+
+    {:ok, updated} =
+      account
+      |> PersistenceAccount.changeset(%{trial_started_at: started, trial_ends_at: ends})
+      |> Repo.update()
+
+    updated
+  end
+
+  defp persist_trial_window!(%PersistenceAccount{} = account, :expired) do
+    past = DateTime.add(DateTime.utc_now(), -30 * 86_400, :second)
+
+    {:ok, updated} =
+      account
+      |> PersistenceAccount.changeset(%{trial_started_at: past, trial_ends_at: past})
+      |> Repo.update()
+
+    updated
   end
 
   # ==========================================================================
@@ -97,6 +124,101 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
 
       assert socket.assigns.current_membership.account_id == account.id
       assert socket.assigns.current_membership.status == :active
+    end
+  end
+
+  # ==========================================================================
+  # Phase 4 — `revenuecat-access-enforcement` realtime enforcement (task 4.1).
+  # Same Account eligibility rule as the HTTP `:enforce_capability` plug.
+  # ==========================================================================
+
+  describe "join/3 subscription enforcement (phase 4 task 4.1)" do
+    test "expired Account join returns subscription_required when enforcement is enabled (task 4.1)",
+         %{account: account, token: token} do
+      _ = persist_trial_window!(account, :expired)
+
+      previous = Application.get_env(:meal_planner_api, :revenuecat_access_enforcement)
+      Application.put_env(:meal_planner_api, :revenuecat_access_enforcement, true)
+
+      try do
+        {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+        assert {:error, %{reason: "subscription_required"}} =
+                 subscribe_and_join(socket, PlanningChannel, "planning:#{account.id}")
+      after
+        Application.put_env(
+          :meal_planner_api,
+          :revenuecat_access_enforcement,
+          previous
+        )
+      end
+    end
+
+    test "eligible Account join succeeds when enforcement is enabled (task 4.1)",
+         %{account: account, token: token} do
+      _ = persist_trial_window!(account, :eligible)
+
+      previous = Application.get_env(:meal_planner_api, :revenuecat_access_enforcement)
+      Application.put_env(:meal_planner_api, :revenuecat_access_enforcement, true)
+
+      try do
+        {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+        assert {:ok, _reply, socket} =
+                 subscribe_and_join(socket, PlanningChannel, "planning:#{account.id}")
+
+        assert socket.assigns.account_id == account.id
+      after
+        Application.put_env(
+          :meal_planner_api,
+          :revenuecat_access_enforcement,
+          previous
+        )
+      end
+    end
+
+    test "disabled enforcement allows an expired Account to join (rollout safety, task 4.1)",
+         %{account: account, token: token} do
+      _ = persist_trial_window!(account, :expired)
+
+      previous = Application.get_env(:meal_planner_api, :revenuecat_access_enforcement)
+      Application.put_env(:meal_planner_api, :revenuecat_access_enforcement, false)
+
+      try do
+        {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+        assert {:ok, _reply, _socket} =
+                 subscribe_and_join(socket, PlanningChannel, "planning:#{account.id}")
+      after
+        Application.put_env(
+          :meal_planner_api,
+          :revenuecat_access_enforcement,
+          previous
+        )
+      end
+    end
+
+    # Task 4.2 — ordering triangulation: topic-vs-membership mismatch fires
+    # BEFORE the subscription check, so the response is `forbidden` (not
+    # `subscription_required`) even when enforcement is on. Prevents
+    # leaking another Account's subscription state.
+    test "topic-vs-membership mismatch fires before subscription check (task 4.2)",
+         %{token: token} do
+      previous = Application.get_env(:meal_planner_api, :revenuecat_access_enforcement)
+      Application.put_env(:meal_planner_api, :revenuecat_access_enforcement, true)
+
+      try do
+        {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+        assert {:error, %{reason: "forbidden"}} =
+                 subscribe_and_join(socket, PlanningChannel, "planning:other_account_id")
+      after
+        Application.put_env(
+          :meal_planner_api,
+          :revenuecat_access_enforcement,
+          previous
+        )
+      end
     end
   end
 

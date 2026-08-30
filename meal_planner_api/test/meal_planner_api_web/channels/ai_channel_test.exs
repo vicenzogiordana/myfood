@@ -7,8 +7,8 @@ defmodule MealPlannerApiWeb.AIChannelTest do
   alias MealPlannerApiWeb.{AIChannel, UserSocket}
 
   setup do
-    {:ok, _user, _account, token} = issue_identity_and_token("u_ai_test", "acct_ai_test")
-    %{token: token}
+    {:ok, user, account, token} = issue_identity_and_token("u_ai_test", "acct_ai_test")
+    %{user: user, account: account, token: token}
   end
 
   describe "join/3" do
@@ -80,6 +80,55 @@ defmodule MealPlannerApiWeb.AIChannelTest do
       assert {:ok, _reply, socket} = subscribe_and_join(socket, AIChannel, "ai_chat:legacy_room")
 
       assert socket.assigns.current_membership.status == :active
+    end
+  end
+
+  # ==========================================================================
+  # Phase 4 — `revenuecat-access-enforcement` realtime enforcement (task 4.1).
+  # The single Account eligibility rule (`AccountAccess.eligible?/1`) is
+  # shared between HTTP `:enforce_capability` and every product channel
+  # join. AIChannel's topic is `ai_chat:<room_id>` (no account id in the
+  # topic — see task 3.12) so the subscription guard fires purely off the
+  # membership's `account_id`, exactly like the other three channels.
+  # ==========================================================================
+
+  describe "join/3 subscription enforcement (phase 4 task 4.1)" do
+    test "expired Account join returns subscription_required when enforcement is enabled (task 4.1)",
+         %{account: account, token: token} do
+      _ = persist_trial_window!(account, :expired)
+
+      with_enforcement_enabled!(fn ->
+        {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+        assert {:error, %{reason: "subscription_required"}} =
+                 subscribe_and_join(socket, AIChannel, "ai_chat:expired_room")
+      end)
+    end
+
+    test "eligible Account join succeeds when enforcement is enabled (task 4.1)",
+         %{account: account, token: token} do
+      _ = persist_trial_window!(account, :eligible)
+
+      with_enforcement_enabled!(fn ->
+        {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+        assert {:ok, _reply, socket} =
+                 subscribe_and_join(socket, AIChannel, "ai_chat:eligible_room")
+
+        assert socket.assigns.current_membership.account_id == account.id
+      end)
+    end
+
+    test "disabled enforcement allows an expired Account to join (rollout safety, task 4.1)",
+         %{account: account, token: token} do
+      _ = persist_trial_window!(account, :expired)
+
+      with_enforcement_disabled!(fn ->
+        {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+        assert {:ok, _reply, _socket} =
+                 subscribe_and_join(socket, AIChannel, "ai_chat:rollout_disabled_room")
+      end)
     end
   end
 
