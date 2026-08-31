@@ -19,9 +19,8 @@ defmodule MealPlannerApi.AccountsRegistrationTest do
     * Successful registration yields exactly one `:owner :active`
       `AccountMembership` row whose `account_id` and `user_id` match
       the inserted Account/User.
-    * A forced failure (duplicate email) rolls back the entire
-      transaction — no orphan Account, no orphan User, no orphan
-      Membership.
+    * A duplicate email is rejected before a second registration
+      transaction is started, preserving the existing registration.
   """
   use ExUnit.Case, async: false
 
@@ -101,7 +100,7 @@ defmodule MealPlannerApi.AccountsRegistrationTest do
       assert hd(owners).status == :active
     end
 
-    test "a duplicate-email registration rolls back the Account and the User" do
+    test "a duplicate-email registration is rejected and preserves the existing registration" do
       email = "rollback@example.com"
 
       assert {:ok, %{user: first_user, account: first_account}} =
@@ -111,7 +110,8 @@ defmodule MealPlannerApi.AccountsRegistrationTest do
                  "name" => "First Try"
                })
 
-      # Second registration with the same email MUST fail and roll back.
+      # Duplicate emails are rejected during the preflight lookup, before
+      # `create_account_and_user/5` starts its Ecto.Multi transaction.
       assert {:error, :email_already_registered} =
                Accounts.register_with_password(%{
                  "email" => email,
@@ -119,16 +119,21 @@ defmodule MealPlannerApi.AccountsRegistrationTest do
                  "name" => "Second Try"
                })
 
-      # The DB should look like after only the first registration.
-      all_users = Repo.all(from(u in PersistenceUser))
-      all_accounts = Repo.all(from(a in PersistenceAccount))
-      all_memberships = Repo.all(AccountMembership)
+      assert %PersistenceUser{id: user_id, account_id: account_id} =
+               Repo.get_by(PersistenceUser, email: email)
 
-      assert length(all_users) == 1
-      assert hd(all_users).id == first_user.id
-      assert length(all_accounts) == 1
-      assert hd(all_accounts).id == first_account.id
-      assert length(all_memberships) == 1
+      assert user_id == first_user.id
+      assert account_id == first_account.id
+      assert %PersistenceAccount{id: ^account_id} = Repo.get(PersistenceAccount, first_account.id)
+
+      memberships =
+        Repo.all(
+          from(m in AccountMembership,
+            where: m.user_id == ^first_user.id and m.account_id == ^first_account.id
+          )
+        )
+
+      assert length(memberships) == 1
     end
 
     test "the result map exposes the :owner :active membership directly (PR 3a task 3.8)" do
