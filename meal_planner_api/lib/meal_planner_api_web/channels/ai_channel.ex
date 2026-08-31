@@ -2,6 +2,7 @@ defmodule MealPlannerApiWeb.AIChannel do
   use MealPlannerApiWeb, :channel
 
   alias MealPlannerApi.AI
+  alias MealPlannerApiWeb.ChannelCapability
   alias MealPlannerApiWeb.Controllers.AccountScopeHelpers
   alias MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket
 
@@ -12,6 +13,11 @@ defmodule MealPlannerApiWeb.AIChannel do
   # "the socket carries an active membership" (nil/non-active rejected)
   # rather than a topic-vs-membership account match. See apply-progress.md
   # for the full deviation writeup.
+  #
+  # Note (task 4.2 / Phase 4): after the membership/status check, the
+  # shared `ChannelCapability.authorize/1` guard fires off the
+  # membership's `account_id` (NOT the topic) so an expired Account is
+  # rejected with `subscription_required` whenever the rollout flag is on.
   @impl true
   def join("ai_chat:" <> room_id, _payload, socket) do
     membership = LoadCurrentMembershipSocket.membership_from_socket(socket)
@@ -24,10 +30,16 @@ defmodule MealPlannerApiWeb.AIChannel do
         {:error, %{reason: "forbidden"}}
 
       true ->
-        {:ok,
-         socket
-         |> assign(:room_id, room_id)
-         |> assign(:current_membership, membership)}
+        case ChannelCapability.authorize(membership) do
+          :ok ->
+            {:ok,
+             socket
+             |> assign(:room_id, room_id)
+             |> assign(:current_membership, membership)}
+
+          {:error, :subscription_required} ->
+            {:error, %{reason: "subscription_required"}}
+        end
     end
   end
 

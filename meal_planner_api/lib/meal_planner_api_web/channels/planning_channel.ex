@@ -23,6 +23,7 @@ defmodule MealPlannerApiWeb.PlanningChannel do
 
   alias MealPlannerApi.Generation.Server
   alias MealPlannerApi.Services.PlanningChatService
+  alias MealPlannerApiWeb.ChannelCapability
   alias MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket
 
   @impl true
@@ -40,10 +41,16 @@ defmodule MealPlannerApiWeb.PlanningChannel do
         {:error, %{reason: "forbidden"}}
 
       true ->
-        {:ok,
-         socket
-         |> assign(:account_id, topic_account_id)
-         |> assign(:current_membership, membership)}
+        case ChannelCapability.authorize(membership) do
+          :ok ->
+            {:ok,
+             socket
+             |> assign(:account_id, topic_account_id)
+             |> assign(:current_membership, membership)}
+
+          {:error, :subscription_required} ->
+            {:error, %{reason: "subscription_required"}}
+        end
     end
   end
 
