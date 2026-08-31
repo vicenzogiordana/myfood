@@ -51,6 +51,20 @@ if config_env() != :test do
          |> Kernel.in(["true", "1", "yes", "on"])
 end
 
+# RevenueCat access enforcement. The signing secret is the trust anchor for
+# webhook ingestion; enforcement of product access stays OFF until the signed
+# pipeline is verified in production (see the rollout in design.md). Tests
+# manage both keys themselves.
+if config_env() != :test do
+  config :meal_planner_api,
+    revenuecat_webhook_signing_secret: System.get_env("REVENUECAT_WEBHOOK_SIGNING_SECRET"),
+    revenuecat_access_enforcement:
+      System.get_env("REVENUECAT_ACCESS_ENFORCEMENT", "")
+      |> String.trim()
+      |> String.downcase()
+      |> Kernel.in(["true", "1", "yes", "on"])
+end
+
 config :meal_planner_api,
   gemini_model: System.get_env("GEMINI_MODEL", "gemini-2.5-flash-lite"),
   gemini_base_url: System.get_env("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"),

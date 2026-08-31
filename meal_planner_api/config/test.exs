@@ -18,6 +18,12 @@ config :meal_planner_api, MealPlannerApiWeb.Endpoint,
 # Print only warnings and errors during test
 config :logger, level: :warning
 
+# RevenueCat access enforcement: no ambient signing secret (each test provides
+# its own) and enforcement disabled by default, matching the production rollout.
+config :meal_planner_api,
+  revenuecat_webhook_signing_secret: nil,
+  revenuecat_access_enforcement: false
+
 # Initialize plugs at runtime for faster test compilation
 config :phoenix, :plug_init_mode, :runtime
 
