@@ -7,7 +7,7 @@ defmodule MealPlannerApi.Generation.Server do
 
   1. Recibe `start_generation` → crea GenerationRun + Proposal (`:pending`)
   2. Construye constraints y slot list desde PriceService
-  3. Llama a PythonClient.optimize_menu()
+   3. Llama a OptimizerServer.select_weekly_menu()
   4. Actualiza proposal_json con slots resueltos
   5. hace broadcast `proposal_ready` al canal
   6. Chat/modificación → re-optimiza slots específicos

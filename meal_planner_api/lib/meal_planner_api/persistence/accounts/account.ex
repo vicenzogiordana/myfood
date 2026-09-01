@@ -18,6 +18,18 @@ defmodule MealPlannerApi.Persistence.Accounts.Account do
     field(:plan, Ecto.Enum, values: [:individual, :family_4, :family_6, :trial])
     field(:default_budget_cents, :integer, default: 0)
 
+    # PR 1 / Phase 1 — `revenuecat-access-enforcement`.
+    # Trial lifecycle: set ONCE by the first qualifying RevenueCat purchase
+    # / trial event (Phase 2 / PR 2 wires the webhook application). Nullable
+    # so pre-existing Accounts continue to insert without backfill.
+    field(:trial_started_at, :utc_datetime_usec)
+    field(:trial_ends_at, :utc_datetime_usec)
+
+    # Provider event ordering gate. Updated by Phase 2's locked ledger apply
+    # after a NEWER webhook event is applied. Nullable until the first
+    # signed webhook arrives.
+    field(:latest_provider_event_at, :utc_datetime_usec)
+
     belongs_to(:subscription_plan, MealPlannerApi.Subscriptions.Plan,
       foreign_key: :subscription_plan_id
     )
@@ -63,7 +75,10 @@ defmodule MealPlannerApi.Persistence.Accounts.Account do
       :plan,
       :default_budget_cents,
       :preferred_supermarket_id,
-      :subscription_plan_id
+      :subscription_plan_id,
+      :trial_started_at,
+      :trial_ends_at,
+      :latest_provider_event_at
     ])
     |> validate_required([:name, :plan, :default_budget_cents])
     |> validate_number(:default_budget_cents, greater_than_or_equal_to: 0)

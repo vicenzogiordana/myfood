@@ -5,57 +5,30 @@ defmodule MealPlannerApi.Optimization.OptimizerPort do
   Implementors must provide a way to select a weekly menu given candidate
   recipes, nutritional constraints, and budget limits.
 
+  Payloads and successful results use JSON-decoded string keys. Payloads carry
+  `"days"`, `"slots"`, `"constraints"`, and `"candidates_by_slot"`; results
+  carry `"meals"`, whose entries include `"day"`, `"slot"`, and `"recipe_id"`.
+  Candidate maps preserve all input fields (e.g. `"estimated_cost_cents"`,
+  `"label"`, `"price_per_serving_cents"`) so downstream code can rely on the
+  full candidate shape, not a trimmed subset.
+
   The port may raise an error for:
   - `:optimizer_timeout` — solver did not respond in time
   - `:optimizer_unavailable` — process is down or circuit is open
   - `:optimizer_error` — solver returned an error (e.g. malformed input)
   """
 
-  @type optimizer_payload :: %{
-          days: [String.t()],
-          slots: [String.t()],
-          constraints: optimizer_constraints(),
-          candidates_by_slot: %{
-            String.t() => [candidate_recipe()]
-          }
-        }
+  @type optimizer_payload :: %{required(String.t()) => term()}
 
-  @type optimizer_constraints :: %{
-          kcal_target: integer(),
-          weekly_budget_cents: integer(),
-          account_type: String.t(),
-          subscription_tier: String.t(),
-          inventory_items: [String.t()],
-          macro_bounds: macro_bounds()
-        }
+  @type optimizer_constraints :: %{required(String.t()) => term()}
 
-  @type optimizer_result :: {:ok, %{meals: [selected_meal()]}} | {:error, term()}
+  @type optimizer_result :: {:ok, %{required(String.t()) => [selected_meal()]}} | {:error, term()}
 
-  @type macro_bounds :: %{
-          protein_g: %{min: float(), max: float()},
-          carbs_g: %{min: float(), max: float()},
-          fat_g: %{min: float(), max: float()},
-          calories: %{min: float(), max: float()}
-        }
+  @type macro_bounds :: %{required(String.t()) => %{required(String.t()) => float()}}
 
-  @type candidate_recipe :: %{
-          recipe_id: String.t(),
-          slot: String.t(),
-          label: String.t(),
-          kcal: float(),
-          estimated_cost_cents: integer(),
-          inventory_hit_count: integer(),
-          protein_g_per_serving: float(),
-          carbs_g_per_serving: float(),
-          fat_g_per_serving: float(),
-          calories_per_serving: float()
-        }
+  @type candidate_recipe :: %{required(String.t()) => term()}
 
-  @type selected_meal :: %{
-          day: String.t(),
-          slot: String.t(),
-          recipe_id: String.t() | nil
-        }
+  @type selected_meal :: %{required(String.t()) => term()}
 
   @doc """
   Given a payload describing the planning request, returns a weekly plan.

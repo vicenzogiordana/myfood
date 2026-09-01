@@ -68,3 +68,6 @@ config :phoenix, :stacktrace_depth, 20
 
 # Initialize plugs at runtime for faster development compilation
 config :phoenix, :plug_init_mode, :runtime
+
+# Email-code auth — Bamboo LocalAdapter (no outbound SMTP in dev).
+config :meal_planner_api, MealPlannerApi.Mailer, adapter: Bamboo.LocalAdapter
