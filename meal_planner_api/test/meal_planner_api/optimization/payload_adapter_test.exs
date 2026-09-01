@@ -27,10 +27,10 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
 
       result = PayloadAdapter.build_optimizer_payload(slots, recipe_prices, recipe_macros)
 
-      assert result[:days] == ["2026-06-03"]
-      assert result[:slots] == ["lunch"]
-      assert result[:constraints][:weekly_budget_cents] == 5000
-      assert result[:candidates_by_slot]["lunch"] |> length() == 2
+      assert result["days"] == ["2026-06-03"]
+      assert result["slots"] == ["lunch"]
+      assert result["constraints"]["weekly_budget_cents"] == 5000
+      assert result["candidates_by_slot"]["lunch"] |> length() == 2
     end
 
     test "deduplicates days from multiple slots" do
@@ -57,9 +57,9 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
 
       result = PayloadAdapter.build_optimizer_payload(slots, %{}, %{})
 
-      assert length(result[:days]) == 2
-      assert "2026-06-03" in result[:days]
-      assert "2026-06-04" in result[:days]
+      assert length(result["days"]) == 2
+      assert "2026-06-03" in result["days"]
+      assert "2026-06-04" in result["days"]
     end
 
     test "builds slots list from unique slot types" do
@@ -80,9 +80,9 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
 
       result = PayloadAdapter.build_optimizer_payload(slots, %{}, %{})
 
-      assert length(result[:slots]) == 2
-      assert "lunch" in result[:slots]
-      assert "breakfast" in result[:slots]
+      assert length(result["slots"]) == 2
+      assert "lunch" in result["slots"]
+      assert "breakfast" in result["slots"]
     end
 
     test "computes weekly_budget_cents by summing per-slot budgets" do
@@ -103,7 +103,7 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
 
       result = PayloadAdapter.build_optimizer_payload(slots, %{}, %{})
 
-      assert result[:constraints][:weekly_budget_cents] == 11000
+      assert result["constraints"]["weekly_budget_cents"] == 11000
     end
 
     test "computes macro_bounds from constraints with buffer" do
@@ -124,9 +124,9 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
 
       result = PayloadAdapter.build_optimizer_payload(slots, %{}, %{})
 
-      protein_bounds = result[:constraints][:macro_bounds][:protein_g]
-      assert protein_bounds[:min] == 60 * 0.7
-      assert protein_bounds[:max] == 60 * 1.3
+      protein_bounds = result["constraints"]["macro_bounds"]["protein_g"]
+      assert protein_bounds["min"] == 60 * 0.7
+      assert protein_bounds["max"] == 60 * 1.3
     end
 
     test "builds candidates_by_slot with full recipe data" do
@@ -148,13 +148,13 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
 
       result = PayloadAdapter.build_optimizer_payload(slots, recipe_prices, recipe_macros)
 
-      candidates = result[:candidates_by_slot]["lunch"]
+      candidates = result["candidates_by_slot"]["lunch"]
       assert length(candidates) == 2
 
-      candidate_1 = Enum.find(candidates, fn c -> c[:recipe_id] == "1" end)
-      assert candidate_1[:estimated_cost_cents] == 1250
-      assert candidate_1[:protein_g_per_serving] == 25
-      assert candidate_1[:calories_per_serving] == 450
+      candidate_1 = Enum.find(candidates, fn c -> c["recipe_id"] == "1" end)
+      assert candidate_1["estimated_cost_cents"] == 1250
+      assert candidate_1["protein_g_per_serving"] == 25
+      assert candidate_1["calories_per_serving"] == 450
     end
 
     test "handles missing recipe data with defaults" do
@@ -169,12 +169,12 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
 
       result = PayloadAdapter.build_optimizer_payload(slots, %{}, %{})
 
-      candidate = result[:candidates_by_slot]["lunch"] |> List.first()
-      assert candidate[:estimated_cost_cents] == 0
+      candidate = result["candidates_by_slot"]["lunch"] |> List.first()
+      assert candidate["estimated_cost_cents"] == 0
       # default
-      assert candidate[:protein_g_per_serving] == 25
+      assert candidate["protein_g_per_serving"] == 25
       # default
-      assert candidate[:calories_per_serving] == 450
+      assert candidate["calories_per_serving"] == 450
     end
 
     test "computes calories macro bounds from max_calories constraint with buffer" do
@@ -195,9 +195,9 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
 
       result = PayloadAdapter.build_optimizer_payload(slots, %{}, %{})
 
-      calories_bounds = result[:constraints][:macro_bounds][:calories]
-      assert calories_bounds[:min] == 1600 * 0.7
-      assert calories_bounds[:max] == 1600 * 1.3
+      calories_bounds = result["constraints"]["macro_bounds"]["calories"]
+      assert calories_bounds["min"] == 1600 * 0.7
+      assert calories_bounds["max"] == 1600 * 1.3
     end
 
     test "defaults calories bounds when max_calories constraint missing" do
@@ -212,9 +212,9 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
 
       result = PayloadAdapter.build_optimizer_payload(slots, %{}, %{})
 
-      calories_bounds = result[:constraints][:macro_bounds][:calories]
-      assert calories_bounds[:min] == 800 * 0.7
-      assert calories_bounds[:max] == 800 * 1.3
+      calories_bounds = result["constraints"]["macro_bounds"]["calories"]
+      assert calories_bounds["min"] == 800 * 0.7
+      assert calories_bounds["max"] == 800 * 1.3
     end
   end
 
@@ -223,9 +223,9 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
       optimizer_result =
         {:ok,
          %{
-           meals: [
-             %{day: "2026-06-03", slot: "lunch", recipe_id: "1"},
-             %{day: "2026-06-03", slot: "dinner", recipe_id: "2"}
+           "meals" => [
+             %{"day" => "2026-06-03", "slot" => "lunch", "recipe_id" => "1"},
+             %{"day" => "2026-06-03", "slot" => "dinner", "recipe_id" => "2"}
            ]
          }}
 
@@ -262,8 +262,8 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
       optimizer_result =
         {:ok,
          %{
-           meals: [
-             %{day: "2026-06-03", slot: "lunch", recipe_id: "99"}
+           "meals" => [
+             %{"day" => "2026-06-03", "slot" => "lunch", "recipe_id" => "99"}
            ]
          }}
 

@@ -2,12 +2,13 @@ defmodule MealPlannerApi.Optimization.OptimizerFallbackTest do
   use ExUnit.Case, async: true
 
   alias MealPlannerApi.Optimization.OptimizerFallback
+  alias MealPlannerApi.Optimization.OptimizerMock
 
   describe "select_weekly_menu/1" do
     test "returns a valid plan with all days and slots" do
       payload = build_payload(7)
 
-      assert {:ok, %{meals: meals}} = OptimizerFallback.select_weekly_menu(payload)
+      assert {:ok, %{"meals" => meals}} = OptimizerFallback.select_weekly_menu(payload)
       # 7 days × 3 slots
       assert length(meals) == 21
     end
@@ -15,7 +16,7 @@ defmodule MealPlannerApi.Optimization.OptimizerFallbackTest do
     test "every meal has day, slot, recipe_id" do
       payload = build_payload(7)
 
-      assert {:ok, %{meals: meals}} = OptimizerFallback.select_weekly_menu(payload)
+      assert {:ok, %{"meals" => meals}} = OptimizerFallback.select_weekly_menu(payload)
 
       for meal <- meals do
         assert is_binary(meal["day"])
@@ -26,10 +27,10 @@ defmodule MealPlannerApi.Optimization.OptimizerFallbackTest do
 
     test "picks cheapest recipe per slot" do
       payload = %{
-        days: ["monday"],
-        slots: ["breakfast", "lunch", "dinner"],
-        constraints: %{},
-        candidates_by_slot: %{
+        "days" => ["monday"],
+        "slots" => ["breakfast", "lunch", "dinner"],
+        "constraints" => %{},
+        "candidates_by_slot" => %{
           "breakfast" => [
             %{"recipe_id" => "r1", "estimated_cost_cents" => 500},
             # cheapest
@@ -47,7 +48,7 @@ defmodule MealPlannerApi.Optimization.OptimizerFallbackTest do
         }
       }
 
-      assert {:ok, %{meals: meals}} = OptimizerFallback.select_weekly_menu(payload)
+      assert {:ok, %{"meals" => meals}} = OptimizerFallback.select_weekly_menu(payload)
 
       breakfast = Enum.find(meals, &(&1["slot"] == "breakfast"))
       assert breakfast["recipe_id"] == "r2"
@@ -59,20 +60,36 @@ defmodule MealPlannerApi.Optimization.OptimizerFallbackTest do
       assert dinner["recipe_id"] == "r5"
     end
 
+    test "preserves selected candidate fields" do
+      payload = %{
+        "days" => ["monday"],
+        "candidates_by_slot" => %{
+          "breakfast" => [
+            %{"recipe_id" => "r1", "label" => "Breakfast", "estimated_cost_cents" => 100}
+          ],
+          "lunch" => [],
+          "dinner" => []
+        }
+      }
+
+      assert {:ok, %{"meals" => meals}} = OptimizerFallback.select_weekly_menu(payload)
+      assert Enum.find(meals, &(&1["slot"] == "breakfast"))["label"] == "Breakfast"
+    end
+
     test "handles different day counts" do
       payload = build_payload(3)
 
-      assert {:ok, %{meals: meals}} = OptimizerFallback.select_weekly_menu(payload)
+      assert {:ok, %{"meals" => meals}} = OptimizerFallback.select_weekly_menu(payload)
       # 3 days × 3 slots
       assert length(meals) == 9
     end
 
     test "ignores candidates with nil recipe_id" do
       payload = %{
-        days: ["monday"],
-        slots: ["breakfast", "lunch", "dinner"],
-        constraints: %{},
-        candidates_by_slot: %{
+        "days" => ["monday"],
+        "slots" => ["breakfast", "lunch", "dinner"],
+        "constraints" => %{},
+        "candidates_by_slot" => %{
           "breakfast" => [
             %{"recipe_id" => nil, "estimated_cost_cents" => 100},
             %{"recipe_id" => "r1", "estimated_cost_cents" => 500}
@@ -82,7 +99,7 @@ defmodule MealPlannerApi.Optimization.OptimizerFallbackTest do
         }
       }
 
-      assert {:ok, %{meals: meals}} = OptimizerFallback.select_weekly_menu(payload)
+      assert {:ok, %{"meals" => meals}} = OptimizerFallback.select_weekly_menu(payload)
 
       breakfast = Enum.find(meals, &(&1["slot"] == "breakfast"))
       assert breakfast["recipe_id"] == "r1"
@@ -93,16 +110,34 @@ defmodule MealPlannerApi.Optimization.OptimizerFallbackTest do
 
     test "returns nil recipe_id when no candidates available" do
       payload = %{
-        days: ["monday"],
-        slots: ["breakfast", "lunch", "dinner"],
-        constraints: %{},
-        candidates_by_slot: %{}
+        "days" => ["monday"],
+        "slots" => ["breakfast", "lunch", "dinner"],
+        "constraints" => %{},
+        "candidates_by_slot" => %{}
       }
 
-      assert {:ok, %{meals: meals}} = OptimizerFallback.select_weekly_menu(payload)
+      assert {:ok, %{"meals" => meals}} = OptimizerFallback.select_weekly_menu(payload)
       # 1 day × 3 slots
       assert length(meals) == 3
       assert Enum.all?(meals, &is_nil(&1["recipe_id"]))
+    end
+  end
+
+  describe "OptimizerMock.select_weekly_menu/1" do
+    test "accepts JSON string keys and preserves candidate fields" do
+      payload = %{
+        "days" => ["monday"],
+        "candidates_by_slot" => %{
+          "breakfast" => [
+            %{"recipe_id" => "r1", "label" => "Breakfast", "estimated_cost_cents" => 100}
+          ],
+          "lunch" => [],
+          "dinner" => []
+        }
+      }
+
+      assert {:ok, %{"meals" => meals}} = OptimizerMock.select_weekly_menu(payload)
+      assert Enum.find(meals, &(&1["slot"] == "breakfast"))["label"] == "Breakfast"
     end
   end
 
@@ -118,21 +153,21 @@ defmodule MealPlannerApi.Optimization.OptimizerFallbackTest do
     days = Enum.take(~w(monday tuesday wednesday thursday friday saturday sunday), days_count)
 
     %{
-      days: days,
-      slots: ["breakfast", "lunch", "dinner"],
-      constraints: %{
-        kcal_target: 2100,
-        weekly_budget_cents: 50_000,
-        account_type: "individual",
-        subscription_tier: "free",
-        inventory_items: [],
-        macro_bounds: %{
-          protein_g: %{min: 50.0, max: 200.0},
-          carbs_g: %{min: 100.0, max: 400.0},
-          fat_g: %{min: 40.0, max: 150.0}
+      "days" => days,
+      "slots" => ["breakfast", "lunch", "dinner"],
+      "constraints" => %{
+        "kcal_target" => 2100,
+        "weekly_budget_cents" => 50_000,
+        "account_type" => "individual",
+        "subscription_tier" => "free",
+        "inventory_items" => [],
+        "macro_bounds" => %{
+          "protein_g" => %{"min" => 50.0, "max" => 200.0},
+          "carbs_g" => %{"min" => 100.0, "max" => 400.0},
+          "fat_g" => %{"min" => 40.0, "max" => 150.0}
         }
       },
-      candidates_by_slot: %{
+      "candidates_by_slot" => %{
         "breakfast" => build_candidates("breakfast"),
         "lunch" => build_candidates("lunch"),
         "dinner" => build_candidates("dinner")
