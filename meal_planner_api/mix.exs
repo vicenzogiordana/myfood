@@ -31,7 +31,7 @@ defmodule MealPlannerApi.MixProject do
   def application do
     [
       mod: {MealPlannerApi.Application, []},
-      extra_applications: [:logger, :runtime_tools, :inets, :ssl]
+      extra_applications: [:logger, :runtime_tools, :inets, :ssl, :bamboo]
     ]
   end
 
@@ -62,6 +62,7 @@ defmodule MealPlannerApi.MixProject do
       {:cors_plug, "~> 3.0"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
+      {:bamboo, "~> 2.3"},
       {:uuid, "~> 1.1"},
       {:mox, "~> 1.1", only: :test},
       {:ex_doc, "~> 0.36", only: :dev, runtime: false},
