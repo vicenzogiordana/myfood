@@ -26,6 +26,26 @@ defmodule MealPlannerApiWeb.Router do
     plug(MealPlannerApiWeb.Plugs.EnforceCapability)
   end
 
+  # Phase 2 — Email-code authentication: optional Bearer decoder used by
+  # `/api/auth/email-code/verify`. Absent header → no assignment
+  # (passwordless). Present + invalid → halts with 401. Present + valid
+  # → assigns the decoded `sub` for principal binding.
+  pipeline :optional_bearer do
+    plug(MealPlannerApiWeb.Plugs.OptionalBearerUser)
+  end
+
+  # Phase 4 — Conditional authentication for `/api/auth/switch-account`
+  # (`email-code-auth-account-selection`, task 4.2). When the request
+  # body lacks `continuation_token` the plug delegates to the standard
+  # `:auth` pipeline (legacy bearer-authenticated switch). When the
+  # body carries a `continuation_token` the plug validates it as the
+  # sole credential: hash → row lookup → unconsumed / unexpired /
+  # optional bearer match. See `Plugs.SwitchAccountAuth` for the full
+  # matrix.
+  pipeline :switch_account_auth do
+    plug(MealPlannerApiWeb.Plugs.SwitchAccountAuth)
+  end
+
   scope "/api", MealPlannerApiWeb do
     pipe_through(:api)
 
@@ -42,6 +62,23 @@ defmodule MealPlannerApiWeb.Router do
     post("/auth/refresh", AuthController, :refresh)
     # Logout (G7)
     post("/auth/logout", AuthController, :logout)
+
+    # Phase 1 — Email-code authentication: unauthenticated request
+    # endpoint (`specs/email-code-authentication/spec.md` §"Code Request
+    # and Non-Enumerating Storage"). Always returns 202; rate limits
+    # surface as `429 + Retry-After`.
+    post("/auth/email-code/request", EmailCodeAuthController, :request)
+
+    # Phase 2 — Email-code authentication: verify endpoint
+    # (`specs/email-code-authentication/spec.md` §"Atomic Single-Use
+    # Code Verification" + §"Failed-Verification Lockout"). Accepts
+    # optional Bearer — the `OptionalBearerUser` plug decodes it and
+    # the controller forwards the resolved `user_id` (or `nil`) to the
+    # service for principal binding.
+    scope "/auth/email-code" do
+      pipe_through(:optional_bearer)
+      post("/verify", EmailCodeAuthController, :verify)
+    end
 
     post("/billing/revenuecat/webhook", RevenuecatController, :webhook)
 
@@ -97,8 +134,32 @@ defmodule MealPlannerApiWeb.Router do
     get("/auth/me", AccountsController, :me)
     get("/account/context", AccountsController, :context)
 
-    # Phase A — Tenancy Refactor (PR 3a task 3.5): no `:account_id` in
-    # the URL, so `:enforce_account_scope` does not apply (design §5.2).
+    # Phase A — Tenancy Refactor (PR 3a task 3.5) + Phase 4 (task 4.2):
+    # no `:account_id` in the URL, so `:enforce_account_scope` does not
+    # apply (design §5.2). The route is re-declared below on the
+    # `:switch_account_auth` pipeline so the conditional auth plug can
+    # dispatch on the body — the duplicate declaration here would
+    # raise `Phoenix.Router.NoRouteError`, so this scope intentionally
+    # leaves the route empty.
+    # post("/auth/switch-account", AccountLifecycleController, :switch_account)
+  end
+
+  # Phase 4 (task 4.2) — Conditional authentication for
+  # `/api/auth/switch-account`. The `:switch_account_auth` pipeline:
+  #
+  #   * delegates to `MealPlannerApiWeb.AuthPipeline` when the request
+  #     body lacks `continuation_token` (legacy bearer-authenticated
+  #     switch — existing behaviour);
+  #   * validates the opaque continuation token as the sole credential
+  #     when the body carries one (multi-membership verify flow —
+  #     task 3.4's continuation exchange).
+  #
+  # The route stays out of `:enforce_capability` per the design-exempt
+  # matrix in `design.md` §"Interfaces / Contracts" so an expired
+  # Account can still resolve a membership before billing recovery.
+  scope "/api", MealPlannerApiWeb do
+    pipe_through([:api, :switch_account_auth])
+
     post("/auth/switch-account", AccountLifecycleController, :switch_account)
   end
 

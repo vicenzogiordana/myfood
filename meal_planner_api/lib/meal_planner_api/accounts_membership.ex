@@ -31,6 +31,10 @@ defmodule MealPlannerApi.AccountsMembership do
   pair. The result matches design §3.2 exactly (Guardian adds `iat` and
   `exp` at sign time — those are NOT application claims).
 
+  Phase 3 (issue #31 task 3.2) adds the explicit `"user_id"` claim so
+  `MealPlannerApi.Services.EmailCodeAuth.verify_code/3` can mint the
+  JWT from the consume-result without re-loading the User struct.
+
   ## Examples
 
       iex> claims = AccountsMembership.claims_for(user, membership)
@@ -43,11 +47,36 @@ defmodule MealPlannerApi.AccountsMembership do
 
     %{
       "typ" => "access_v2",
+      "user_id" => to_string(user.id),
       "membership_id" => to_string(membership.id),
       "account_id" => to_string(membership.account_id),
       "role" => Atom.to_string(membership.role),
       "plan" => Atom.to_string(plan),
       "status" => Atom.to_string(membership.status),
+      "email" => user.email,
+      "name" => user.name
+    }
+  end
+
+  @doc """
+  Phase 3 (issue #31 task 3.2) — zero-membership outcome builder.
+
+  Builds an `access_v2` claim map for a User that has zero `:active`
+  memberships. The map intentionally OMITS `"membership_id"` (and every
+  other membership-scoped field) so `LoadCurrentMembership` halts with
+  `401 membership_id_required` after a downstream JWT is minted, which
+  routes the client to invite acceptance per `specs/email-code-
+  authentication/spec.md` §"Verify Response Outcomes by Active-
+  Membership Count".
+
+  `iat` and `exp` are Guardian-managed (added at sign time) and are not
+  the responsibility of this builder.
+  """
+  @spec claims_for(PersistenceUser.t()) :: map()
+  def claims_for(%PersistenceUser{} = user) do
+    %{
+      "typ" => "access_v2",
+      "user_id" => to_string(user.id),
       "email" => user.email,
       "name" => user.name
     }
