@@ -51,6 +51,22 @@ defmodule MealPlannerApiWeb.Router do
     # Alias for frontend (G8)
     get("/auth/me", AccountsController, :me)
     get("/account/context", AccountsController, :context)
+    get("/account/dietary-profile", DietaryProfileController, :show)
+    put("/account/dietary-profile", DietaryProfileController, :update)
+    get("/account/excluded-ingredients", DietaryProfileController, :index_exclusions)
+    post("/account/excluded-ingredients", DietaryProfileController, :create_exclusion)
+
+    delete(
+      "/account/excluded-ingredients/:ingredient_id",
+      DietaryProfileController,
+      :delete_exclusion
+    )
+  end
+
+  scope "/api", MealPlannerApiWeb do
+    pipe_through([:api, :auth, :enforce_capability])
+
+    # User endpoints (auth required, capability required)
     get("/calendar", CalendarController, :index)
     get("/calendar/slot", CalendarController, :show_slot)
     get("/planning/weekly", PlanningController, :weekly)

@@ -8,6 +8,7 @@ defmodule MealPlannerApi.Persistence.Accounts do
 
   alias MealPlannerApi.Persistence.Accounts.{
     Account,
+    AccountMembership,
     RevenuecatCustomer,
     RevenuecatEntitlement,
     RevenuecatSubscriptionSnapshot,
@@ -63,6 +64,14 @@ defmodule MealPlannerApi.Persistence.Accounts do
     from(e in UserExcludedIngredient, where: e.user_id in ^user_ids, select: e.ingredient_id)
     |> Repo.all()
     |> MapSet.new()
+  end
+
+  def list_active_member_ids(account_id) do
+    from(m in AccountMembership,
+      where: m.account_id == ^account_id and m.status == :active,
+      select: m.user_id
+    )
+    |> Repo.all()
   end
 
   def list_user_excluded_ingredients(user_id) do
