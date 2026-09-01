@@ -182,9 +182,14 @@ defmodule MealPlannerApi.Data.PlanningRepo do
   @spec candidate_recipe_ids_for_slots(pos_integer(), [pos_integer()], [atom()]) :: [
           pos_integer()
         ]
-  def candidate_recipe_ids_for_slots(account_id, user_ids, slots) when is_list(slots) do
+  def candidate_recipe_ids_for_slots(account_id, _user_ids, slots) when is_list(slots) do
     slot_strings = Enum.map(slots, &to_string/1)
-    excluded_ids = Accounts.list_user_excluded_ingredient_ids(user_ids) |> MapSet.to_list()
+
+    excluded_ids =
+      account_id
+      |> Accounts.list_active_member_ids()
+      |> Accounts.list_user_excluded_ingredient_ids()
+      |> MapSet.to_list()
 
     base_ids =
       from(r in Recipe,

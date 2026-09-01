@@ -105,30 +105,59 @@ defmodule MealPlannerApi.Services.AccountService do
   def update_dietary_profile(user, attrs) do
     case Identity.ensure_persistent_identity(user) do
       {:ok, identity} ->
-        case AccountRepo.upsert_dietary_profile(identity.user_id, attrs) do
+        profile_attrs = %{
+          diet_type: Map.get(attrs, "diet_type", Map.get(attrs, :diet_type)),
+          macro_goal: Map.get(attrs, "macro_goal", Map.get(attrs, :macro_goal))
+        }
+
+        case AccountRepo.upsert_dietary_profile(identity.user_id, profile_attrs) do
           {:ok, profile} -> {:ok, serialize_dietary_profile(profile)}
           {:error, reason} -> {:error, reason}
         end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  @spec add_excluded_ingredient(map(), pos_integer()) :: {:ok, map()} | {:error, term()}
-  def add_excluded_ingredient(user, ingredient_id) do
+  @spec dietary_profile(map()) :: {:ok, map() | nil} | {:error, term()}
+  def dietary_profile(user) do
     case Identity.ensure_persistent_identity(user) do
       {:ok, identity} ->
-        case AccountRepo.add_excluded_ingredient(identity.user_id, ingredient_id, "manual") do
-          {:ok, _excluded} -> {:ok, %{ingredient_id: ingredient_id, excluded: true}}
-          {:error, reason} -> {:error, reason}
+        case AccountRepo.get_dietary_profile(identity.user_id) do
+          nil -> {:ok, nil}
+          profile -> {:ok, serialize_dietary_profile(profile)}
         end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  @spec remove_excluded_ingredient(map(), pos_integer()) :: :ok | {:error, term()}
+  @spec add_excluded_ingredient(map(), Ecto.UUID.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def add_excluded_ingredient(user, ingredient_id, reason) do
+    case Identity.ensure_persistent_identity(user) do
+      {:ok, identity} ->
+        case AccountRepo.add_excluded_ingredient(identity.user_id, ingredient_id, reason) do
+          {:ok, excluded} -> {:ok, serialize_exclusion(excluded)}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec remove_excluded_ingredient(map(), Ecto.UUID.t()) :: :ok | {:error, term()}
   def remove_excluded_ingredient(user, ingredient_id) do
     case Identity.ensure_persistent_identity(user) do
-      {:ok, _identity} ->
-        AccountRepo.remove_excluded_ingredient(user.id, ingredient_id)
+      {:ok, identity} ->
+        AccountRepo.remove_excluded_ingredient(identity.user_id, ingredient_id)
         :ok
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -137,7 +166,10 @@ defmodule MealPlannerApi.Services.AccountService do
     case Identity.ensure_persistent_identity(user) do
       {:ok, identity} ->
         ingredients = AccountRepo.list_excluded_ingredients(identity.user_id)
-        {:ok, Enum.map(ingredients, &serialize_ingredient/1)}
+        {:ok, Enum.map(ingredients, &serialize_exclusion/1)}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -194,21 +226,15 @@ defmodule MealPlannerApi.Services.AccountService do
     %{
       id: p.id,
       user_id: p.user_id,
-      kcal_target: p.kcal_target,
-      macro_ratios: %{
-        protein: p.protein_ratio,
-        carbs: p.carbs_ratio,
-        fat: p.fat_ratio
-      },
-      excluded_ingredient_ids: p.excluded_ingredient_ids || []
+      diet_type: Atom.to_string(p.diet_type),
+      macro_goal: Atom.to_string(p.macro_goal)
     }
   end
 
-  defp serialize_ingredient(i) do
+  defp serialize_exclusion(exclusion) do
     %{
-      id: i.id,
-      name: i.name,
-      category: Atom.to_string(i.category)
+      ingredient_id: exclusion.ingredient_id,
+      reason: Atom.to_string(exclusion.reason)
     }
   end
 

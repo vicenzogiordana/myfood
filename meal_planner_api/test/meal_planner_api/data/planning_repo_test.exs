@@ -44,6 +44,7 @@ defmodule MealPlannerApi.Data.PlanningRepoTest do
   alias MealPlannerApi.Persistence.Catalog.Ingredient
   alias MealPlannerApi.Persistence.Catalog.Recipe
   alias MealPlannerApi.Persistence.Catalog.RecipeIngredient
+  alias MealPlannerApi.Persistence.Accounts.UserExcludedIngredient
   alias MealPlannerApi.Persistence.Planning.ScheduledMeal
   alias MealPlannerApi.Repo
 
@@ -436,6 +437,40 @@ defmodule MealPlannerApi.Data.PlanningRepoTest do
       assert length(favorites_a) == 1
       assert hd(favorites_a).account_id == account_a.id
       refute Enum.any?(favorites_a, &(&1.account_id == account_b.id))
+    end
+  end
+
+  describe "candidate_recipe_ids_for_slots/3 — participating member exclusions" do
+    test "excludes recipes containing an ingredient excluded by any participating member" do
+      account = insert_account("Candidate Filtering")
+
+      owner =
+        insert_user_with_active_membership(account.id, "candidate-owner@example.com", :owner)
+
+      member =
+        insert_user_with_active_membership(account.id, "candidate-member@example.com", :member)
+
+      excluded_ingredient = insert_ingredient("Excluded Candidate Ingredient")
+      allowed_ingredient = insert_ingredient("Allowed Candidate Ingredient")
+      blocked_recipe = insert_recipe("Blocked Candidate Recipe")
+      allowed_recipe = insert_recipe("Allowed Candidate Recipe")
+
+      insert_recipe_ingredient(blocked_recipe, excluded_ingredient, 100)
+      insert_recipe_ingredient(allowed_recipe, allowed_ingredient, 100)
+
+      %UserExcludedIngredient{}
+      |> UserExcludedIngredient.changeset(%{
+        user_id: member.id,
+        ingredient_id: excluded_ingredient.id,
+        reason: :allergy
+      })
+      |> Repo.insert!()
+
+      candidate_ids =
+        PlanningRepo.candidate_recipe_ids_for_slots(account.id, [owner.id, member.id], ["lunch"])
+
+      assert allowed_recipe.id in candidate_ids
+      refute blocked_recipe.id in candidate_ids
     end
   end
 

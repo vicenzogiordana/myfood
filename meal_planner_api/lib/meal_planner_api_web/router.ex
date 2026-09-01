@@ -133,6 +133,16 @@ defmodule MealPlannerApiWeb.Router do
     # Alias for frontend (G8)
     get("/auth/me", AccountsController, :me)
     get("/account/context", AccountsController, :context)
+    get("/account/dietary-profile", DietaryProfileController, :show)
+    put("/account/dietary-profile", DietaryProfileController, :update)
+    get("/account/excluded-ingredients", DietaryProfileController, :index_exclusions)
+    post("/account/excluded-ingredients", DietaryProfileController, :create_exclusion)
+
+    delete(
+      "/account/excluded-ingredients/:ingredient_id",
+      DietaryProfileController,
+      :delete_exclusion
+    )
 
     # Phase A — Tenancy Refactor (PR 3a task 3.5) + Phase 4 (task 4.2):
     # no `:account_id` in the URL, so `:enforce_account_scope` does not
