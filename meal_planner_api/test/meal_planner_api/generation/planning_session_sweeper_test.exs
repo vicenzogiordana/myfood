@@ -192,6 +192,70 @@ defmodule MealPlannerApi.Generation.PlanningSession.SweeperTest do
     end
   end
 
+  # ==========================================================================
+  # TM-1 — parallel cancel-vs-sweeper race. Both operations run
+  # against the same `:active` row; the `Repo.transaction/1` row-lock
+  # inside `cancel_session/4` plus the `FOR UPDATE SKIP LOCKED` in
+  # the sweeper guarantee exactly one of `{:cancelled, :expired}`
+  # wins, never both, never a stuck `:active`.
+  # ==========================================================================
+
+  describe "TM-1: cancel-vs-sweeper race" do
+    test "exactly one of {:cancelled, :expired} wins when both fire concurrently" do
+      account = insert_account("PR5 race")
+      user = insert_user_with_membership(account, "pr5-race@example.com", :owner)
+      membership_id = owner_membership_id(account.id, user.id)
+
+      # Lease already in the past so the sweeper is a viable contender.
+      past_lease = DateTime.add(DateTime.utc_now(), -1, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-06-01],
+          range_to: ~D[2026-06-08],
+          lock_owner_user_id: user.id,
+          lock_owner_membership_id: membership_id,
+          lease_expires_at: past_lease
+        })
+
+      session_id = session.id
+
+      # Start the sweeper (100ms tick).
+      start_supervised!({Sweeper, interval: 100, name: :test_pr5_race_sweeper},
+        id: :test_pr5_race_sweeper
+      )
+
+      # Fire the sweeper via a tick signal (immediate) and the cancel
+      # call concurrently. The race is real because both transactions
+      # try to mutate the same row.
+      sweeper_task =
+        Task.async(fn ->
+          send(Process.whereis(Sweeper), :tick)
+          :ok
+        end)
+
+      cancel_result =
+        Task.async(fn ->
+          PlanningRepo.cancel_session(account.id, session_id, membership_id, true)
+        end)
+
+      Task.await(sweeper_task, 1_000)
+      assert {:ok, _} = Task.await(cancel_result, 1_000)
+
+      # Give the sweeper a beat to run.
+      Process.sleep(150)
+
+      row = Repo.get!(PlanningSession, session_id)
+
+      # Exactly one of the two terminal statuses won. The row is NEVER
+      # still :active and it is NEVER in a hybrid / inconsistent state.
+      assert row.status in [:cancelled, :expired],
+             "expected exactly one of {:cancelled, :expired}, got #{inspect(row.status)}"
+
+      assert row.terminal_at != nil
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # helpers
   # ---------------------------------------------------------------------------

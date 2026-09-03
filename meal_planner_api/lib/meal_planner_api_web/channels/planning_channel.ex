@@ -22,7 +22,7 @@ defmodule MealPlannerApiWeb.PlanningChannel do
   use MealPlannerApiWeb, :channel
 
   alias MealPlannerApi.AccountAccess
-  alias MealPlannerApi.Generation.{PlanningSessionServer, Server}
+  alias MealPlannerApi.Generation.{PlanningSessionServer, PlanningSessionSupervisor, Server}
   alias MealPlannerApi.Services.PlanningChatService
   alias MealPlannerApiWeb.ChannelCapability
   alias MealPlannerApiWeb.Channels.IntentAtomizer
@@ -208,82 +208,61 @@ defmodule MealPlannerApiWeb.PlanningChannel do
   end
 
   def handle_in("start_planning", payload, socket) do
-    # Phase 4 PR4 — capability re-check fires here too, not only at join/3.
-    # If the Account's trial/entitlement expired mid-session, refuse the
-    # start with `:subscription_required`. The join-time guard would have
-    # already admitted the socket; this handler enforces the same rule on
-    # every new planning attempt.
+    # Phase 5 PR5 — capability re-check fires here too, not only at
+    # join/3. If the Account's trial/entitlement expired mid-session,
+    # refuse the start with `:subscription_required`. The join-time
+    # guard would have already admitted the socket; this handler
+    # enforces the same rule on every new planning attempt.
     #
-    # Session-server ownership: PR3's `PlanningSessionSupervisor` is a
-    # DynamicSupervisor but its `start_session/4` helper builds a child
-    # spec whose `start:` args list unpacks the keyword list as separate
-    # Erlang args (`apply(M, F, [{:k, v}, ...])` ⇒ arity N), so calling
-    # `start_link/1` from the supervisor crashes with `:undef`. PR3 tests
-    # never exercised that helper. We start the server directly via
-    # `PlanningSessionServer.start_link/1` linked to the channel process;
-    # the channel owns its session server for the lifetime of its join.
-    # When the channel disconnects, the link kills the server (the sweeper
-    # will expire any orphaned row). `:lost_lock` transition via the
-    # `:DOWN` monitor is not exercised in this path; that requires the
-    # supervisor fix tracked as PR5 follow-up.
+    # Session-server ownership: the `PlanningSessionServer` is owned
+    # by `PlanningSessionSupervisor` (not the channel process). The
+    # server `Process.monitor`s this channel pid; on abnormal exit
+    # the row transitions to `:lost_lock` and `session_lost_lock` is
+    # broadcast. On normal disconnect (or graceful supervisor
+    # shutdown) the server stays alive (TM-3). On the server's own
+    # crash the `:transient` strategy restarts it, `init/1` rehydrates
+    # from the DB row, and `session_resumed` is broadcast (TM-2).
     membership = socket.assigns.current_membership
     user = socket.assigns.current_user
     account_id = membership.account_id
 
     with {:ok, date_from} <- parse_iso_date(Map.get(payload, "range_from")),
          {:ok, date_to} <- parse_iso_date(Map.get(payload, "range_to")),
-         :ok <- check_account_eligible(account_id) do
-      session_id = Ecto.UUID.generate()
-
-      case PlanningSessionServer.start_link(
-             account_id: account_id,
-             session_id: session_id,
-             owner_user_id: user.id,
-             owner_membership_id: membership.id
+         :ok <- check_account_eligible(account_id),
+         {:ok, %{session_id: started_id, pid: pid}} <-
+           PlanningSessionSupervisor.start_session(
+             account_id,
+             user.id,
+             membership.id,
+             {date_from, date_to},
+             channel_pid: socket.channel_pid
            ) do
-        {:ok, pid} ->
-          case PlanningSessionServer.start_session(
-                 pid,
-                 account_id,
-                 user.id,
-                 membership.id,
-                 {date_from, date_to}
-               ) do
-            {:ok, %{session_id: started_id}} ->
-              # `session_started` is broadcast by PlanningSessionServer
-              # itself on `planning:<account_id>`. The socket (and any
-              # other joined member) receives it as a pubsub broadcast.
-              # Do NOT re-broadcast here or the event fires twice.
-              #
-              # Cache the pid on the socket assigns so `send_message`
-              # (PR4 task 4.8) can route intents back to the same server
-              # without a Registry lookup.
-              socket =
-                socket
-                |> assign(:session_id, started_id)
-                |> assign(:session_pid, pid)
+      # `session_started` is broadcast by PlanningSessionServer
+      # itself on `planning:<account_id>`. The socket (and any
+      # other joined member) receives it as a pubsub broadcast.
+      # Do NOT re-broadcast here or the event fires twice.
+      #
+      # Cache the pid on the socket assigns so `send_message`
+      # (PR4 task 4.8) can route intents back to the same server
+      # without a Registry lookup.
+      socket =
+        socket
+        |> assign(:session_id, started_id)
+        |> assign(:session_pid, pid)
 
-              {:reply, {:ok, %{session_id: started_id, status: :active}}, socket}
-
-            {:error, reason} when is_atom(reason) ->
-              {:reply, {:error, %{reason: reason}}, socket}
-
-            {:error, other} ->
-              {:reply, {:error, %{reason: serialize_reason(other)}}, socket}
-          end
-
-        {:error, reason} when is_atom(reason) ->
-          {:reply, {:error, %{reason: reason}}, socket}
-
-        {:error, other} ->
-          {:reply, {:error, %{reason: serialize_reason(other)}}, socket}
-      end
+      {:reply, {:ok, %{session_id: started_id, status: :active}}, socket}
     else
       {:error, :subscription_required} ->
         {:reply, {:error, %{reason: :subscription_required}}, socket}
 
       {:error, :invalid_range} ->
         {:reply, {:error, %{reason: :invalid_range}}, socket}
+
+      {:error, reason} when is_atom(reason) ->
+        {:reply, {:error, %{reason: reason}}, socket}
+
+      {:error, other} ->
+        {:reply, {:error, %{reason: serialize_reason(other)}}, socket}
     end
   end
 
