@@ -214,4 +214,134 @@ defmodule MealPlannerApiWeb.AIChannelTest do
       assert_broadcast("ai_response_started", %{account_id: ^account_id_b})
     end
   end
+
+  # ==========================================================================
+  # Phase 4 — PR4 `AIChannel` typed-intent boundary (tasks 4.5 / 4.6).
+  # The `new_message` handler validates the optional `intent` payload
+  # against `GenerationService.validate_ai_intent/1` and, on success,
+  # broadcasts `send_intent` on `planning:<account_id>`. On failure
+  # (`forbidden_intent`, `unknown_intent`, `invalid_payload`) the
+  # channel short-circuits: the AI stream is NOT started and the
+  # caller gets the matching atom reason. The existing AI stream
+  # flow is preserved when no intent is supplied (backward compat).
+  # ==========================================================================
+
+  describe "handle_in new_message intent boundary (task 4.5 / 4.6)" do
+    test "valid intent: broadcast send_intent on planning topic, AI stream runs",
+         %{account: account, token: token} do
+      Phoenix.PubSub.subscribe(MealPlannerApi.PubSub, "planning:#{account.id}")
+
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+      {:ok, _reply, socket} =
+        subscribe_and_join(socket, AIChannel, "ai_chat:valid_intent")
+
+      push(socket, "new_message", %{
+        "message" => "ajusta el budget",
+        "intent" => %{
+          "kind" => "change_constraints",
+          "payload" => %{"budget_cents" => 5000}
+        }
+      })
+
+      assert_broadcast("send_intent", %{
+        "intent" => %{kind: :change_constraints, payload: %{budget_cents: 5000}}
+      })
+    end
+
+    test "forbidden key (recipe_id) inside intent payload: :forbidden_intent, no broadcast, no stream",
+         %{account: account, token: token} do
+      Phoenix.PubSub.subscribe(MealPlannerApi.PubSub, "planning:#{account.id}")
+
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+      {:ok, _reply, socket} =
+        subscribe_and_join(socket, AIChannel, "ai_chat:forbidden_intent")
+
+      ref =
+        push(socket, "new_message", %{
+          "message" => "ajusta el budget",
+          "intent" => %{
+            "kind" => "change_constraints",
+            "payload" => %{"recipe_id" => "attacker-supplied-id"}
+          }
+        })
+
+      assert_reply(ref, :error, %{reason: :forbidden_intent})
+
+      # No `send_intent` broadcast on the planning topic.
+      refute_receive %Phoenix.Socket.Broadcast{
+                       topic: "planning:" <> _,
+                       event: "send_intent"
+                     },
+                     100
+
+      # The AI stream must NOT have started (no `ai_response_started`
+      # broadcast on the ai_chat topic either).
+      refute_receive %Phoenix.Socket.Broadcast{
+                       topic: "ai_chat:" <> _,
+                       event: "ai_response_started"
+                     },
+                     100
+    end
+
+    test "unknown :kind: :unknown_intent, no broadcast",
+         %{account: account, token: token} do
+      Phoenix.PubSub.subscribe(MealPlannerApi.PubSub, "planning:#{account.id}")
+
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+      {:ok, _reply, socket} =
+        subscribe_and_join(socket, AIChannel, "ai_chat:unknown_intent")
+
+      ref =
+        push(socket, "new_message", %{
+          "message" => "ajusta el budget",
+          "intent" => %{
+            "kind" => "totally_made_up",
+            "payload" => %{}
+          }
+        })
+
+      assert_reply(ref, :error, %{reason: :unknown_intent})
+
+      refute_receive %Phoenix.Socket.Broadcast{
+                       topic: "planning:" <> _,
+                       event: "send_intent"
+                     },
+                     100
+    end
+
+    test "non-map intent: :invalid_payload, no broadcast",
+         %{token: token} do
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+      {:ok, _reply, socket} = subscribe_and_join(socket, AIChannel, "ai_chat:bad_intent")
+
+      ref = push(socket, "new_message", %{"message" => "hola", "intent" => "not-a-map"})
+
+      assert_reply(ref, :error, %{reason: :invalid_payload})
+    end
+
+    test "no intent supplied: AI stream runs as before, no send_intent broadcast",
+         %{account: account, token: token} do
+      Phoenix.PubSub.subscribe(MealPlannerApi.PubSub, "planning:#{account.id}")
+
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+      {:ok, _reply, socket} =
+        subscribe_and_join(socket, AIChannel, "ai_chat:no_intent")
+
+      push(socket, "new_message", %{"message" => "hola"})
+
+      # The AI stream should still start (backward compat).
+      assert_broadcast("ai_response_started", _)
+
+      # No `send_intent` broadcast — there was no intent.
+      refute_receive %Phoenix.Socket.Broadcast{
+                       topic: "planning:" <> _,
+                       event: "send_intent"
+                     },
+                     100
+    end
+  end
 end
