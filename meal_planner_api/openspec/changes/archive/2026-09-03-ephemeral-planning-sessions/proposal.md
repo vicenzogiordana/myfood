@@ -59,10 +59,10 @@ Postgres range types + `btree_gist`. Issues #30–#32 merged. Parent #29. To sat
 
 ## Success Criteria
 
-- [ ] Overlap `start_planning` → `{:error, :overlapping_range}`.
-- [ ] Cancel hard-deletes `planning_messages` + `planning_exceptions`; broadcasts `session_cancelled`.
-- [ ] AI `:recipe_id` / `:proposal_id` → `:forbidden_intent`; ineligible Account `start_planning` → `:subscription_required`.
-- [ ] `mix test --max-failures 10` passes; `mix precommit` no new warnings.
+- [x] Overlap `start_planning` → `{:error, :overlapping_range}`.
+- [x] Cancel hard-deletes `planning_messages` + `planning_exceptions`; broadcasts `session_cancelled`.
+- [x] AI `:recipe_id` / `:proposal_id` → `:forbidden_intent`; ineligible Account `start_planning` → `:subscription_required`.
+- [x] `mix test --max-failures 10` passes; `mix precommit` no new warnings.
 
 ## Work Units
 

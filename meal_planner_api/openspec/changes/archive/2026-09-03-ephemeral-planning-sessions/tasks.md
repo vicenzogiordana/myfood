@@ -59,27 +59,27 @@ Chain strategy: stacked-to-main
 
 ## Phase 4: Channel Events + Capability Re-check (PR4)
 
-- [ ] 4.1 RED: `describe "PlanningChannel handle_in start_planning"` — happy + ineligible → `:subscription_required` + overlap → `:overlapping_range` (`channels/planning_channel_test.exs`).
-- [ ] 4.2 GREEN: implement `handle_in("start_planning", ...)` — re-check `AccountAccess.eligible?/1` + `PlanningSessionServer.start_session` + broadcast `session_started`.
-- [ ] 4.3 RED: `describe "handle_in cancel_planning"` — owner-cancel `:ok`; non-owner peer `:forbidden`; Account owner cancels peer `:ok`.
-- [ ] 4.4 GREEN: implement `handle_in("cancel_planning", ...)`.
-- [ ] 4.5 RED: `describe "AIChannel handle_in new_message"` — intent `:recipe_id` rejected (no forward); valid intent forwarded as `send_intent` on `planning:<account_id>`.
-- [ ] 4.6 GREEN: modify `ai_channel.ex` — call `validate_ai_intent/1` after Gemini stream; `:ok` → broadcast `send_intent`; `:error` → reply error.
-- [ ] 4.7 RED: `describe "PlanningChannel handle_in send_message"` — accepts validated intent + applies via `PlanningSessionServer.apply_intent`.
-- [ ] 4.8 GREEN: implement `handle_in("send_message", ...)`.
+- [x] 4.1 RED: `describe "PlanningChannel handle_in start_planning"` — happy + ineligible → `:subscription_required` + overlap → `:overlapping_range` (`channels/planning_channel_test.exs`).
+- [x] 4.2 GREEN: implement `handle_in("start_planning", ...)` — re-check `AccountAccess.eligible?/1` + `PlanningSessionServer.start_session` + broadcast `session_started`.
+- [x] 4.3 RED: `describe "handle_in cancel_planning"` — owner-cancel `:ok`; non-owner peer `:forbidden`; Account owner cancels peer `:ok`.
+- [x] 4.4 GREEN: implement `handle_in("cancel_planning", ...)`.
+- [x] 4.5 RED: `describe "AIChannel handle_in new_message"` — intent `:recipe_id` rejected (no forward); valid intent forwarded as `send_intent` on `planning:<account_id>`.
+- [x] 4.6 GREEN: modify `ai_channel.ex` — call `validate_ai_intent/1` after Gemini stream; `:ok` → broadcast `send_intent`; `:error` → reply error.
+- [x] 4.7 RED: `describe "PlanningChannel handle_in send_message"` — accepts validated intent + applies via `PlanningSessionServer.apply_intent`.
+- [x] 4.8 GREEN: implement `handle_in("send_message", ...)`.
 
 ## Phase 5: Integration Verification (PR5)
 
-- [ ] 5.1 Run `mix test --max-failures 10` — full suite passes.
-- [ ] 5.2 Manual e2e: 2 sockets on same `planning:<account_id>`; A starts; B overlap → `:overlapping_range`; B non-overlap → `:ok`; A cancels → `session_cancelled` on BOTH sockets.
-- [ ] 5.3 Sweeper manual: insert `lease_expires_at` 1s past; wait 1 tick; assert `:expired` + broadcast.
-- [ ] 5.4 Lost-lock manual: kill GenServer abnormally; assert row → `:lost_lock` + broadcast.
-- [ ] 5.5 Run `mix precommit` — no new warnings.
+- [x] 5.1 Run `mix test --max-failures 10` — full suite passes.
+- [x] 5.2 Manual e2e: 2 sockets on same `planning:<account_id>`; A starts; B overlap → `:overlapping_range`; B non-overlap → `:ok`; A cancels → `session_cancelled` on BOTH sockets.
+- [x] 5.3 Sweeper manual: insert `lease_expires_at` 1s past; wait 1 tick; assert `:expired` + broadcast.
+- [x] 5.4 Lost-lock manual: kill GenServer abnormally; assert row → `:lost_lock` + broadcast.
+- [x] 5.5 Run `mix precommit` — no new warnings.
 
 ## Threat Matrix Tasks
 
-- [ ] TM-1 RED: parallel cancel-vs-sweeper race — 2 Tasks; assert exactly one of `{:cancelled, :expired}` wins.
-- [ ] TM-1 GREEN: confirm `SKIP LOCKED` + `Repo.transaction` row-lock prevent race.
-- [ ] TM-2 RED: supervisor restart — kill server pid; assert rehydrate from DB + broadcast `session_resumed`.
-- [ ] TM-3 RED: owner-crash `:normal` MUST NOT trigger `:lost_lock` (`Process.exit(self, :normal)` → no transition).
-- [ ] TM-4 RED: broadcast after process death — kill mid-session OR dead process → broadcast / `:expired` fires.
+- [x] TM-1 RED: parallel cancel-vs-sweeper race — 2 Tasks; assert exactly one of `{:cancelled, :expired}` wins.
+- [x] TM-1 GREEN: confirm `SKIP LOCKED` + `Repo.transaction` row-lock prevent race.
+- [x] TM-2 RED: supervisor restart — kill server pid; assert rehydrate from DB + broadcast `session_resumed`.
+- [x] TM-3 RED: owner-crash `:normal` MUST NOT trigger `:lost_lock` (`Process.exit(self, :normal)` → no transition).
+- [x] TM-4 RED: broadcast after process death — kill mid-session OR dead process → broadcast / `:expired` fires.
