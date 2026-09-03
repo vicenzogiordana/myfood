@@ -36,6 +36,8 @@ defmodule MealPlannerApi.Data.PlanningRepoTest do
   """
   use ExUnit.Case, async: false
 
+  import Ecto.Query, warn: false
+
   alias Ecto.Adapters.SQL.Sandbox
   alias MealPlannerApi.Data.PlanningRepo
   alias MealPlannerApi.Persistence.Accounts.Account, as: PersistenceAccount
@@ -45,6 +47,9 @@ defmodule MealPlannerApi.Data.PlanningRepoTest do
   alias MealPlannerApi.Persistence.Catalog.Recipe
   alias MealPlannerApi.Persistence.Catalog.RecipeIngredient
   alias MealPlannerApi.Persistence.Accounts.UserExcludedIngredient
+  alias MealPlannerApi.Persistence.Planning.PlanningException
+  alias MealPlannerApi.Persistence.Planning.PlanningMessage
+  alias MealPlannerApi.Persistence.Planning.PlanningSession
   alias MealPlannerApi.Persistence.Planning.ScheduledMeal
   alias MealPlannerApi.Repo
 
@@ -474,6 +479,433 @@ defmodule MealPlannerApi.Data.PlanningRepoTest do
     end
   end
 
+  # =========================================================================
+  # PR2 — ephemeral-planning-sessions: PlanningRepo lifecycle CRUD
+  # =========================================================================
+
+  describe "create_session/2 — writes one :active row per (account, range)" do
+    test "happy path: inserts a planning session and returns {:ok, %PlanningSession{}} with status :active" do
+      account = insert_account("Create Session Happy")
+      owner = insert_user_with_active_membership(account.id, "create-happy@example.com", :owner)
+
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      assert {:ok, %PlanningSession{} = session} =
+               PlanningRepo.create_session(account.id, %{
+                 range_from: ~D[2026-03-01],
+                 range_to: ~D[2026-03-08],
+                 lock_owner_user_id: owner.id,
+                 lock_owner_membership_id: owner_membership_id(account.id, owner.id),
+                 lease_expires_at: lease
+               })
+
+      assert session.status == :active
+      assert session.account_id == account.id
+      assert session.range_from == ~D[2026-03-01]
+      assert session.range_to == ~D[2026-03-08]
+      assert session.lock_owner_user_id == owner.id
+      assert session.started_at != nil
+
+      # The row is actually in the DB.
+      fetched = Repo.get!(PlanningSession, session.id)
+      assert fetched.status == :active
+      assert fetched.account_id == account.id
+    end
+
+    test "overlapping active ranges on the same account return {:error, :overlapping_range}" do
+      account = insert_account("Create Session Overlap")
+      owner = insert_user_with_active_membership(account.id, "create-overlap@example.com", :owner)
+
+      membership_id = owner_membership_id(account.id, owner.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      assert {:ok, _first} =
+               PlanningRepo.create_session(account.id, %{
+                 range_from: ~D[2026-03-01],
+                 range_to: ~D[2026-03-08],
+                 lock_owner_user_id: owner.id,
+                 lock_owner_membership_id: membership_id,
+                 lease_expires_at: lease
+               })
+
+      assert {:error, :overlapping_range} =
+               PlanningRepo.create_session(account.id, %{
+                 range_from: ~D[2026-03-05],
+                 range_to: ~D[2026-03-12],
+                 lock_owner_user_id: owner.id,
+                 lock_owner_membership_id: membership_id,
+                 lease_expires_at: lease
+               })
+
+      # Only the first session row exists on the account.
+      count =
+        Repo.one!(
+          from(s in PlanningSession,
+            where: s.account_id == ^account.id,
+            select: count(s.id)
+          )
+        )
+
+      assert count == 1
+    end
+
+    test "different accounts can hold overlapping active ranges (EXCLUDE is per-account)" do
+      account_a = insert_account("Create Session Per-Account A")
+      account_b = insert_account("Create Session Per-Account B")
+
+      owner_a =
+        insert_user_with_active_membership(account_a.id, "create-per-acct-a@example.com", :owner)
+
+      owner_b =
+        insert_user_with_active_membership(account_b.id, "create-per-acct-b@example.com", :owner)
+
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      assert {:ok, session_a} =
+               PlanningRepo.create_session(account_a.id, %{
+                 range_from: ~D[2026-03-01],
+                 range_to: ~D[2026-03-08],
+                 lock_owner_user_id: owner_a.id,
+                 lock_owner_membership_id: owner_membership_id(account_a.id, owner_a.id),
+                 lease_expires_at: lease
+               })
+
+      assert {:ok, session_b} =
+               PlanningRepo.create_session(account_b.id, %{
+                 range_from: ~D[2026-03-01],
+                 range_to: ~D[2026-03-08],
+                 lock_owner_user_id: owner_b.id,
+                 lock_owner_membership_id: owner_membership_id(account_b.id, owner_b.id),
+                 lease_expires_at: lease
+               })
+
+      assert session_a.account_id != session_b.account_id
+      assert session_a.id != session_b.id
+    end
+  end
+
+  describe "cancel_session/4 — owner-scoped cancel, hard-deletes children" do
+    test "the session owner cancels their own session: status -> :cancelled, children hard-deleted" do
+      account = insert_account("Cancel Owner")
+      owner = insert_user_with_active_membership(account.id, "cancel-owner@example.com", :owner)
+
+      membership_id = owner_membership_id(account.id, owner.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-04-01],
+          range_to: ~D[2026-04-08],
+          lock_owner_user_id: owner.id,
+          lock_owner_membership_id: membership_id,
+          lease_expires_at: lease
+        })
+
+      # Seed children so we can prove they're hard-deleted.
+      seed_children!(session.id, account.id)
+
+      {messages_before, exceptions_before} = child_counts(session.id)
+      assert messages_before == 1
+      assert exceptions_before == 1
+
+      assert {:ok, %PlanningSession{} = cancelled} =
+               PlanningRepo.cancel_session(
+                 account.id,
+                 session.id,
+                 membership_id,
+                 false
+               )
+
+      assert cancelled.id == session.id
+      assert cancelled.status == :cancelled
+      assert cancelled.terminal_at != nil
+
+      # Session row remains queryable for audit.
+      assert Repo.get!(PlanningSession, session.id).status == :cancelled
+
+      # Children hard-deleted.
+      {messages_after, exceptions_after} = child_counts(session.id)
+      assert messages_after == 0
+      assert exceptions_after == 0
+    end
+
+    test "a non-owner peer cannot cancel someone else's session: returns {:error, :forbidden}" do
+      account = insert_account("Cancel Peer Forbidden")
+
+      owner =
+        insert_user_with_active_membership(account.id, "cancel-peer-owner@example.com", :owner)
+
+      peer =
+        insert_user_with_active_membership(account.id, "cancel-peer-peer@example.com", :member)
+
+      owner_membership = owner_membership_id(account.id, owner.id)
+      peer_membership = owner_membership_id(account.id, peer.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-04-01],
+          range_to: ~D[2026-04-08],
+          lock_owner_user_id: owner.id,
+          lock_owner_membership_id: owner_membership,
+          lease_expires_at: lease
+        })
+
+      assert {:error, :forbidden} =
+               PlanningRepo.cancel_session(
+                 account.id,
+                 session.id,
+                 peer_membership,
+                 false
+               )
+
+      # Session still active, no children deleted.
+      assert Repo.get!(PlanningSession, session.id).status == :active
+    end
+
+    test "account :owner can cancel a peer's session (peer_membership, true flag)" do
+      account = insert_account("Cancel Account Owner")
+
+      owner =
+        insert_user_with_active_membership(account.id, "cancel-acct-owner@example.com", :owner)
+
+      peer =
+        insert_user_with_active_membership(account.id, "cancel-acct-peer@example.com", :member)
+
+      owner_membership = owner_membership_id(account.id, owner.id)
+      peer_membership = owner_membership_id(account.id, peer.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-04-01],
+          range_to: ~D[2026-04-08],
+          lock_owner_user_id: peer.id,
+          lock_owner_membership_id: peer_membership,
+          lease_expires_at: lease
+        })
+
+      seed_children!(session.id, account.id)
+
+      assert {:ok, %PlanningSession{} = cancelled} =
+               PlanningRepo.cancel_session(
+                 account.id,
+                 session.id,
+                 owner_membership,
+                 true
+               )
+
+      assert cancelled.status == :cancelled
+
+      {messages_after, exceptions_after} = child_counts(session.id)
+      assert messages_after == 0
+      assert exceptions_after == 0
+    end
+
+    test "cancelling a session that is already terminal returns {:error, :not_active}" do
+      account = insert_account("Cancel Terminal")
+
+      owner =
+        insert_user_with_active_membership(account.id, "cancel-terminal@example.com", :owner)
+
+      membership_id = owner_membership_id(account.id, owner.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-04-01],
+          range_to: ~D[2026-04-08],
+          lock_owner_user_id: owner.id,
+          lock_owner_membership_id: membership_id,
+          lease_expires_at: lease
+        })
+
+      assert {:ok, %PlanningSession{}} =
+               PlanningRepo.cancel_session(account.id, session.id, membership_id, false)
+
+      assert {:error, :not_active} =
+               PlanningRepo.cancel_session(account.id, session.id, membership_id, false)
+    end
+
+    test "cancelling a session that does not exist returns {:error, :not_active}" do
+      account = insert_account("Cancel Not Found")
+      owner = insert_user_with_active_membership(account.id, "cancel-missing@example.com", :owner)
+
+      missing_id = Ecto.UUID.generate()
+      membership_id = owner_membership_id(account.id, owner.id)
+
+      # `fetch_active_session/2` runs before the actor authorization; a
+      # missing session id is treated as "no active session" — same
+      # outcome as a terminal one, but without the auth check.
+      assert {:error, :not_active} =
+               PlanningRepo.cancel_session(account.id, missing_id, membership_id, true)
+    end
+  end
+
+  describe "expire_session/2 — sweeper-driven transition to :expired" do
+    test "an active session transitions to :expired and children are hard-deleted" do
+      account = insert_account("Expire Active")
+      owner = insert_user_with_active_membership(account.id, "expire-active@example.com", :owner)
+
+      membership_id = owner_membership_id(account.id, owner.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-05-01],
+          range_to: ~D[2026-05-08],
+          lock_owner_user_id: owner.id,
+          lock_owner_membership_id: membership_id,
+          lease_expires_at: lease
+        })
+
+      seed_children!(session.id, account.id)
+
+      assert {:ok, %PlanningSession{} = expired} =
+               PlanningRepo.expire_session(account.id, session.id)
+
+      assert expired.status == :expired
+      assert expired.terminal_at != nil
+
+      {messages_after, exceptions_after} = child_counts(session.id)
+      assert messages_after == 0
+      assert exceptions_after == 0
+    end
+
+    test "expiring a session that is already terminal returns {:error, :not_active}" do
+      account = insert_account("Expire Terminal")
+
+      owner =
+        insert_user_with_active_membership(account.id, "expire-terminal@example.com", :owner)
+
+      membership_id = owner_membership_id(account.id, owner.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-05-01],
+          range_to: ~D[2026-05-08],
+          lock_owner_user_id: owner.id,
+          lock_owner_membership_id: membership_id,
+          lease_expires_at: lease
+        })
+
+      assert {:ok, %PlanningSession{}} = PlanningRepo.expire_session(account.id, session.id)
+      assert {:error, :not_active} = PlanningRepo.expire_session(account.id, session.id)
+    end
+  end
+
+  describe "mark_lost_lock/2 — owner-process-death transition to :lost_lock" do
+    test "an active session transitions to :lost_lock and children are hard-deleted" do
+      account = insert_account("Lost Lock Active")
+
+      owner =
+        insert_user_with_active_membership(account.id, "lost-lock-active@example.com", :owner)
+
+      membership_id = owner_membership_id(account.id, owner.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-06-01],
+          range_to: ~D[2026-06-08],
+          lock_owner_user_id: owner.id,
+          lock_owner_membership_id: membership_id,
+          lease_expires_at: lease
+        })
+
+      seed_children!(session.id, account.id)
+
+      assert {:ok, %PlanningSession{} = lost_lock} =
+               PlanningRepo.mark_lost_lock(account.id, session.id)
+
+      assert lost_lock.status == :lost_lock
+      assert lost_lock.terminal_at != nil
+
+      {messages_after, exceptions_after} = child_counts(session.id)
+      assert messages_after == 0
+      assert exceptions_after == 0
+    end
+
+    test "marking lost_lock on a session that is already terminal returns {:error, :not_active}" do
+      account = insert_account("Lost Lock Terminal")
+
+      owner =
+        insert_user_with_active_membership(account.id, "lost-lock-terminal@example.com", :owner)
+
+      membership_id = owner_membership_id(account.id, owner.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-06-01],
+          range_to: ~D[2026-06-08],
+          lock_owner_user_id: owner.id,
+          lock_owner_membership_id: membership_id,
+          lease_expires_at: lease
+        })
+
+      assert {:ok, %PlanningSession{}} = PlanningRepo.mark_lost_lock(account.id, session.id)
+      assert {:error, :not_active} = PlanningRepo.mark_lost_lock(account.id, session.id)
+    end
+  end
+
+  describe "mark_committed/2 — confirm_proposal transition to :committed, children PRESERVED" do
+    test "an active session transitions to :committed and children are PRESERVED (audit trail)" do
+      account = insert_account("Commit Active")
+      owner = insert_user_with_active_membership(account.id, "commit-active@example.com", :owner)
+
+      membership_id = owner_membership_id(account.id, owner.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-07-01],
+          range_to: ~D[2026-07-08],
+          lock_owner_user_id: owner.id,
+          lock_owner_membership_id: membership_id,
+          lease_expires_at: lease
+        })
+
+      seed_children!(session.id, account.id)
+
+      assert {:ok, %PlanningSession{} = committed} =
+               PlanningRepo.mark_committed(account.id, session.id)
+
+      assert committed.status == :committed
+      assert committed.terminal_at != nil
+
+      # CRITICAL: children are NOT hard-deleted on :committed — only on
+      # :cancelled / :expired / :lost_lock per spec §"Audit trail after
+      # terminal transition".
+      {messages_after, exceptions_after} = child_counts(session.id)
+      assert messages_after == 1
+      assert exceptions_after == 1
+    end
+
+    test "committing a session that is already terminal returns {:error, :not_active}" do
+      account = insert_account("Commit Terminal")
+
+      owner =
+        insert_user_with_active_membership(account.id, "commit-terminal@example.com", :owner)
+
+      membership_id = owner_membership_id(account.id, owner.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-07-01],
+          range_to: ~D[2026-07-08],
+          lock_owner_user_id: owner.id,
+          lock_owner_membership_id: membership_id,
+          lease_expires_at: lease
+        })
+
+      assert {:ok, %PlanningSession{}} = PlanningRepo.mark_committed(account.id, session.id)
+      assert {:error, :not_active} = PlanningRepo.mark_committed(account.id, session.id)
+    end
+  end
+
   # ---- helpers --------------------------------------------------------------
 
   defp insert_account(name) do
@@ -561,5 +993,48 @@ defmodule MealPlannerApi.Data.PlanningRepoTest do
       proposal_json: %{"title" => label},
       status: :pending
     })
+  end
+
+  # ---- PR2 helpers --------------------------------------------------------
+
+  defp owner_membership_id(account_id, user_id) do
+    membership =
+      Repo.one!(
+        from(m in AccountMembership,
+          where: m.account_id == ^account_id and m.user_id == ^user_id and m.status == :active
+        )
+      )
+
+    membership.id
+  end
+
+  defp seed_children!(session_id, account_id) do
+    Repo.insert!(%PlanningMessage{
+      account_id: account_id,
+      session_id: session_id,
+      role: :user,
+      content: "hello"
+    })
+
+    Repo.insert!(%PlanningException{
+      account_id: account_id,
+      session_id: session_id,
+      kind: "test",
+      note: "seeded"
+    })
+  end
+
+  defp child_counts(session_id) do
+    messages =
+      Repo.one!(
+        from(m in PlanningMessage, where: m.session_id == ^session_id, select: count(m.id))
+      )
+
+    exceptions =
+      Repo.one!(
+        from(e in PlanningException, where: e.session_id == ^session_id, select: count(e.id))
+      )
+
+    {messages, exceptions}
   end
 end

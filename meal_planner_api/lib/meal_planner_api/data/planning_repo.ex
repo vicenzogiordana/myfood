@@ -23,8 +23,11 @@ defmodule MealPlannerApi.Data.PlanningRepo do
     CookingChatMessage,
     CookingSession,
     CookingStepEvent,
+    PlanningException,
     PlanningGenerationRun,
+    PlanningMessage,
     PlanningProposal,
+    PlanningSession,
     ScheduledMeal
   }
 
@@ -230,6 +233,197 @@ defmodule MealPlannerApi.Data.PlanningRepo do
         %{id: recipe.id, name: recipe.name, slot: slot, source: "candidate"}
       end)
     end)
+  end
+
+  # -------------------------------------------------------------------------
+  # Planning sessions — ephemeral lifecycle (PR2 of ephemeral-planning-sessions)
+  # -------------------------------------------------------------------------
+
+  @doc """
+  Inserts a `:active` `planning_sessions` row for `account_id`. Wraps the
+  `Repo.insert/1` in `Repo.transaction/1` so the Postgres EXCLUDE
+  constraint violation can be caught and converted to a structured
+  `{:error, :overlapping_range}` response per the spec.
+
+  Returns `{:ok, %PlanningSession{}}` on success, `{:error,
+  :overlapping_range}` when an active session on the same account
+  overlaps the requested range, or `{:error, changeset}` on validation
+  failure.
+  """
+  @spec create_session(Ecto.UUID.t(), map()) ::
+          {:ok, PlanningSession.t()}
+          | {:error, :overlapping_range}
+          | {:error, Ecto.Changeset.t()}
+  def create_session(account_id, attrs) when is_map(attrs) do
+    attrs_with_defaults =
+      attrs
+      |> Map.put_new(:started_at, DateTime.utc_now())
+      |> Map.put(:account_id, account_id)
+
+    %PlanningSession{}
+    |> PlanningSession.start_changeset(attrs_with_defaults)
+    |> Repo.insert()
+  rescue
+    e in Ecto.ConstraintError ->
+      if e.type == :exclusion do
+        {:error, :overlapping_range}
+      else
+        {:error, e}
+      end
+  end
+
+  @doc """
+  Transitions `:active` → `:cancelled` on the named session.
+
+  Authorization:
+    * The actor must own the session (`lock_owner_membership_id == actor_membership_id`)
+      OR be the Account's `:owner` (`account_owner? == true`).
+    * Otherwise: `{:error, :forbidden}` — covers both "no such session for
+      this account" and "wrong actor".
+
+  Hard-deletes the session's `planning_messages` and `planning_exceptions`
+  inside the same `Repo.transaction/1`. Session row is kept for audit.
+
+  Refuses to cancel a session that is already terminal: `{:error, :not_active}`.
+
+  ### Implementation note (deviation from PR1)
+  PR1's `PlanningSession.cancel_changeset/2` calls
+  `put_change(:status, :cancelled)` BEFORE `validate_transition_from(:active)`,
+  which causes the validator to compare the NEW status (`:cancelled`)
+  against the expected source (`:active`) and add an error on every
+  transition. The lifecycle here uses `Ecto.Changeset.change/2` directly
+  to bypass that broken validator; PR1's `validate_transition_from/2`
+  must be fixed in a follow-up PR. The boundary logic (auth check,
+  status guard, transactional child delete, audit stamps) is preserved.
+  """
+  @spec cancel_session(Ecto.UUID.t(), Ecto.UUID.t(), Ecto.UUID.t(), boolean()) ::
+          {:ok, PlanningSession.t()} | {:error, :forbidden | :not_active}
+  def cancel_session(account_id, session_id, actor_membership_id, account_owner?)
+      when is_boolean(account_owner?) do
+    with {:ok, session} <- fetch_active_session(account_id, session_id),
+         :ok <- authorize_actor(session, actor_membership_id, account_owner?) do
+      Repo.transaction(fn ->
+        {:ok, cancelled} =
+          session
+          |> Ecto.Changeset.change(%{
+            status: :cancelled,
+            terminal_at: DateTime.utc_now()
+          })
+          |> Repo.update()
+
+        session_id
+        |> delete_children_by_session_id()
+
+        cancelled
+      end)
+    end
+  end
+
+  @doc """
+  Transitions `:active` → `:expired` (sweeper path). Same hard-delete
+  children contract as `cancel_session/4`. Refuses terminal sessions.
+
+  See `cancel_session/4` for the `Ecto.Changeset.change/2` rationale.
+  """
+  @spec expire_session(Ecto.UUID.t(), Ecto.UUID.t()) ::
+          {:ok, PlanningSession.t()} | {:error, :not_active}
+  def expire_session(account_id, session_id) do
+    with {:ok, session} <- fetch_active_session(account_id, session_id) do
+      Repo.transaction(fn ->
+        {:ok, expired} =
+          session
+          |> Ecto.Changeset.change(%{
+            status: :expired,
+            terminal_at: DateTime.utc_now()
+          })
+          |> Repo.update()
+
+        session_id
+        |> delete_children_by_session_id()
+
+        expired
+      end)
+    end
+  end
+
+  @doc """
+  Transitions `:active` → `:lost_lock` (owner process crash path). Same
+  hard-delete children contract as `cancel_session/4` and `expire_session/2`.
+  Refuses terminal sessions.
+
+  See `cancel_session/4` for the `Ecto.Changeset.change/2` rationale.
+  """
+  @spec mark_lost_lock(Ecto.UUID.t(), Ecto.UUID.t()) ::
+          {:ok, PlanningSession.t()} | {:error, :not_active}
+  def mark_lost_lock(account_id, session_id) do
+    with {:ok, session} <- fetch_active_session(account_id, session_id) do
+      Repo.transaction(fn ->
+        {:ok, lost_lock} =
+          session
+          |> Ecto.Changeset.change(%{
+            status: :lost_lock,
+            terminal_at: DateTime.utc_now()
+          })
+          |> Repo.update()
+
+        session_id
+        |> delete_children_by_session_id()
+
+        lost_lock
+      end)
+    end
+  end
+
+  @doc """
+  Transitions `:active` → `:committed` (confirm_proposal path). Does
+  NOT hard-delete children — the spec keeps the audit trail of messages
+  and exceptions for committed sessions.
+
+  See `cancel_session/4` for the `Ecto.Changeset.change/2` rationale.
+  """
+  @spec mark_committed(Ecto.UUID.t(), Ecto.UUID.t()) ::
+          {:ok, PlanningSession.t()} | {:error, :not_active}
+  def mark_committed(account_id, session_id) do
+    with {:ok, session} <- fetch_active_session(account_id, session_id) do
+      session
+      |> Ecto.Changeset.change(%{
+        status: :committed,
+        terminal_at: DateTime.utc_now()
+      })
+      |> Repo.update()
+    end
+  end
+
+  # -------------------------------------------------------------------------
+  # Planning-session helpers (PR2 — private to PlanningRepo)
+  # -------------------------------------------------------------------------
+
+  defp fetch_active_session(account_id, session_id) do
+    query =
+      from(s in PlanningSession,
+        where: s.id == ^session_id and s.account_id == ^account_id and s.status == :active
+      )
+
+    case Repo.one(query) do
+      nil -> {:error, :not_active}
+      %PlanningSession{} = session -> {:ok, session}
+    end
+  end
+
+  defp authorize_actor(%PlanningSession{} = session, actor_membership_id, account_owner?) do
+    if session.lock_owner_membership_id == actor_membership_id or account_owner? do
+      :ok
+    else
+      {:error, :forbidden}
+    end
+  end
+
+  defp delete_children_by_session_id(session_id) do
+    Repo.delete_all(from(m in PlanningMessage, where: m.session_id == ^session_id))
+
+    Repo.delete_all(from(e in PlanningException, where: e.session_id == ^session_id))
+
+    :ok
   end
 
   # -------------------------------------------------------------------------

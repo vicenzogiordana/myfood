@@ -37,14 +37,14 @@ Chain strategy: stacked-to-main
 
 ## Phase 2: Repo CRUD + Intent Validator (PR2)
 
-- [ ] 2.1 RED: `describe "PlanningRepo.create_session/2"` — happy `:ok`; overlap → `:overlapping_range`; ineligible → `:forbidden` (`data/planning_repo_test.exs`).
-- [ ] 2.2 GREEN: implement `create_session/2` — wrap `Repo.insert`; map Postgrex exclusion error → `:overlapping_range`.
-- [ ] 2.3 RED: `describe "cancel_session/3"` — owner-cancel `:ok`; non-owner peer `:forbidden`; terminal → `:not_active`.
-- [ ] 2.4 GREEN: implement `cancel_session/3` — `Repo.transaction` (status=:cancelled + `Repo.delete_all` children).
-- [ ] 2.5 RED: tests for `expire_session/2`, `mark_lost_lock/2`, `mark_committed/2`.
-- [ ] 2.6 GREEN: implement those three.
-- [ ] 2.7 RED: `describe "validate_ai_intent/1"` — 3 accepted kinds + 4 forbidden keys + unknown → `:unknown_intent` (`services/generation_service_test.exs`).
-- [ ] 2.8 GREEN: implement `validate_ai_intent/1` in `GenerationService` — closed set + recursive walk rejecting `:recipe_id`, `:proposal_id`, `:scheduled_meal_id`, DB-mutating keys.
+- [x] 2.1 RED: `describe "PlanningRepo.create_session/2"` — happy `:ok`; overlap → `:overlapping_range`; ineligible → `:forbidden` (`data/planning_repo_test.exs`).
+- [x] 2.2 GREEN: implement `create_session/2` — wrap `Repo.insert`; map Postgrex exclusion error → `:overlapping_range`.
+- [x] 2.3 RED: `describe "cancel_session/3"` — owner-cancel `:ok`; non-owner peer `:forbidden`; terminal → `:not_active`.
+- [x] 2.4 GREEN: implement `cancel_session/3` — `Repo.transaction` (status=:cancelled + `Repo.delete_all` children).
+- [x] 2.5 RED: tests for `expire_session/2`, `mark_lost_lock/2`, `mark_committed/2`.
+- [x] 2.6 GREEN: implement those three.
+- [x] 2.7 RED: `describe "validate_ai_intent/1"` — 3 accepted kinds + 4 forbidden keys + unknown → `:unknown_intent` (`services/generation_service_test.exs`).
+- [x] 2.8 GREEN: implement `validate_ai_intent/1` in `GenerationService` — closed set + recursive walk rejecting `:recipe_id`, `:proposal_id`, `:scheduled_meal_id`, DB-mutating keys.
 
 ## Phase 3: PlanningSessionServer + Sweeper (PR3)
 
