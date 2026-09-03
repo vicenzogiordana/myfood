@@ -1,0 +1,118 @@
+# Exploration: ephemeral-planning-sessions
+
+> **Source-of-truth discrepancy (must read first).** The orchestrator's launch prompt declared the planningHome as `/Users/vicenzogiordana/Desktop/Prog/broski/myfood/openspec` (repo root). The workspace's authoritative OpenSpec lives at `meal_planner_api/openspec/` — see `meal_planner_api/openspec/config.yaml` (`project: meal_planner_api`, `artifact_store: openspec`) and the existing `meal_planner_api/openspec/changes/` and `meal_planner_api/openspec/specs/` trees. Writing the change folder at the repo root would create a phantom OpenSpec store that no other SDD phase reads. This exploration is therefore persisted at the workspace-declared path:
+> `/Users/vicenzogiordana/Desktop/Prog/broski/myfood/meal_planner_api/openspec/changes/ephemeral-planning-sessions/exploration.md`.
+> The orchestrator must decide whether to: (a) update its native dispatcher's planningHome to `meal_planner_api/openspec/`, or (b) intentionally migrate OpenSpec to the repo root in a separate change. Either way, this report is identical bytes-bytes to the Engram observation.
+
+> **Path-correctness note (informational).** The orchestrator also named a few source paths that don't exist in the as-built tree:
+> `meal_planner_api/lib/meal_planner_api/integrations/optimizer_server.ex` → actually `meal_planner_api/lib/meal_planner_api/optimization/optimizer_server.ex`.
+> `lib/meal_planner_api/persistence/planning/planning_proposal.ex` is the schema (matches).
+> The repo layout has `lib/meal_planner_api/data/` (planning_repo.ex), `lib/meal_planner_api/optimization/`, `lib/meal_planner_api/persistence/planning/`. Every file:line citation below uses the real paths.
+
+---
+
+## Current State
+
+**The planning flow today is proposal-centric, not session-centric.** A user opens `planning:<account_id>`, sends `generate_menu`, and the channel spawns one `MealPlannerApi.Generation.Server` per `account_id` via the `MealPlannerApi.Generation.Generations` Registry (server.ex:57-72, 88-95). That single process owns the run + proposal lifecycle through `:idle → :generating → :completed/error → :idle` (server.ex:38-47). All chat-modification, confirm, and reject traffic flows through that one GenServer until the proposal is confirmed or rejected (server.ex:285-355).
+
+**Tenancy + entitlement are partially in place.** `PlanningChannel.join/3` (planning_channel.ex:30-55) verifies the membership is `:active` for the topic account, then delegates to `MealPlannerApiWeb.ChannelCapability.authorize/1` (channel_capability.ex:23-29) which short-circuits with `{:error, :subscription_required}` when the `:revenuecat_access_enforcement` rollout flag is on and `AccountAccess.eligible?/1` (account_access.ex:64-69, 78-80) returns false. The flag defaults to `false` (config gate); PR #57 ("enforce realtime capability") wired the path but kept it off. So today "Account without entitlement cannot plan" is gated by code but not enforced in production.
+
+**Range locks do not exist.** `PlanningProposal` (planning_proposal.ex:8-17) carries only `proposal_json` + `status ∈ {:pending, :accepted, :rejected}`. `PlanningGenerationRun` (planning_generation_run.ex:8-29) carries `account_id, user_id, status, input_context, started_at, completed_at`. There is no `range_from / range_to / lock_owner / lease_expires_at` column on either table. The migration that creates them (`20260322092000_create_planning_and_cooking_tables.exs:33-51`) doesn't add them. The only "lock" today is the Registry entry — one `Generation.Server` per account — which means **a second concurrent session on the same account is rejected with `{:error, :already_running}` regardless of date range** (server.ex:151-153). That covers per-account but not per-range.
+
+**Chat history is not persisted.** `handle_in("chat", ...)` (planning_channel.ex:115-130) dispatches to `Server.chat/3` (server.ex:97-100), which `cast`s to `handle_chat/3` (server.ex:185-188, 361-377). The chat handler parses the message with `GenerationService.parse_modification/1` (a pure-Elixir regex parser, generation_service.ex:108-135), mutates `state.constraints` in place, and re-runs optimization. There is **no write to any chat-messages table** — the message dies with the GenServer state. Compare to the cooking flow (`cooking_chat_messages` table, FK to `cooking_sessions`, migration 20260322092000_create_planning_and_cooking_tables.exs:111-131) which persists every turn. For planning, there is no analogue.
+
+**The AI is NOT in the planning channel today.** All "chat" is rule-based regex (`parse_modification/1`, generation_service.ex:108-134). The real AI path goes through `MealPlannerApi.AI.GeminiAdapter.stream_chat/2` (GeminiClient, gemini_client.ex), reachable only via `AIChannel.handle_in("new_message", ...)` (ai_channel.ex:47-82). So the spec line "the AI cannot persist data or select recipes" is half-true: there's no AI in the planning flow yet, but if/when the planning flow gains an AI integration, it must NOT touch `PlanningProposal` directly — the contract is that an AI integration can only emit structured intents and the typed-intent validator applies them. Today, the optimizer is `OptimizerServer.select_weekly_menu/1` (optimizer_server.ex:58-64) — typed-payload-in, structured-solution-out, no AI surface.
+
+**Confirm already persists the cart atomically.** `do_confirm/2` (server.ex:286-304) wraps `update_proposal(:accepted)`, `persist_scheduled_meals/2`, and `persist_shopping_cart/2` in one `Repo.transaction/1` (server.ex:312-334). The `:accepted` guard (server.ex:341-342) makes re-confirm idempotent. The `proposal_confirmed` broadcast (server.ex:297, 573-582) carries cart fields, hits PubSub topic `planning:<account_id>` via `Phoenix.Channel.Server.broadcast!/4`. So `confirm_proposal` already does most of the spec's persistence work — what's missing is the ephemeral session lifecycle that wraps it.
+
+---
+
+## Affected Areas
+
+- `meal_planner_api/lib/meal_planner_api/generation/server.ex` — owns the per-account GenServer state machine today. Must host a new `ephemeral_sessions` table-key in `state` plus `start_session / cancel_session / expire_session / lock_lost` handlers. Risk: mixing session lifecycle onto a process already responsible for optimizer + cart writes. A new `Generation.SessionSupervisor` would isolate concerns (see Approaches).
+- `meal_planner_api/lib/meal_planner_api/services/generation_service.ex` — pure helpers (`build_constraints/2`, `validate_constraints/1`, `build_cart_lines/2`, `summarize_cart/1`, `parse_modification/1`). Add a new `validate_ai_intent/1` (or a sibling module `Services.Planning.Intent`) that enforces the typed-intent shape and rejects any intent that names recipes or proposes DB writes — the AI cannot persist data or select recipes.
+- `meal_planner_api/lib/meal_planner_api_web/channels/planning_channel.ex` — `handle_in` surface is `generate_menu`, `swap_constraints`, `chat`, `confirm_proposal`, `reject_proposal`. Add `start_planning`, `send_message`, `cancel_planning`. Today the channel calls into `Generation.Server` directly via Registry lookup (planning_channel.ex:119-129, 137-149). The channel must also gate `start_planning` on `ChannelCapability.authorize/1` — currently the join gate is the only entitlement check; an explicit re-check on each start event is required if the session outlives the socket.
+- `meal_planner_api/lib/meal_planner_api/data/planning_repo.ex` — pure data access layer for `planning_generation_runs` and `planning_proposals`. Extend with `create_planning_session/1`, `fetch_active_session_for_range/3`, `append_message/2`, `record_exception/2`, `mark_session_status/2`. `PlanningRepo.fetch_owned_proposal/3` (planning_repo.ex:81-103) is the model for the per-session, per-account filter.
+- `meal_planner_api/lib/meal_planner_api/persistence/planning/planning_proposal.ex` + `priv/repo/migrations/20260322092000_create_planning_and_cooking_tables.exs` — proposal schema has no range, lock owner, or lease. New migration adds columns OR (recommended) a new `planning_sessions` table that owns the range + lock; the proposal then `belongs_to :session`.
+- `meal_planner_api/lib/meal_planner_api/persistence/planning/` (new files) — `planning_session.ex`, `planning_message.ex`, `planning_exception.ex` schemas following the `cooking_sessions` / `cooking_chat_messages` pattern (`cooking_session.ex:8-37`, `cooking_chat_message.ex`).
+- `meal_planner_api/lib/meal_planner_api_web/channel_capability.ex` + `meal_planner_api/lib/meal_planner_api/account_access.ex` — already the entitlement gate. The proposal must decide whether `ChannelCapability.authorize/1` is also called inside `handle_in("start_planning", ...)` (re-check on each session start) or only at `join/3`. Spec phrasing "An Account without entitlement cannot plan" implies the start event itself must fail.
+- `meal_planner_api/lib/meal_planner_api/optimization/optimizer_server.ex` + `meal_planner_api/lib/meal_planner_api/optimization/optimizer_port.ex` — typed-payload-in, structured-solution-out port. The "AI cannot select recipes" rule belongs here: the AI-facing surface (whatever it ends up being — currently `AIChannel`) emits intents, the channel resolves them through `GenerationService.validate_ai_intent/1`, and `OptimizerServer` only ever receives pure constraint payloads. No direct AI → Optimizer path.
+- `meal_planner_api/lib/meal_planner_api_web/channels/ai_channel.ex` — currently routes Gemini streaming for `ai_chat:<room_id>` (ai_channel.ex:22-44). If/when AI intent flows into planning, this is the boundary; the spec requires the planning channel to receive the AI's structured intent as `handle_in("send_message", %{intent: ...})`, NOT as a raw prompt.
+- `meal_planner_api/lib/meal_planner_api/accounts_membership.ex` — already exposes `current_membership/2` for resolving the actor (accounts_membership.ex:223-275). The session model needs to record `created_by_user_id` and `created_by_membership_id` so cancellation/expiry can be audited.
+- `meal_planner_api/lib/meal_planner_api_web/channels/planning_channel.ex` (`broadcast/3` and `via/1` plumbing) + `MealPlannerApi.PubSub` — broadcast topic today is `planning:<account_id>` (server.ex:573-582). The new session lifecycle needs `session_started`, `session_cancelled`, `session_expired`, `session_lost_lock`, `message_appended` events on the same topic. Each must surface the session id so a multi-member account sees consistent state across sockets.
+- `meal_planner_api/test/meal_planner_api/generation/server_test.exs` (497 lines, existing) + `meal_planner_api/test/meal_planner_api_web/channels/planning_channel_test.exs` (794 lines, existing) + `meal_planner_api/test/meal_planner_api/services/generation_service_test.exs` (289 lines, existing) — currently cover confirm/cart, channel join authorization, and pure helpers. None cover ephemeral sessions, range locks, AI intent validation, or expiry. `test/support/server_test_fixtures.ex` (introduced in planning-shopping-extraction PR2) is the established pattern for shared factory-style helpers; the new tests should reuse it.
+- `meal_planner_api/priv/repo/migrations/` — last planning migration is `20260322092000_create_planning_and_cooking_tables.exs`. Next migration(s): create `planning_sessions`, `planning_messages`, `planning_exceptions`, and (separately) range-lock columns or a `range_locks` table. `recipe_versions` is NOT required for this slice — the spec line about AI cannot select recipes is enforced at the intent boundary, not by snapshotting the recipe catalog.
+
+---
+
+## Approaches
+
+### 1. **Ephemeral session as a first-class DB entity, GenServer delegates** — *Recommended*
+
+Keep `Generation.Server` as the per-account orchestrator (no change to the Registry shape), but add a `PlanningSession` table keyed by `account_id`, with columns `range_from`, `range_to`, `status ∈ {:active, :cancelled, :expired, :committed}`, `lock_owner_user_id`, `lock_owner_membership_id`, `lease_expires_at`. The GenServer owns session lifecycle in memory and **mirrors** to the DB at start/commit/cancel boundaries; the DB row is the audit + lock source of truth. The GenServer monitors the session process via `Process.monitor` so a crash discards the in-memory session (and broadcasts `session_lost_lock`). On a re-start of the GenServer, the DB row is rehydrated.
+
+- **Pros**: lock survives GenServer restart; expiry can be enforced by a periodic sweep OR a per-session `Process.send_after(:lease_expired, ...)`; range overlap is enforceable at the DB with a partial unique index `WHERE status = 'active' AND daterange(range_from, range_to, '[]') && daterange(...)` (Postgres range exclusion constraint). Testability is high — every scenario becomes a DB-level fixture.
+- **Cons**: introduces a new persistence layer; the spec's "lost lock discards the session and its exceptions" needs a clear contract for when the lock is *lost* (process death vs. explicit cancel vs. socket disconnect) and what happens to the unsaved `PlanningProposal` rows that were generated inside it.
+- **Effort**: Medium. Estimated ~600-800 lines diff: migration + 3 schemas + `PlanningRepo` extensions + `GenerationService` intent validator + new GenServer handlers + new channel events + tests.
+
+### 2. **Single process per (account, range)**, locking by Registry key
+
+Replace the per-account Registry key `{:generation, account_id}` with `{:planning_session, account_id, range_from, range_to}`. Two different ranges on the same account can run concurrently; overlapping ranges on the same account collide on the Registry `start_child` call.
+
+- **Pros**: minimal schema change — just an additive migration adding `range_from / range_to / lock_owner / lease_expires_at` columns to `planning_proposals` (or to `planning_generation_runs`). Concurrency story is simple: `Registry.register` is atomic. Reuses the existing `Generation.Supervisor` tree.
+- **Cons**: Registry keys are atoms; range tuples in a Registry key make per-range cleanup awkward. Expiry needs a separate process or a sweep — Registry does not give you "kick me out at T+30m". Also: the existing fallback path in `PlanningChannel.confirm_proposal`/`reject_proposal` (planning_channel.ex:151-205) calls `PlanningChatService` when no Registry entry exists; that path becomes brittle when sessions are short-lived.
+- **Effort**: Medium-Low. Estimated ~450-600 lines diff: migration + schema tweaks + Registry-key change + lease-expiry process + new channel events + tests.
+
+### 3. **ETS-only range locks, no DB persistence for sessions**
+
+Keep `Generation.Server` per-account as today. Add an ETS table `PlanningSessionLocks` keyed by `{account_id, range_from, range_to}` with values `{pid, lock_owner_membership_id, lease_expires_at}`. No new SQL tables. Sessions are still tracked in memory only; cancellation/expiry is enforced by the GenServer itself.
+
+- **Pros**: zero migrations; smallest diff; fastest to land.
+- **Cons**: lost on node restart; cannot survive a hot code reload; "discard the session and its exceptions" loses the audit trail the spec wants. Re-confirm across a node restart becomes impossible. Also: ETS does not natively enforce range overlap — overlap detection is application code, which is exactly the bug class range locks exist to prevent.
+- **Effort**: Low. Estimated ~300-450 lines diff.
+- **Verdict**: doesn't meet the spec contract on "lost lock discards the session and its exceptions" because there is nothing on disk to be discarded.
+
+---
+
+## Recommendation
+
+**Approach 1** (first-class DB entity with GenServer mirror) is the right shape because the spec contract is durability + audit. Two reasons:
+
+1. The spec line "Cancellation, close, expiry, or **lost lock** discards the session and its exceptions" — "lost lock" implies the lock is observable from outside the GenServer (so a watcher, a peer process, or a restart can detect it). A Registry key (Approach 2) is observable via `Registry.lookup` but lacks the lease semantics; ETS (Approach 3) is in-memory only. A DB row with `status` + `lease_expires_at` makes "lost lock" a real state, queryable from any process.
+2. The Postgres exclusion constraint approach (`EXCLUDE USING gist (account_id WITH =, daterange(range_from, range_to) WITH &&) WHERE status = 'active'`) is the cheapest way to satisfy "Overlapping valid locks are rejected" — the DB refuses the insert, no application-level race window. The orchestrator's open question on lock granularity lands naturally: the constraint is per-(account, range), so the answer is **per (account_id, range), not per session** — sessions are the lifecycle, locks are the constraint.
+
+Concrete shape to land in the proposal:
+
+- New tables: `planning_sessions`, `planning_messages`, `planning_exceptions`, plus a partial unique exclusion constraint on `planning_sessions` for overlapping active ranges per account.
+- `PlanningSession.status ∈ {:active, :cancelled, :expired, :committed, :lost_lock}`. `lost_lock` distinct from `expired` so a crash-triggered abort is auditable separately from a TTL expiry.
+- `Generation.Server` state grows `current_session_id` + `session_lock_owner`; on `start_planning` it inserts a `PlanningSession` row inside a `Repo.transaction` with the exclusion-constraint insert, then `Process.monitor`s the lease timer.
+- New channel events on `planning:<account_id>`: `session_started`, `message_appended`, `exception_recorded`, `session_cancelled`, `session_expired`, `session_lost_lock`.
+- `GenerationService.validate_ai_intent/1` (new) — accepts only a closed set of typed intents (`change_constraints`, `request_slot_swap`, `request_recipe_suggestion`) and rejects anything that names a `recipe_id` or carries a `proposal_id` (the AI cannot persist). The intent returns a constraint delta; the server applies it through the existing `apply_modification_to_state` path.
+
+---
+
+## Risks
+
+1. **Generation.Server already holds the per-account GenServer slot.** Today it owns the optimizer run + cart writes (server.ex:222-280, 286-355). Adding session lifecycle to the same process blurs ownership of three different lifecycles (run, session, lease). Mitigation: keep the GenServer as a thin *dispatcher* that delegates session bookkeeping to a sibling `PlanningSessionServer` started under the same `Generation.Supervisor`, or factor session state into a separate GenServer per session started dynamically.
+2. **Capability gate is currently join-time only.** `ChannelCapability.authorize/1` runs in `join/3` (planning_channel.ex:44-53). If the socket stays open for an hour after joining and the Account goes from `:trial` → `:expired` mid-session, the spec says the Account cannot plan — but today there is no mid-session re-check. Mitigation: add a `start_planning` handler that re-invokes `AccountAccess.eligible?/1` and rejects with `:subscription_required`.
+3. **Range-lock granularity is ambiguous.** The orchestrator's prompt asks "lock granularity — one lock per (account, range) vs per session". Per-session is too coarse (one cancellation blocks every concurrent user on the account); per-(account, range) is the right grain but it means a member whose partner already started a 7-day plan cannot start an overlapping 3-day plan on the same account — the spec may or may not want that. The proposal must decide and surface it.
+4. **AI intent boundary is not yet defined.** Today `handle_in("chat", ...)` is regex-only (generation_service.ex:108-134). If the proposal introduces a new "AI in the planning loop" path, it must explicitly declare the typed-intent surface (option 1's `validate_ai_intent/1`) AND remove the regex parser OR keep it as a fallback when AI is disabled — without that, "the AI cannot persist data or select recipes" is unenforceable. The `AIChannel.handle_in("new_message", ...)` boundary (ai_channel.ex:47-82) is the closest existing seam; the proposal must NOT introduce a second one.
+5. **The fallback path in `PlanningChannel.confirm_proposal` and `reject_proposal` (planning_channel.ex:151-205) calls `PlanningChatService` directly.** When ephemeral sessions land, the fallback must either (a) be deleted (sessions are the only path), or (b) be made session-aware so confirm without an active session creates a one-shot ephemeral session. The current code masks this fork with a `try/rescue` (planning_channel.ex:163-169, 198-204) which is itself a smell.
+6. **400-line PR review budget is a real concern.** Approach 1 spans migrations + 3 schemas + service + 3 channel events + 6 broadcast events + tests. Forecast: ~600-800 lines diff, well over the 400-line budget. The proposal must explicitly recommend chained PRs (see `work-unit-commits` / `chained-pr` skills).
+
+---
+
+## Open Questions for the Proposer
+
+1. **Lock granularity** — per `(account_id, range)` (Postgres exclusion index) or per `(account_id, range, user_id)` (so two members of the same Account can hold simultaneous non-overlapping ranges)? The orchestrator explicitly raised this; the proposal must pick one and justify.
+2. **Lease storage** — `Process.send_after(:lease_expired, ...)` (in-memory only, lost on restart) vs. `DateTime` in the DB row + a periodic sweep task (durable). The spec line "Cancellation, close, expiry, or lost lock" implies durability is wanted — but how durable?
+3. **AI intent surface** — is the existing `GenerationService.parse_modification/1` regex parser the "AI intent surface", or does the proposal introduce a new typed-intent path through `AIChannel`? The spec line "the AI cannot persist data or select recipes" is currently vacuous because there is no AI in the planning loop — the proposal must commit to where (if anywhere) the AI enters, and how its outputs are validated before they reach `Generation.Server` state.
+4. **Chat retention on cancel/expiry** — when a session is cancelled or expires, are its `planning_messages` and `planning_exceptions` rows hard-deleted, soft-deleted with `deleted_at`, or retained for analytics? The spec line "discards the session and its exceptions" reads as hard-delete but is ambiguous about messages. Today there is no chat retention at all — the proposal must declare a default.
+5. **Multi-member contention** — two members of the same `:family_4` account can already collide today because `Generation.Server` is per-account. Spec implies this should be per-(account, range). Does the proposal grant either member the right to *cancel* a session started by another member, or is cancellation strictly owner-only? The proposal must align this with `AccountsMembership.remove_member/3` semantics (accounts_membership.ex:554-576).
+6. **PR split** — Approach 1 almost certainly exceeds the 400-line review budget. Should the proposal pre-commit to chained PRs (e.g. (a) migrations + schemas, (b) `PlanningRepo` extensions, (c) `Generation.Server` lifecycle, (d) `PlanningChannel` events, (e) tests + capability re-check)?
+
+---
+
+## Ready for Proposal
+
+Yes — and the proposal MUST lock down: (1) lock granularity at per-`(account_id, range)` via Postgres exclusion constraint, (2) a typed-intent boundary that the AI cannot cross (`GenerationService.validate_ai_intent/1` rejects any intent carrying a `recipe_id` or `proposal_id`), and (3) the ephemeral-table shape (`planning_sessions` + `planning_messages` + `planning_exceptions`) with hard-delete semantics on cancel/expire/lost_lock. The proposal must also pre-commit to chained PRs given the ~600-800 line forecast.

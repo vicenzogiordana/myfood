@@ -84,14 +84,12 @@ defmodule MealPlannerApi.Data.PlanningRepoSessionSchemaTest do
   describe "planning_sessions_no_overlap EXCLUDE constraint" do
     test "the constraint exists as an EXCLUDE on planning_sessions" do
       [[conname, contype]] =
-        Repo.query!(
-          """
-          SELECT conname, contype
-          FROM pg_constraint
-          WHERE conrelid = 'planning_sessions'::regclass
-            AND conname = 'planning_sessions_no_overlap'
-          """
-        ).rows
+        Repo.query!("""
+        SELECT conname, contype
+        FROM pg_constraint
+        WHERE conrelid = 'planning_sessions'::regclass
+          AND conname = 'planning_sessions_no_overlap'
+        """).rows
 
       assert conname == "planning_sessions_no_overlap"
       assert contype == "x", "expected EXCLUDE constraint, got contype=#{contype}"
@@ -99,14 +97,12 @@ defmodule MealPlannerApi.Data.PlanningRepoSessionSchemaTest do
 
     test "the constraint is partial: WHERE (status = 'active')" do
       [[condef]] =
-        Repo.query!(
-          """
-          SELECT pg_get_constraintdef(oid)
-          FROM pg_constraint
-          WHERE conrelid = 'planning_sessions'::regclass
-            AND conname = 'planning_sessions_no_overlap'
-          """
-        ).rows
+        Repo.query!("""
+        SELECT pg_get_constraintdef(oid)
+        FROM pg_constraint
+        WHERE conrelid = 'planning_sessions'::regclass
+          AND conname = 'planning_sessions_no_overlap'
+        """).rows
 
       assert condef =~ ~r/EXCLUDE/i
       assert condef =~ ~r/btree_gist/i or condef =~ ~r/gist/i
@@ -193,9 +189,7 @@ defmodule MealPlannerApi.Data.PlanningRepoSessionSchemaTest do
     try do
       result = fun.()
 
-      flunk(
-        "expected PostgreSQL exception #{expected_sqlstate}, got #{inspect(result)}"
-      )
+      flunk("expected PostgreSQL exception #{expected_sqlstate}, got #{inspect(result)}")
     rescue
       ex in Postgrex.Error ->
         assert ex.postgres.pg_code == expected_sqlstate,
