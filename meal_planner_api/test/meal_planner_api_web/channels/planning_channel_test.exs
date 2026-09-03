@@ -1225,6 +1225,75 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
   end
 
   # ==========================================================================
+  # Phase 5 — e2e 2-socket test (task 5.2).
+  # Two distinct members join the same `planning:<account_id>` topic.
+  # A starts a session; B tries overlapping (refused) and non-overlapping
+  # (succeeds). A cancels — BOTH sockets receive the `session_cancelled`
+  # broadcast because both are subscribed to the planning topic.
+  # ==========================================================================
+
+  describe "e2e 2-socket on same planning:<account_id> (task 5.2)" do
+    test "A starts, B overlap → :overlapping_range, B non-overlap → :ok, A cancels → both see session_cancelled",
+         %{account: account, user: owner_user, token: owner_token} do
+      _ = persist_trial_window!(account, :eligible)
+      owner_membership_id = owner_membership_id(account.id, owner_user.id)
+
+      # A = owner on the seeded user; B = a brand-new peer member on
+      # the same account (different actor_membership_id for cancel auth).
+      peer_token = non_owner_peer_token(account)
+
+      # ── A starts a session in 2026-06 ──
+      {:ok, socket_a} = connect(UserSocket, %{"token" => owner_token})
+      {:ok, _, socket_a} = subscribe_and_join(socket_a, PlanningChannel, "planning:#{account.id}")
+
+      ref_a_start =
+        push(socket_a, "start_planning", %{
+          "range_from" => "2026-06-01",
+          "range_to" => "2026-06-07"
+        })
+
+      assert_reply(ref_a_start, :ok, %{session_id: a_session_id, status: :active})
+      assert_broadcast("session_started", %{"session_id" => ^a_session_id})
+      _ = owner_membership_id
+
+      # ── B joins ──
+      {:ok, socket_b} = connect(UserSocket, %{"token" => peer_token})
+      {:ok, _, socket_b} = subscribe_and_join(socket_b, PlanningChannel, "planning:#{account.id}")
+
+      # ── B tries an OVERLAPPING range → refused ──
+      ref_b_overlap =
+        push(socket_b, "start_planning", %{
+          "range_from" => "2026-06-05",
+          "range_to" => "2026-06-12"
+        })
+
+      assert_reply(ref_b_overlap, :error, %{reason: :overlapping_range})
+      refute_receive %Phoenix.Socket.Broadcast{event: "session_started"}, 200
+
+      # ── B starts a NON-OVERLAPPING range → ok ──
+      ref_b_ok =
+        push(socket_b, "start_planning", %{
+          "range_from" => "2026-06-15",
+          "range_to" => "2026-06-21"
+        })
+
+      assert_reply(ref_b_ok, :ok, %{session_id: b_session_id, status: :active})
+      assert b_session_id != a_session_id
+      assert_broadcast("session_started", %{"session_id" => ^b_session_id})
+
+      # ── A cancels its session — BOTH sockets should see session_cancelled ──
+      ref_a_cancel =
+        push(socket_a, "cancel_planning", %{"session_id" => a_session_id})
+
+      assert_reply(ref_a_cancel, :ok, %{session_id: ^a_session_id, status: :cancelled})
+
+      # Both A and B receive the broadcast.
+      assert_broadcast("session_cancelled", %{"session_id" => ^a_session_id})
+      assert_broadcast("session_cancelled", %{"session_id" => ^a_session_id})
+    end
+  end
+
+  # ==========================================================================
   # Unknown event test
   # ==========================================================================
 

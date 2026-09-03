@@ -34,11 +34,12 @@ defmodule MealPlannerApi.Generation.PlanningSessionServer do
   noise-free.
   """
 
-  use GenServer, restart: :temporary
+  use GenServer, restart: :transient
 
   alias MealPlannerApi.AccountAccess
   alias MealPlannerApi.Data.PlanningRepo
   alias MealPlannerApi.Persistence.Planning.PlanningSession
+  alias MealPlannerApi.Repo
 
   @lease_seconds 120
 
@@ -48,8 +49,9 @@ defmodule MealPlannerApi.Generation.PlanningSessionServer do
           status: :initializing | :active | :cancelled | :committed | :lost_lock | :expired,
           owner_user_id: pos_integer() | nil,
           owner_membership_id: Ecto.UUID.t() | nil,
-          lease_ref: reference() | nil,
+          owner_channel_pid: pid() | nil,
           monitor_ref: reference() | nil,
+          lease_ref: reference() | nil,
           pending_intent: map() | nil,
           check_account_eligible_fn: (term() -> boolean())
         }
@@ -73,6 +75,11 @@ defmodule MealPlannerApi.Generation.PlanningSessionServer do
       from `PlanningRepo.create_session/2` once the row is inserted.
     * `:owner_user_id` — informational; copied onto the row.
     * `:owner_membership_id` — informational; copied onto the row.
+    * `:owner_channel_pid` — when set, the server `Process.monitor`s
+      this pid. On abnormal exit the row transitions to `:lost_lock`
+      and `session_lost_lock` is broadcast. On `:normal` / `:shutdown`
+      the server stays alive (TM-3). Defaults to `nil` for tests
+      that drive the handle_info path explicitly.
     * `:check_account_eligible_fn` — defaults to
       `&AccountAccess.eligible?/1`. Override in tests to force
       `:subscription_required`.
@@ -87,14 +94,28 @@ defmodule MealPlannerApi.Generation.PlanningSessionServer do
       status: :initializing,
       owner_user_id: Keyword.get(opts, :owner_user_id),
       owner_membership_id: Keyword.get(opts, :owner_membership_id),
-      lease_ref: nil,
+      owner_channel_pid: Keyword.get(opts, :owner_channel_pid),
       monitor_ref: nil,
+      lease_ref: nil,
       pending_intent: nil,
       check_account_eligible_fn:
         Keyword.get(opts, :check_account_eligible_fn, &AccountAccess.eligible?/1)
     }
 
     GenServer.start_link(__MODULE__, initial_state)
+  end
+
+  # Custom child spec — `:transient` so the supervisor restarts on
+  # abnormal exit (TM-2: rehydrate from DB + broadcast
+  # `session_resumed`), and the start args are wrapped in a list so
+  # `apply/3` calls `start_link/1` with the opts (not unpacked as
+  # separate args). Fixes the PR3 child-spec bug.
+  def child_spec(opts) do
+    %{
+      id: {:planning_session_server, Keyword.get(opts, :session_id, Ecto.UUID.generate())},
+      start: {__MODULE__, :start_link, [opts]},
+      restart: :transient
+    }
   end
 
   @doc """
@@ -177,7 +198,58 @@ defmodule MealPlannerApi.Generation.PlanningSessionServer do
 
   @impl true
   def init(state) do
+    state = setup_owner_monitor(state)
+    state = maybe_rehydrate(state)
     {:ok, state}
+  end
+
+  # Phase 5 — wire the `:lost_lock` transition path. The server
+  # monitors the channel that started the session; on abnormal exit
+  # the `handle_info({:DOWN, ...})` clause marks the row
+  # `:lost_lock`. On `:normal` / `:shutdown` (clean disconnect,
+  # graceful supervisor shutdown) the server stays alive.
+  defp setup_owner_monitor(state) do
+    case state.owner_channel_pid do
+      pid when is_pid(pid) ->
+        ref = Process.monitor(pid)
+        %{state | monitor_ref: ref}
+
+      _ ->
+        state
+    end
+  end
+
+  # TM-2 — supervisor restart rehydrate. If the row already exists
+  # for this `session_id`, the server is being restarted after a
+  # crash. We rebuild state from the row, broadcast `session_resumed`
+  # on the planning topic, and continue serving the same session.
+  # Rows in a terminal status are left alone — the supervisor's
+  # `:transient` strategy won't restart a server that exited cleanly.
+  # `session_id` may be nil in tests that drive start_link without a
+  # row to find; in that case there's nothing to rehydrate.
+  defp maybe_rehydrate(%{session_id: nil} = state), do: state
+
+  defp maybe_rehydrate(state) do
+    case Repo.get(PlanningSession, state.session_id) do
+      nil ->
+        state
+
+      %PlanningSession{status: :active} = row ->
+        broadcast(state.account_id, "session_resumed", %{"session_id" => state.session_id})
+
+        %{
+          state
+          | status: :active,
+            owner_user_id: row.lock_owner_user_id,
+            owner_membership_id: row.lock_owner_membership_id
+        }
+
+      %PlanningSession{status: _terminal} ->
+        # Should not happen with `:transient` (terminal exits are
+        # not restarted) but defensively leave state untouched so
+        # the supervisor can finish the cycle without crashing.
+        state
+    end
   end
 
   @impl true
@@ -197,6 +269,7 @@ defmodule MealPlannerApi.Generation.PlanningSessionServer do
         lease = DateTime.add(DateTime.utc_now(), @lease_seconds, :second)
 
         attrs = %{
+          id: state.session_id,
           range_from: date_from,
           range_to: date_to,
           lock_owner_user_id: user_id,
