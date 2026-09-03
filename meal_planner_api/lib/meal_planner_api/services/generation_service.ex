@@ -230,6 +230,83 @@ defmodule MealPlannerApi.Services.GenerationService do
     end)
   end
 
+  # -------------------------------------------------------------------------
+  # Typed-intent boundary (PR2 — ephemeral-planning-sessions)
+  # -------------------------------------------------------------------------
+
+  @accepted_intent_kinds ~w[change_constraints request_slot_swap request_recipe_suggestion]a
+
+  @forbidden_intent_keys ~w[
+    recipe_id
+    proposal_id
+    scheduled_meal_id
+    insert
+    update
+    delete
+    upsert
+    destroy
+    changeset
+  ]a
+
+  @doc """
+  Validates an AI-emitted intent map against the typed-intent boundary.
+
+  Accepts only `kind ∈ {:change_constraints, :request_slot_swap,
+  :request_recipe_suggestion}`. The intent (and any nested map under
+  `:payload`) MUST NOT carry any DB-mutating key (`:insert`, `:update`,
+  `:delete`, `:upsert`, `:destroy`, `:changeset`) or any ID that would
+  let the AI select / reference a specific recipe, proposal, or
+  scheduled meal (`:recipe_id`, `:proposal_id`, `:scheduled_meal_id`).
+
+  The walk is recursive: a forbidden key at any depth (top-level, under
+  `:payload`, or further nested) returns `{:error, :forbidden_intent}`.
+
+  Returns:
+    * `{:ok, intent}` — accepted, intent returned unchanged
+    * `{:error, :forbidden_intent}` — a forbidden key was found
+    * `{:error, :unknown_intent}` — `:kind` is missing or not in the
+      closed set, or input is not a map
+  """
+  @spec validate_ai_intent(map()) ::
+          {:ok, map()} | {:error, :forbidden_intent} | {:error, :unknown_intent}
+  def validate_ai_intent(%{} = intent) do
+    with :ok <- check_kind(Map.get(intent, :kind)),
+         :ok <- check_forbidden_keys(intent) do
+      {:ok, intent}
+    end
+  end
+
+  def validate_ai_intent(_), do: {:error, :unknown_intent}
+
+  defp check_kind(kind) when kind in @accepted_intent_kinds, do: :ok
+  defp check_kind(_), do: {:error, :unknown_intent}
+
+  defp check_forbidden_keys(value), do: walk_forbidden_keys(value)
+
+  # Walks the intent recursively looking for forbidden keys. Returns
+  # `:ok` if none are found, or `{:error, :forbidden_intent}` if one
+  # is detected at any depth.
+  defp walk_forbidden_keys(%{} = map) do
+    Enum.reduce_while(Map.keys(map), :ok, fn key, :ok ->
+      cond do
+        key in @forbidden_intent_keys ->
+          {:halt, {:error, :forbidden_intent}}
+
+        true ->
+          case walk_forbidden_keys(Map.fetch!(map, key)) do
+            :ok -> {:cont, :ok}
+            {:error, _} = err -> {:halt, err}
+          end
+      end
+    end)
+  end
+
+  defp walk_forbidden_keys(_), do: :ok
+
+  # -------------------------------------------------------------------------
+  # Shopping cart aggregation
+  # -------------------------------------------------------------------------
+
   @doc """
   Groups cart lines by `{ingredient_id, unit}` and sums `quantity_milli`.
 

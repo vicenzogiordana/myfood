@@ -286,4 +286,118 @@ defmodule MealPlannerApi.Services.GenerationServiceTest do
       assert GenerationService.summarize_cart([]) == []
     end
   end
+
+  # =========================================================================
+  # PR2 — ephemeral-planning-sessions: typed-intent boundary
+  # =========================================================================
+
+  describe "validate_ai_intent/1 — closed set of accepted kinds" do
+    test ":change_constraints with valid payload is accepted" do
+      intent = %{kind: :change_constraints, payload: %{max_budget: 100}}
+
+      assert GenerationService.validate_ai_intent(intent) == {:ok, intent}
+    end
+
+    test ":request_slot_swap with valid payload is accepted" do
+      intent = %{
+        kind: :request_slot_swap,
+        payload: %{day: "2026-03-04", from: :lunch, to: :dinner}
+      }
+
+      assert GenerationService.validate_ai_intent(intent) == {:ok, intent}
+    end
+
+    test ":request_recipe_suggestion with valid payload is accepted" do
+      intent = %{kind: :request_recipe_suggestion, payload: %{tags: ["quick"]}}
+
+      assert GenerationService.validate_ai_intent(intent) == {:ok, intent}
+    end
+  end
+
+  describe "validate_ai_intent/1 — forbidden keys rejected at any depth" do
+    test "top-level :recipe_id is rejected" do
+      intent = %{kind: :request_recipe_suggestion, recipe_id: 42}
+
+      assert GenerationService.validate_ai_intent(intent) == {:error, :forbidden_intent}
+    end
+
+    test "nested :proposal_id under :payload is rejected" do
+      intent = %{kind: :change_constraints, payload: %{proposal_id: "abc"}}
+
+      assert GenerationService.validate_ai_intent(intent) == {:error, :forbidden_intent}
+    end
+
+    test "nested :scheduled_meal_id under :payload is rejected" do
+      intent = %{kind: :request_slot_swap, payload: %{scheduled_meal_id: 7}}
+
+      assert GenerationService.validate_ai_intent(intent) == {:error, :forbidden_intent}
+    end
+
+    test "DB-mutating :insert key under :payload is rejected" do
+      intent = %{kind: :change_constraints, payload: %{insert: %{}}}
+
+      assert GenerationService.validate_ai_intent(intent) == {:error, :forbidden_intent}
+    end
+
+    test "DB-mutating :update key at top level is rejected" do
+      intent = %{kind: :change_constraints, update: %{table: :recipes}}
+
+      assert GenerationService.validate_ai_intent(intent) == {:error, :forbidden_intent}
+    end
+
+    test "DB-mutating :delete key deeply nested under :payload is rejected" do
+      intent = %{
+        kind: :request_slot_swap,
+        payload: %{nested: %{deeper: %{delete: %{id: 1}}}}
+      }
+
+      assert GenerationService.validate_ai_intent(intent) == {:error, :forbidden_intent}
+    end
+
+    test "DB-mutating :upsert key under :payload is rejected" do
+      intent = %{kind: :change_constraints, payload: %{upsert: %{recipes: []}}}
+
+      assert GenerationService.validate_ai_intent(intent) == {:error, :forbidden_intent}
+    end
+
+    test "DB-mutating :destroy key under :payload is rejected" do
+      intent = %{kind: :change_constraints, payload: %{destroy: :all}}
+
+      assert GenerationService.validate_ai_intent(intent) == {:error, :forbidden_intent}
+    end
+
+    test "DB-mutating :changeset key under :payload is rejected" do
+      intent = %{kind: :change_constraints, payload: %{changeset: %{}}}
+
+      assert GenerationService.validate_ai_intent(intent) == {:error, :forbidden_intent}
+    end
+
+    test "non-intent keys (e.g. :max_budget) are allowed" do
+      intent = %{
+        kind: :change_constraints,
+        payload: %{max_budget: 100, tags: ["quick"], slot: :lunch}
+      }
+
+      assert GenerationService.validate_ai_intent(intent) == {:ok, intent}
+    end
+  end
+
+  describe "validate_ai_intent/1 — unknown / missing :kind rejected" do
+    test "an unknown kind atom is rejected" do
+      intent = %{kind: :delete_everything, payload: %{}}
+
+      assert GenerationService.validate_ai_intent(intent) == {:error, :unknown_intent}
+    end
+
+    test "a missing :kind is rejected" do
+      intent = %{payload: %{}}
+
+      assert GenerationService.validate_ai_intent(intent) == {:error, :unknown_intent}
+    end
+
+    test "an intent that is not a map is rejected" do
+      assert GenerationService.validate_ai_intent("change_constraints") ==
+               {:error, :unknown_intent}
+    end
+  end
 end
