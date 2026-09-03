@@ -1,0 +1,182 @@
+defmodule MealPlannerApi.Persistence.Planning.PlanningSession do
+  @moduledoc """
+  Per-(account, range) session row for the `ephemeral-planning-sessions`
+  change. Owns the partial EXCLUDE range-lock at the DB level; the
+  schema's Ecto.Enum keeps the same five-value set under application
+  control, and each changesets enforces a one-way status transition out
+  of `:active`.
+
+  Status transitions:
+
+      :active  ──cancel────► :cancelled   (owner or account :owner)
+      :active  ──expire────► :expired     (sweeper)
+      :active  ──lost_lock─► :lost_lock   (owner process crashed)
+      :active  ──commit────► :committed   (confirm_proposal)
+      :cancelled / :expired / :lost_lock / :committed
+              ──► (terminal — no further changesets allowed)
+
+  Terminal statuses keep the row queryable for audit per design.md §
+  "Confirm transition + hard-delete children".
+  """
+
+  use Ecto.Schema
+  import Ecto.Changeset
+
+  @primary_key {:id, :binary_id, autogenerate: true}
+  @foreign_key_type :binary_id
+
+  schema "planning_sessions" do
+    field(:range_from, :date)
+    field(:range_to, :date)
+
+    field(:status, Ecto.Enum,
+      values: [:active, :cancelled, :expired, :lost_lock, :committed],
+      default: :active
+    )
+
+    field(:lease_expires_at, :utc_datetime_usec)
+    field(:started_at, :utc_datetime_usec)
+    field(:terminal_at, :utc_datetime_usec)
+
+    belongs_to(:account, MealPlannerApi.Persistence.Accounts.Account)
+    belongs_to(:lock_owner_user, MealPlannerApi.Persistence.Accounts.User)
+    belongs_to(:lock_owner_membership, MealPlannerApi.Persistence.Accounts.AccountMembership)
+
+    has_many(:messages, MealPlannerApi.Persistence.Planning.PlanningMessage,
+      foreign_key: :session_id
+    )
+
+    has_many(:exceptions, MealPlannerApi.Persistence.Planning.PlanningException,
+      foreign_key: :session_id
+    )
+
+    timestamps(type: :utc_datetime_usec)
+  end
+
+  @doc """
+  Initial changeset used by `PlanningRepo.create_session/2`. Stamps
+  `started_at` if the caller did not provide one.
+  """
+  def start_changeset(session, attrs) do
+    session
+    |> cast(attrs, [
+      :account_id,
+      :range_from,
+      :range_to,
+      :status,
+      :lock_owner_user_id,
+      :lock_owner_membership_id,
+      :lease_expires_at,
+      :started_at
+    ])
+    |> put_default_status(:active)
+    |> validate_required([
+      :account_id,
+      :range_from,
+      :range_to,
+      :status,
+      :lease_expires_at
+    ])
+    |> validate_range()
+    |> foreign_key_constraint(:account_id)
+    |> foreign_key_constraint(:lock_owner_user_id)
+    |> foreign_key_constraint(:lock_owner_membership_id)
+  end
+
+  @doc """
+  Transitions an `:active` session to `:cancelled`. Refuses to cancel a
+  terminal session — callers must read the row first.
+  """
+  def cancel_changeset(session, attrs) do
+    session
+    |> cast(attrs, [:terminal_at])
+    |> put_change(:status, :cancelled)
+    |> put_terminal_at()
+    |> validate_required([:status])
+    |> validate_transition_from(:active)
+  end
+
+  @doc """
+  Transitions an `:active` session to `:expired` (sweeper-driven).
+  """
+  def expire_changeset(session, attrs) do
+    session
+    |> cast(attrs, [:terminal_at])
+    |> put_change(:status, :expired)
+    |> put_terminal_at()
+    |> validate_required([:status])
+    |> validate_transition_from(:active)
+  end
+
+  @doc """
+  Transitions an `:active` session to `:lost_lock` (owner process
+  crashed abnormally).
+  """
+  def lost_lock_changeset(session, attrs) do
+    session
+    |> cast(attrs, [:terminal_at])
+    |> put_change(:status, :lost_lock)
+    |> put_terminal_at()
+    |> validate_required([:status])
+    |> validate_transition_from(:active)
+  end
+
+  @doc """
+  Transitions an `:active` session to `:committed` (confirm_proposal
+  path).
+  """
+  def commit_changeset(session, attrs) do
+    session
+    |> cast(attrs, [:terminal_at])
+    |> put_change(:status, :committed)
+    |> put_terminal_at()
+    |> validate_required([:status])
+    |> validate_transition_from(:active)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Internal helpers
+  # ---------------------------------------------------------------------------
+
+  defp put_default_status(changeset, default) do
+    case get_field(changeset, :status) do
+      nil -> put_change(changeset, :status, default)
+      _ -> changeset
+    end
+  end
+
+  defp put_terminal_at(changeset) do
+    case get_field(changeset, :terminal_at) do
+      nil -> put_change(changeset, :terminal_at, DateTime.utc_now())
+      _ -> changeset
+    end
+  end
+
+  defp validate_range(changeset) do
+    range_from = get_field(changeset, :range_from)
+    range_to = get_field(changeset, :range_to)
+
+    if range_from && range_to && Date.compare(range_to, range_from) == :lt do
+      add_error(changeset, :range_to, "must be on or after range_from")
+    else
+      changeset
+    end
+  end
+
+  defp validate_transition_from(changeset, expected_source) do
+    case fetch_field(changeset, :status) do
+      {_changes_or_data, status} when status == expected_source ->
+        changeset
+
+      {_changes_or_data, status} ->
+        add_error(
+          changeset,
+          :status,
+          "cannot transition from #{inspect(status)} to a terminal status"
+        )
+
+      :error ->
+        changeset
+    end
+  end
+end
