@@ -164,19 +164,16 @@ defmodule MealPlannerApi.Persistence.Planning.PlanningSession do
   end
 
   defp validate_transition_from(changeset, expected_source) do
-    case fetch_field(changeset, :status) do
-      {_changes_or_data, status} when status == expected_source ->
-        changeset
+    current_status = changeset.data.status
 
-      {_changes_or_data, status} ->
-        add_error(
-          changeset,
-          :status,
-          "cannot transition from #{inspect(status)} to a terminal status"
-        )
-
-      :error ->
-        changeset
+    if current_status == expected_source do
+      changeset
+    else
+      add_error(
+        changeset,
+        :status,
+        "cannot transition from #{inspect(current_status)} to a terminal status"
+      )
     end
   end
 end
