@@ -48,14 +48,14 @@ Chain strategy: stacked-to-main
 
 ## Phase 3: PlanningSessionServer + Sweeper (PR3)
 
-- [ ] 3.1 RED: `describe "start_link/1"` + lifecycle tests (`generation/planning_session_server_test.exs`).
-- [ ] 3.2 GREEN: implement `PlanningSessionServer` GenServer supervised under new `Generation.PlanningSessionSupervisor` (DynamicSupervisor) wired into `Generation.Supervisor`.
-- [ ] 3.3 RED: `describe "apply_intent/2"` — forbidden key → `:forbidden_intent`; accepted intent mutates constraint state.
-- [ ] 3.4 GREEN: implement `apply_intent` — calls `validate_ai_intent/1` then mutates state.
-- [ ] 3.5 RED: `describe "lost_lock/1"` — `Process.monitor` + `:DOWN` abnormal reason → row `:lost_lock` + broadcast `session_lost_lock`.
-- [ ] 3.6 GREEN: implement `handle_info({:DOWN,...})` → `mark_lost_lock` + broadcast.
-- [ ] 3.7 RED: `describe "Sweeper"` — session with past `lease_expires_at` transitions to `:expired` (`generation/planning_session_sweeper_test.exs`).
-- [ ] 3.8 GREEN: implement `PlanningSession.Sweeper` — periodic tick (`Application.get_env :planning_session_sweeper_interval, 30_000`); `UPDATE ... WHERE status=:active AND lease_expires_at < now() FOR UPDATE SKIP LOCKED RETURNING id`.
+- [x] 3.1 RED: `describe "start_link/1"` + lifecycle tests (`generation/planning_session_server_test.exs`).
+- [x] 3.2 GREEN: implement `PlanningSessionServer` GenServer supervised under new `Generation.PlanningSessionSupervisor` (DynamicSupervisor) wired into `Generation.Supervisor`.
+- [x] 3.3 RED: `describe "apply_intent/2"` — forbidden key → `:forbidden_intent`; accepted intent mutates constraint state.
+- [x] 3.4 GREEN: implement `apply_intent` — calls `validate_ai_intent/1` then mutates state.
+- [x] 3.5 RED: `describe "lost_lock/1"` — `Process.monitor` + `:DOWN` abnormal reason → row `:lost_lock` + broadcast `session_lost_lock`.
+- [x] 3.6 GREEN: implement `handle_info({:DOWN,...})` → `mark_lost_lock` + broadcast.
+- [x] 3.7 RED: `describe "Sweeper"` — session with past `lease_expires_at` transitions to `:expired` (`generation/planning_session_sweeper_test.exs`).
+- [x] 3.8 GREEN: implement `PlanningSession.Sweeper` — periodic tick (`Application.get_env :planning_session_sweeper_interval, 30_000`); `UPDATE ... WHERE status=:active AND lease_expires_at < now() FOR UPDATE SKIP LOCKED RETURNING id`.
 
 ## Phase 4: Channel Events + Capability Re-check (PR4)
 
