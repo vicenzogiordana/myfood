@@ -24,7 +24,8 @@ config :meal_planner_api,
   planning_optimizer_client: MealPlannerApi.Optimization.OptimizerServer,
   start_optimizer_server: true,
   optimizer_python: "python3",
-  optimizer_timeout_ms: 15_000
+  optimizer_timeout_ms: 15_000,
+  optimizer_inventory_weight: 100
 
 config :meal_planner_api,
   social_verifier: MealPlannerApi.Auth.SocialVerifier,
