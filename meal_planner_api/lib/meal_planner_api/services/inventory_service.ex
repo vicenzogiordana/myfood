@@ -22,6 +22,16 @@ defmodule MealPlannerApi.Services.InventoryService do
 
   @warning_days 2
 
+  @doc "Returns usable inventory for one account without changing inventory state."
+  @spec list_for_account(Ecto.UUID.t(), Date.t()) :: [map()]
+  def list_for_account(account_id, today \\ Date.utc_today()) do
+    InventoryRepo.list_inventory(account_id)
+    |> Enum.filter(fn item ->
+      item.quantity_milli > 0 and
+        (is_nil(item.expired_at) or Date.compare(DateTime.to_date(item.expired_at), today) != :lt)
+    end)
+  end
+
   # -------------------------------------------------------------------------
   # Inventory view
   # -------------------------------------------------------------------------
