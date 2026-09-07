@@ -105,27 +105,41 @@ defmodule MealPlannerApi.Optimization.PayloadAdapter do
              }
            ]}
           | {:error, term()}
-  def translate_response({:ok, %{"meals" => meals}}, recipe_data) do
-    translated =
-      Enum.map(meals, fn %{"day" => day, "slot" => slot, "recipe_id" => recipe_id} ->
-        recipe = Map.get(recipe_data, recipe_id, %{})
+  def translate_response({:ok, %{"meals" => meals}}, recipe_data) when is_list(meals) do
+    Enum.reduce_while(meals, {:ok, []}, fn
+      %{"day" => day, "slot" => slot, "recipe_id" => recipe_id}, {:ok, translated}
+      when is_binary(recipe_id) ->
+        case Map.fetch(recipe_data, recipe_id) do
+          {:ok, recipe} ->
+            resolved = %{
+              date: day,
+              slot: slot,
+              recipe_id: recipe_id,
+              recipe_name: recipe.name,
+              price_cents: recipe.price_cents,
+              macros: %{
+                protein_g: recipe.protein_g,
+                calories: recipe.calories,
+                carbs_g: recipe.carbs_g
+              }
+            }
 
-        %{
-          date: day,
-          slot: slot,
-          recipe_id: recipe_id,
-          recipe_name: Map.get(recipe, :name, "Unknown Recipe"),
-          price_cents: Map.get(recipe, :price_cents, 0),
-          macros: %{
-            protein_g: Map.get(recipe, :protein_g, 0),
-            calories: Map.get(recipe, :calories, 0),
-            carbs_g: Map.get(recipe, :carbs_g, 0)
-          }
-        }
-      end)
+            {:cont, {:ok, [resolved | translated]}}
 
-    {:ok, translated}
+          :error ->
+            {:halt, {:error, :unknown_recipe}}
+        end
+
+      _invalid, _acc ->
+        {:halt, {:error, :invalid_optimizer_response}}
+    end)
+    |> case do
+      {:ok, translated} -> {:ok, Enum.reverse(translated)}
+      error -> error
+    end
   end
+
+  def translate_response({:ok, _}, _recipe_data), do: {:error, :invalid_optimizer_response}
 
   def translate_response({:error, reason}, _recipe_data) do
     {:error, reason}

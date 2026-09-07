@@ -157,7 +157,7 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
       assert candidate_1["calories_per_serving"] == 450
     end
 
-    test "handles missing recipe data with defaults" do
+    test "rejects missing recipe data rather than fabricating a recipe" do
       slots = [
         %{
           date: "2026-06-03",
@@ -269,12 +269,8 @@ defmodule MealPlannerApi.Optimization.PayloadAdapterTest do
 
       recipe_data = %{}
 
-      assert {:ok, result} = PayloadAdapter.translate_response(optimizer_result, recipe_data)
-
-      first = List.first(result)
-      assert first[:recipe_name] == "Unknown Recipe"
-      assert first[:price_cents] == 0
-      assert first[:macros][:protein_g] == 0
+      assert {:error, :unknown_recipe} =
+               PayloadAdapter.translate_response(optimizer_result, recipe_data)
     end
 
     test "propagates error from optimizer" do
