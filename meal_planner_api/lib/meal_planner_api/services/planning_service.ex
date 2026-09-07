@@ -106,6 +106,8 @@ defmodule MealPlannerApi.Services.PlanningService do
         "account_type" => to_string(Map.get(user, :account_type, "individual")),
         "subscription_tier" => to_string(Map.get(user, :subscription_tier, "free")),
         "inventory_items" => [],
+        "inventory_weight" =>
+          Application.get_env(:meal_planner_api, :optimizer_inventory_weight, 100),
         "macro_bounds" => macro_bounds_for_user(user)
       },
       "candidates_by_slot" => candidates_by_slot

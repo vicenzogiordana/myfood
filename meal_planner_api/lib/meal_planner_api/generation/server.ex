@@ -491,6 +491,8 @@ defmodule MealPlannerApi.Generation.Server do
       "slots" => canonical_slots |> Enum.map(& &1.slot) |> Enum.uniq(),
       "constraints" => %{
         "weekly_budget_cents" => server_owned_budget(account_id),
+        "inventory_weight" =>
+          Application.get_env(:meal_planner_api, :optimizer_inventory_weight, 100),
         "macro_bounds" => %{
           "protein_g" => %{"min" => 0, "max" => 1_000_000},
           "carbs_g" => %{"min" => 0, "max" => 1_000_000},
