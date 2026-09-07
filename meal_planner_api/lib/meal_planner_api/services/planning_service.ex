@@ -15,6 +15,7 @@ defmodule MealPlannerApi.Services.PlanningService do
   alias MealPlannerApi.Data.PlanningRepo
   alias MealPlannerApi.Optimization.OptimizerPort
   alias MealPlannerApi.Persistence.Identity
+  alias MealPlannerApi.Services.{PlanningCandidateBuilder, PlanningRequestValidator}
 
   @slots [:breakfast, :lunch, :dinner]
   @default_days ~w(monday tuesday wednesday thursday friday saturday sunday)
@@ -48,7 +49,7 @@ defmodule MealPlannerApi.Services.PlanningService do
          {:ok, max_days} <- resolve_max_days(user),
          {:ok, selected_days} <- resolve_selected_days(params, max_days),
          true <- requested_days_valid?(params, max_days),
-         candidates_by_slot <- build_candidates(user, identity),
+         {:ok, candidates_by_slot} <- build_candidates(user, identity),
          {:ok, result} <- run_optimizer(optimizer, selected_days, candidates_by_slot, user) do
       day_plans = build_day_plans(result["meals"], selected_days)
 
@@ -66,6 +67,9 @@ defmodule MealPlannerApi.Services.PlanningService do
          subscription_tier: to_string(Map.get(user, :subscription_tier, :free))
        }}
     else
+      {:error, :no_candidates_for_slot, _details} ->
+        {:error, :optimization_failed}
+
       {:error, reason} ->
         {:error, reason}
     end
@@ -77,7 +81,13 @@ defmodule MealPlannerApi.Services.PlanningService do
   def run_optimizer(_optimizer, [], _candidates, _user), do: {:ok, %{"meals" => []}}
 
   def run_optimizer(optimizer, days, candidates_by_slot, user) do
-    payload = build_optimization_payload(days, candidates_by_slot, user)
+    slots = available_slots(candidates_by_slot)
+
+    payload =
+      days
+      |> build_optimization_payload(candidates_by_slot, user)
+      |> Map.put("slots", slots)
+
     optimizer.select_weekly_menu(payload)
   end
 
@@ -192,56 +202,32 @@ defmodule MealPlannerApi.Services.PlanningService do
   # Candidates
   # -------------------------------------------------------------------------
 
-  @spec build_candidates(planning_user(), map()) :: map()
+  @spec build_candidates(planning_user(), map()) ::
+          {:ok, %{String.t() => [map()]}} | {:error, :no_candidates_for_slot, map()}
   def build_candidates(user, identity) do
-    user_ids = Map.get(user, :user_ids, [identity.user_id])
-    account_id = identity.account_id
+    participants = Map.get(user, :participant_ids, Map.get(user, :user_ids, [identity.user_id]))
+    descriptors = Enum.map(@slots, &%{date: Date.utc_today(), slot: &1})
 
-    # Fetch latest recipe costs for optimizer payload
-    all_recipe_ids =
-      Enum.flat_map(@slots, fn slot ->
-        slot_str = Atom.to_string(slot)
+    with {:ok, %{"participant_ids" => participant_ids}, _context} <-
+           PlanningRequestValidator.validate_request(
+             %{"participant_ids" => participants},
+             identity.account_id,
+             identity.user_id
+           ),
+         {:ok, %{slots: slots}} <-
+           PlanningCandidateBuilder.build_available_candidate_set(
+             identity.account_id,
+             descriptors,
+             participant_ids
+           ) do
+      {:ok, Map.new(slots, &{&1.slot, &1.candidates})}
+    end
+  end
 
-        PlanningRepo.candidate_recipe_ids_for_slots(
-          account_id,
-          user_ids,
-          [slot_str]
-        )
-      end)
-      |> Enum.uniq()
-
-    recipe_costs = PlanningRepo.latest_recipe_costs(all_recipe_ids)
-
-    Enum.into(@slots, %{}, fn slot ->
-      slot_str = Atom.to_string(slot)
-
-      recipe_ids =
-        PlanningRepo.candidate_recipe_ids_for_slots(
-          account_id,
-          user_ids,
-          [slot_str]
-        )
-
-      recipes =
-        PlanningRepo.recipes_for_ids(recipe_ids, account_id)
-        |> Enum.filter(fn r -> r.slot == slot_str end)
-        |> Enum.map(fn r ->
-          %{
-            "recipe_id" => to_string(r.id),
-            "slot" => slot_str,
-            "label" => r.name,
-            "kcal" => 0,
-            "estimated_cost_cents" => Map.get(recipe_costs, r.id, 0),
-            "inventory_hit_count" => 0,
-            "protein_g_per_serving" => 0,
-            "carbs_g_per_serving" => 0,
-            "fat_g_per_serving" => 0,
-            "calories_per_serving" => 0
-          }
-        end)
-
-      {slot_str, recipes}
-    end)
+  defp available_slots(candidates_by_slot) do
+    @slots
+    |> Enum.map(&Atom.to_string/1)
+    |> Enum.filter(&(Map.get(candidates_by_slot, &1, []) != []))
   end
 
   # -------------------------------------------------------------------------

@@ -138,7 +138,7 @@ defmodule MealPlannerApi.Services.GenerationServiceTest do
   end
 
   describe "build_proposal_json/1" do
-    test "builds proposal with slots and timestamp" do
+    test "builds a deterministic proposal fingerprint" do
       slots = [
         %{
           "date" => "2026-06-03",
@@ -151,7 +151,81 @@ defmodule MealPlannerApi.Services.GenerationServiceTest do
 
       result = GenerationService.build_proposal_json(slots)
       assert is_list(result.slots)
-      assert result.generated_at != nil
+      assert is_binary(result.fingerprint)
+      assert result == GenerationService.build_proposal_json(slots)
+    end
+  end
+
+  describe "validate_optimizer_response/2" do
+    test "accepts only complete assignments from the canonical candidates" do
+      slots = [%{date: "2026-06-03", slot: "lunch", candidates: [%{"recipe_id" => "recipe-1"}]}]
+      context = %{slots: slots, account_id: "account-1"}
+
+      assert :ok =
+               GenerationService.validate_optimizer_response(
+                 %{
+                   "meals" => [
+                     %{"day" => "2026-06-03", "slot" => "lunch", "recipe_id" => "recipe-1"}
+                   ]
+                 },
+                 context
+               )
+    end
+
+    test "rejects an optimizer recipe outside the canonical candidate set" do
+      context = %{
+        slots: [%{date: "2026-06-03", slot: "lunch", candidates: [%{"recipe_id" => "recipe-1"}]}],
+        account_id: "account-1"
+      }
+
+      assert {:error, :recipe_not_in_account, %{recipe_id: "foreign"}} =
+               GenerationService.validate_optimizer_response(
+                 %{
+                   "meals" => [
+                     %{"day" => "2026-06-03", "slot" => "lunch", "recipe_id" => "foreign"}
+                   ]
+                 },
+                 context
+               )
+    end
+
+    test "rejects duplicate assignments even when every expected slot is present" do
+      slots = [%{date: "2026-06-03", slot: "lunch", candidates: [%{"recipe_id" => "recipe-1"}]}]
+
+      assert {:error, :duplicate_assignment, %{}} =
+               GenerationService.validate_optimizer_response(
+                 %{
+                   "meals" => [
+                     %{"day" => "2026-06-03", "slot" => "lunch", "recipe_id" => "recipe-1"},
+                     %{"day" => "2026-06-03", "slot" => "lunch", "recipe_id" => "recipe-1"}
+                   ]
+                 },
+                 %{slots: slots, account_id: "account-1"}
+               )
+    end
+
+    test "rejects a selected proposal that exceeds server-owned budget" do
+      slots = [
+        %{
+          date: "2026-06-03",
+          slot: "lunch",
+          candidates: [%{"recipe_id" => "recipe-1", "estimated_cost_cents" => 200}]
+        }
+      ]
+
+      assert {:error, :budget_exceeded, %{budget_cents: 100}} =
+               GenerationService.validate_optimizer_response(
+                 %{
+                   "meals" => [
+                     %{"day" => "2026-06-03", "slot" => "lunch", "recipe_id" => "recipe-1"}
+                   ]
+                 },
+                 %{
+                   slots: slots,
+                   account_id: "account-1",
+                   constraints: %{"weekly_budget_cents" => 100}
+                 }
+               )
     end
   end
 

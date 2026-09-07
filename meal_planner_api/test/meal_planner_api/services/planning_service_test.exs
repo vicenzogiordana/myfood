@@ -25,6 +25,22 @@ defmodule MealPlannerApi.Services.PlanningServiceTest do
                )
     end
 
+    test "sends only slots with existing candidates to the optimizer" do
+      candidates = %{
+        "breakfast" => [%{"recipe_id" => "existing-breakfast", "estimated_cost_cents" => 500}],
+        "lunch" => [],
+        "dinner" => []
+      }
+
+      assert {:ok, %{"meals" => [%{"recipe_id" => "existing-breakfast", "slot" => "breakfast"}]}} =
+               PlanningService.run_optimizer(
+                 MealPlannerApi.Optimization.OptimizerMock,
+                 ["monday"],
+                 candidates,
+                 %{}
+               )
+    end
+
     test "builds optimization payload correctly" do
       days = ["monday", "tuesday"]
       candidates = %{"breakfast" => [], "lunch" => [], "dinner" => []}

@@ -21,14 +21,13 @@ defmodule MealPlannerApi.Generation.Server do
   alias MealPlannerApi.Data.{
     PlanningRepo,
     RecipeRepo,
-    ShoppingRepo,
-    UserPreferenceRepo
+    ShoppingRepo
   }
 
   alias MealPlannerApi.Optimization.OptimizerServer
   alias MealPlannerApi.Optimization.PayloadAdapter
   alias MealPlannerApi.Services.GenerationService
-  alias MealPlannerApi.Services.PriceService
+  alias MealPlannerApi.Services.{PlanningCandidateBuilder, PlanningRequestValidator}
   alias MealPlannerApi.Repo
 
   # -------------------------------------------------------------------------
@@ -85,6 +84,13 @@ defmodule MealPlannerApi.Generation.Server do
   @spec start_generation(pos_integer(), pos_integer(), map(), pid()) ::
           {:ok, run_id :: pos_integer()} | {:error, reason()}
   def start_generation(account_id, user_id, constraints, channel_pid) do
+    with {:ok, validated_constraints, _context} <-
+           PlanningRequestValidator.validate_request(constraints, account_id, user_id) do
+      dispatch_start_generation(account_id, user_id, validated_constraints, channel_pid)
+    end
+  end
+
+  defp dispatch_start_generation(account_id, user_id, constraints, channel_pid) do
     case Registry.lookup(MealPlannerApi.Generation.Generations, {:generation, account_id}) do
       [{pid, _}] ->
         GenServer.call(pid, {:start_generation, user_id, constraints, channel_pid})
@@ -151,22 +157,29 @@ defmodule MealPlannerApi.Generation.Server do
     if state.phase == :generating do
       {:reply, {:error, :already_running}, state}
     else
-      {:ok, run} = create_run(state.account_id, user_id, constraints)
-      {:ok, proposal} = create_proposal(run.id)
+      case PlanningRequestValidator.validate_request(constraints, state.account_id, user_id) do
+        {:ok, validated_constraints, _context} ->
+          {:ok, run} = create_run(state.account_id, user_id, validated_constraints)
+          {:ok, proposal} = create_proposal(run.id)
 
-      new_state =
-        %{
-          state
-          | channel_pid: channel_pid,
-            phase: :generating,
-            current_run_id: run.id,
-            current_proposal_id: proposal.id,
-            proposal_json: %{slots: []},
-            constraints: constraints
-        }
+          new_state =
+            %{
+              state
+              | channel_pid: channel_pid,
+                user_id: user_id,
+                phase: :generating,
+                current_run_id: run.id,
+                current_proposal_id: proposal.id,
+                proposal_json: %{slots: []},
+                constraints: validated_constraints
+            }
 
-      send(self(), :run_optimization)
-      {:reply, {:ok, run.id}, new_state}
+          send(self(), :run_optimization)
+          {:reply, {:ok, run.id}, new_state}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
     end
   end
 
@@ -220,6 +233,21 @@ defmodule MealPlannerApi.Generation.Server do
   end
 
   defp run_pipeline(state) do
+    case PlanningRequestValidator.validate_request(
+           state.constraints || %{},
+           state.account_id,
+           state.user_id
+         ) do
+      {:ok, _constraints, _context} ->
+        run_authorized_pipeline(state)
+
+      {:error, reason} ->
+        broadcast(state, "generation_error", %{reason: Atom.to_string(reason)})
+        %{state | phase: :error}
+    end
+  end
+
+  defp run_authorized_pipeline(state) do
     %{
       account_id: account_id,
       user_id: user_id,
@@ -228,50 +256,43 @@ defmodule MealPlannerApi.Generation.Server do
       constraints: constraints
     } = state
 
-    # 1. Perfil de usuario + recetas favoritas
-    {user_profile, favorite_recipe_ids} = load_user_profile_and_favorites(account_id, user_id)
+    # The candidate builder is the only recipe source. Client/AI payloads may
+    # describe preferences, but never recipe IDs or account scope.
+    descriptors = build_slot_descriptors(constraints)
+    participant_ids = constraints["participant_ids"] || constraints[:participant_ids] || [user_id]
 
-    # 2. Resolver constraints (favorite_recipe_ids injected below)
-    resolved =
-      GenerationService.build_constraints(user_profile, constraints)
-      |> Map.put(:favorite_recipe_ids, favorite_recipe_ids)
+    with {:ok, %{slots: canonical_slots}} <-
+           PlanningCandidateBuilder.build_candidate_set(account_id, descriptors, participant_ids) do
+      optimizer_payload = build_canonical_optimizer_payload(canonical_slots, account_id)
+      recipe_data = recipe_data_from_candidates(canonical_slots)
 
-    # 3. Slot list
-    slots_input = build_slots_input(resolved)
+      case OptimizerServer.select_weekly_menu(optimizer_payload) do
+        {:ok, optimizer_result} ->
+          validation_context = %{
+            slots: canonical_slots,
+            account_id: account_id,
+            constraints: optimizer_payload["constraints"]
+          }
 
-    # 4. Recipe prices + macros
-    all_recipe_ids =
-      slots_input
-      |> Enum.flat_map(&(&1["available_recipe_ids"] || []))
-      |> Enum.map(&String.to_integer/1)
-      |> Enum.uniq()
+          with :ok <-
+                 GenerationService.validate_optimizer_response(
+                   optimizer_result,
+                   validation_context
+                 ),
+               {:ok, optimized_slots} <-
+                 PayloadAdapter.translate_response({:ok, optimizer_result}, recipe_data) do
+            proposal_json = GenerationService.build_proposal_json(optimized_slots)
+            persist_proposal_result(proposal_id, run_id, proposal_json, state)
+          else
+            {:error, reason, _details} -> handle_optimization_error(run_id, reason, state)
+            {:error, reason} -> handle_optimization_error(run_id, reason, state)
+          end
 
-    recipe_prices = PriceService.fetch_recipe_prices_float(all_recipe_ids)
-    recipe_macros = load_recipe_macros(all_recipe_ids)
-
-    # 5. Build optimizer payload (translate format)
-    optimizer_payload =
-      PayloadAdapter.build_optimizer_payload(
-        slots_input,
-        convert_prices_to_string_keys(recipe_prices),
-        convert_macros_to_string_keys(recipe_macros)
-      )
-
-    # 6. Get recipe data for response translation
-    recipe_data = load_recipe_data_for_response(all_recipe_ids)
-
-    # 7. Call OptimizerServer (Port/stdio, working integration)
-    case OptimizerServer.select_weekly_menu(optimizer_payload) do
-      {:ok, optimizer_result} ->
-        # Translate response and enrich with DB data
-        {:ok, optimized_slots} =
-          PayloadAdapter.translate_response({:ok, optimizer_result}, recipe_data)
-
-        proposal_json = GenerationService.build_proposal_json(optimized_slots)
-        persist_proposal_result(proposal_id, run_id, proposal_json, state)
-
-      {:error, reason} ->
-        handle_optimization_error(run_id, reason, state)
+        {:error, reason} ->
+          handle_optimization_error(run_id, reason, state)
+      end
+    else
+      {:error, reason, _details} -> handle_optimization_error(run_id, reason, state)
     end
   rescue
     _ ->
@@ -284,7 +305,8 @@ defmodule MealPlannerApi.Generation.Server do
   # -------------------------------------------------------------------------
 
   defp do_confirm(state, proposal_id) do
-    with :ok <- verify_ownership(proposal_id, state.account_id),
+    with :ok <- PlanningRequestValidator.validate_actor(state.account_id, state.user_id),
+         :ok <- verify_ownership(proposal_id, state.account_id),
          {:ok, proposal, run} <- fetch_proposal_with_run(proposal_id),
          :ok <- guard_not_already_confirmed(proposal),
          {:ok, summary} <-
@@ -438,97 +460,68 @@ defmodule MealPlannerApi.Generation.Server do
     })
   end
 
-  defp load_user_profile(user_id) do
-    UserPreferenceRepo.get(user_id) ||
-      %{protein_g_per_meal: 25, default_exclusions: [], default_budget_cents: 10_000}
-  end
-
-  defp load_user_profile_and_favorites(account_id, user_id) do
-    profile = load_user_profile(user_id)
-
-    favorite_ids =
-      RecipeRepo.list_favorite_ids(account_id)
-      |> Enum.map(& &1.id)
-
-    {profile, favorite_ids}
-  end
-
-  defp build_slots_input(constraints) do
+  defp build_slot_descriptors(constraints) do
     date_from =
-      constraints["date_from"] || constraints[:date_from] ||
-        Date.utc_today() |> Date.to_iso8601()
+      constraints["date_from"] || constraints[:date_from] || Date.to_iso8601(Date.utc_today())
 
     date_to =
       constraints["date_to"] || constraints[:date_to] ||
-        Date.add(Date.utc_today(), 6) |> Date.to_iso8601()
+        Date.to_iso8601(Date.add(Date.utc_today(), 6))
 
     slot_types =
       constraints["slot_types"] || constraints[:slot_types] || [:breakfast, :lunch, :dinner]
 
-    # Extract favorite IDs from constraints and convert to strings for JSON
-    favorite_ids =
-      (constraints[:favorite_recipe_ids] || [])
-      |> Enum.map(&to_string/1)
-
-    for date <- Date.range(Date.from_iso8601!(date_from), Date.from_iso8601!(date_to)),
-        slot <- slot_types do
-      %{
-        "date" => Date.to_iso8601(date),
-        "slot" => to_string(slot),
-        "available_recipe_ids" => [],
-        "constraints" => %{
-          "budget_cents" => constraints["budget_cents"] || 10_000,
-          "protein_g" => constraints["protein_g"] || 25,
-          "max_calories" => constraints["max_calories"] || 800,
-          "excluded_recipe_ids" => [],
-          "excluded_ingredients" => [],
-          "preferred_recipe_ids" => favorite_ids
-        }
-      }
+    with {:ok, from} <- Date.from_iso8601(date_from),
+         {:ok, to} <- Date.from_iso8601(date_to),
+         true <- Date.compare(from, to) != :gt do
+      for date <- Date.range(from, to), slot <- slot_types, do: %{date: date, slot: slot}
+    else
+      _ -> []
     end
   end
 
-  defp load_recipe_macros(recipe_ids) do
-    recipe_ids
-    |> RecipeRepo.list_by_ids()
-    |> Enum.into(%{}, fn recipe ->
-      {to_string(recipe.id),
+  defp build_canonical_optimizer_payload(canonical_slots, account_id) do
+    candidates_by_slot =
+      canonical_slots
+      |> Enum.group_by(& &1.slot)
+      |> Map.new(fn {slot, slots} -> {slot, slots |> hd() |> Map.fetch!(:candidates)} end)
+
+    %{
+      "days" => canonical_slots |> Enum.map(& &1.date) |> Enum.uniq(),
+      "slots" => canonical_slots |> Enum.map(& &1.slot) |> Enum.uniq(),
+      "constraints" => %{
+        "weekly_budget_cents" => server_owned_budget(account_id),
+        "macro_bounds" => %{
+          "protein_g" => %{"min" => 0, "max" => 1_000_000},
+          "carbs_g" => %{"min" => 0, "max" => 1_000_000},
+          "fat_g" => %{"min" => 0, "max" => 1_000_000},
+          "calories" => %{"min" => 0, "max" => 1_000_000}
+        }
+      },
+      "candidates_by_slot" => candidates_by_slot
+    }
+  end
+
+  defp server_owned_budget(account_id) do
+    case MealPlannerApi.Persistence.Accounts.get_account(account_id) do
+      %{default_budget_cents: budget} when is_integer(budget) and budget >= 0 -> budget
+      _ -> 10_000
+    end
+  end
+
+  defp recipe_data_from_candidates(canonical_slots) do
+    canonical_slots
+    |> Enum.flat_map(& &1.candidates)
+    |> Map.new(fn candidate ->
+      {candidate["recipe_id"],
        %{
-         protein_g: recipe.protein_g_per_serving || 0,
-         calories: recipe.calories_per_serving || 0,
-         carbs_g: recipe.carbs_g_per_serving || 0
+         name: candidate["label"],
+         price_cents: candidate["estimated_cost_cents"],
+         protein_g: candidate["protein_g_per_serving"],
+         calories: candidate["calories_per_serving"],
+         carbs_g: candidate["carbs_g_per_serving"]
        }}
     end)
-  end
-
-  @spec load_recipe_data_for_response([pos_integer()]) :: %{String.t() => map()}
-  defp load_recipe_data_for_response(recipe_ids) do
-    recipe_ids
-    |> RecipeRepo.list_by_ids_with_prices()
-    |> Enum.into(%{}, fn recipe ->
-      {to_string(recipe.id),
-       %{
-         name: recipe.name,
-         price_cents: (recipe.recipe_price && recipe.recipe_price.price_per_serving_cents) || 0,
-         protein_g: recipe.protein_g_per_serving || 0,
-         calories: recipe.calories_per_serving || 0,
-         carbs_g: recipe.carbs_g_per_serving || 0
-       }}
-    end)
-  end
-
-  # Convert integer-keyed map to string-keyed map for PayloadAdapter
-  defp convert_prices_to_string_keys(prices) do
-    prices
-    |> Enum.map(fn {k, v} -> {to_string(k), v} end)
-    |> Enum.into(%{})
-  end
-
-  # Convert integer-keyed map to string-keyed map for PayloadAdapter
-  defp convert_macros_to_string_keys(macros) do
-    macros
-    |> Enum.map(fn {k, v} -> {to_string(k), v} end)
-    |> Enum.into(%{})
   end
 
   defp persist_proposal_result(proposal_id, run_id, proposal_json, state) do
@@ -555,9 +548,19 @@ defmodule MealPlannerApi.Generation.Server do
     run = Repo.get!(MealPlannerApi.Persistence.Planning.PlanningGenerationRun, run_id)
     PlanningRepo.update_generation_run(run, %{status: :error, completed_at: DateTime.utc_now()})
 
-    broadcast(state, "generation_error", %{run_id: run_id, reason: Atom.to_string(reason)})
+    {reason, details} = normalize_optimization_error(reason)
+    broadcast(state, "generation_error", %{run_id: run_id, reason: reason, details: details})
     %{state | phase: :error}
   end
+
+  defp normalize_optimization_error({reason, details}) when is_atom(reason) and is_map(details),
+    do: {Atom.to_string(reason), details}
+
+  defp normalize_optimization_error(reason) when is_atom(reason),
+    do: {Atom.to_string(reason), %{}}
+
+  defp normalize_optimization_error(reason) when is_binary(reason), do: {reason, %{}}
+  defp normalize_optimization_error(_), do: {"optimization_failed", %{}}
 
   defp broadcast(state, event, payload) do
     # Compatibility fix (planning-shopping-extraction @task 4.3):
