@@ -15,7 +15,7 @@ defmodule MealPlannerApi.Data.PlanningCandidateParticipantsTest do
     :ok = MealPlannerApi.SubscriptionPlanFixtures.ensure_plans!()
   end
 
-  test "uses exclusions from every active account member, but not non-active members" do
+  test "uses exclusions from selected active participants only" do
     account = insert_account("Planning participants")
     owner = insert_member(account, "owner@example.com", :owner, :active)
     active_member = insert_member(account, "active@example.com", :member, :active)
@@ -36,12 +36,27 @@ defmodule MealPlannerApi.Data.PlanningCandidateParticipantsTest do
     exclude(invited_member, invited_ingredient)
     exclude(suspended_member, suspended_ingredient)
 
-    candidate_ids = PlanningRepo.candidate_recipe_ids_for_slots(account.id, [owner.id], ["lunch"])
+    owner_only_ids =
+      PlanningRepo.candidate_recipe_ids_for_slots(account.id, [owner.id], ["lunch"])
 
-    refute active_recipe.id in candidate_ids
-    assert invited_recipe.id in candidate_ids
-    assert suspended_recipe.id in candidate_ids
-    assert allowed_recipe.id in candidate_ids
+    # The active member is not a participant, so their exclusion must not
+    # remove an otherwise eligible recipe from this plan.
+    assert active_recipe.id in owner_only_ids
+    assert invited_recipe.id in owner_only_ids
+    assert suspended_recipe.id in owner_only_ids
+    assert allowed_recipe.id in owner_only_ids
+
+    selected_member_ids =
+      PlanningRepo.candidate_recipe_ids_for_slots(account.id, [owner.id, active_member.id], [
+        "lunch"
+      ])
+
+    # Selecting the active member applies their dietary exclusion without
+    # importing exclusions from other active household members.
+    refute active_recipe.id in selected_member_ids
+    assert invited_recipe.id in selected_member_ids
+    assert suspended_recipe.id in selected_member_ids
+    assert allowed_recipe.id in selected_member_ids
   end
 
   defp insert_account(name) do

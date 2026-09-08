@@ -212,15 +212,16 @@ defmodule MealPlannerApi.Data.PlanningRepo do
   # Candidate recipes (exclusion filtering)
   # -------------------------------------------------------------------------
 
-  @spec candidate_recipe_ids_for_slots(pos_integer(), [pos_integer()], [atom()]) :: [
-          pos_integer()
+  @spec candidate_recipe_ids_for_slots(Ecto.UUID.t(), [Ecto.UUID.t()], [atom() | String.t()]) :: [
+          Ecto.UUID.t()
         ]
-  def candidate_recipe_ids_for_slots(account_id, _user_ids, slots) when is_list(slots) do
+  def candidate_recipe_ids_for_slots(account_id, participant_ids, slots)
+      when is_list(participant_ids) and is_list(slots) do
     slot_strings = Enum.map(slots, &to_string/1)
 
     excluded_ids =
-      account_id
-      |> Accounts.list_active_member_ids()
+      participant_ids
+      |> active_participant_ids(account_id)
       |> Accounts.list_user_excluded_ingredient_ids()
       |> MapSet.to_list()
 
@@ -248,6 +249,19 @@ defmodule MealPlannerApi.Data.PlanningRepo do
     end
   end
 
+  # A caller may name only active members of this account as participants. This
+  # is intentionally not a convenience filter over every household member:
+  # dietary exclusions apply to the people participating in this plan.
+  defp active_participant_ids(participant_ids, account_id) do
+    from(m in MealPlannerApi.Persistence.Accounts.AccountMembership,
+      where:
+        m.account_id == ^account_id and m.status == :active and
+          m.user_id in ^participant_ids,
+      select: m.user_id
+    )
+    |> Repo.all()
+  end
+
   @spec recipes_for_ids([pos_integer()], pos_integer()) :: [
           %{id: pos_integer(), name: String.t(), slot: atom(), source: String.t()}
         ]
@@ -255,12 +269,22 @@ defmodule MealPlannerApi.Data.PlanningRepo do
     from(r in Recipe,
       where: r.id in ^recipe_ids,
       where: is_nil(r.account_id) or r.account_id == ^account_id,
-      select: %{id: r.id, name: r.name, suitable_for_slots: r.suitable_for_slots}
+      select: %{
+        id: r.id,
+        name: r.name,
+        suitable_for_slots: r.suitable_for_slots,
+        protein_g_per_serving: r.protein_g_per_serving,
+        carbs_g_per_serving: r.carbs_g_per_serving,
+        fat_g_per_serving: r.fat_g_per_serving,
+        calories_per_serving: r.calories_per_serving
+      }
     )
     |> Repo.all()
     |> Enum.flat_map(fn recipe ->
       Enum.map(recipe.suitable_for_slots, fn slot ->
-        %{id: recipe.id, name: recipe.name, slot: slot, source: "candidate"}
+        recipe
+        |> Map.put(:slot, slot)
+        |> Map.put(:source, "candidate")
       end)
     end)
   end

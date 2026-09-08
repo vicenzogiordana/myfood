@@ -95,7 +95,7 @@ def _validate_payload(payload):
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 return "invalid_candidate"
-            if "recipe_id" not in candidate:
+            if not isinstance(candidate.get("recipe_id"), str) or not candidate["recipe_id"]:
                 return "invalid_candidate"
 
     return None
@@ -124,16 +124,22 @@ def _solve(payload):
     # One variable per candidate, one constraint: exactly 1 recipe per (day, slot)
     for day in days:
         for slot in slots:
-            candidates = candidates_by_slot[slot]
+            candidates = sorted(
+                candidates_by_slot[slot], key=lambda candidate: (candidate["recipe_id"], candidate.get("label", ""))
+            )
             slot_vars = []
 
             for index, candidate in enumerate(candidates):
                 var = solver.BoolVar(f"x_{day}_{slot}_{index}")
                 x[(day, slot, index)] = var
                 slot_vars.append(var)
-                objective_terms.append(
-                    var * _candidate_num(candidate, "estimated_cost_cents")
+                inventory_weight = _candidate_num(constraints, "inventory_weight") or 100.0
+                score = _candidate_num(candidate, "estimated_cost_cents") - (
+                    inventory_weight * _candidate_num(candidate, "inventory_hit_count")
                 )
+                # Stable candidate ordering plus a tiny index tie-break makes
+                # equal objective plans reproducible without changing feasibility.
+                objective_terms.append(var * (score + index / 1_000_000.0))
 
             solver.Add(solver.Sum(slot_vars) == 1)
 
@@ -150,7 +156,9 @@ def _solve(payload):
         for macro_key, candidate_key in macro_fields.items():
             terms = []
             for slot in slots:
-                candidates = candidates_by_slot[slot]
+                candidates = sorted(
+                    candidates_by_slot[slot], key=lambda candidate: (candidate["recipe_id"], candidate.get("label", ""))
+                )
                 for index, candidate in enumerate(candidates):
                     terms.append(
                         x[(day, slot, index)] * _candidate_num(candidate, candidate_key)
@@ -165,7 +173,9 @@ def _solve(payload):
     budget_terms = []
     for day in days:
         for slot in slots:
-            candidates = candidates_by_slot[slot]
+            candidates = sorted(
+                candidates_by_slot[slot], key=lambda candidate: (candidate["recipe_id"], candidate.get("label", ""))
+            )
             for index, candidate in enumerate(candidates):
                 budget_terms.append(
                     x[(day, slot, index)]
@@ -177,13 +187,21 @@ def _solve(payload):
     solver.Minimize(solver.Sum(objective_terms))
 
     status = solver.Solve()
+    if status == pywraplp.Solver.INFEASIBLE:
+        return None, ("infeasible", _infeasibility_causes(payload))
+    if status == pywraplp.Solver.UNBOUNDED:
+        return None, ("unbounded", [])
+    if status == pywraplp.Solver.ABNORMAL:
+        return None, ("abnormal", [])
     if status != pywraplp.Solver.OPTIMAL:
-        return None, "no_optimal_solution"
+        return None, ("abnormal", [])
 
     meals = []
     for day in days:
         for slot in slots:
-            candidates = candidates_by_slot[slot]
+            candidates = sorted(
+                candidates_by_slot[slot], key=lambda candidate: (candidate["recipe_id"], candidate.get("label", ""))
+            )
             chosen_recipe_id = None
 
             for index, candidate in enumerate(candidates):
@@ -191,9 +209,27 @@ def _solve(payload):
                     chosen_recipe_id = candidate.get("recipe_id")
                     break
 
+            if chosen_recipe_id is None:
+                return None, ("abnormal", [])
             meals.append({"day": day, "slot": slot, "recipe_id": chosen_recipe_id})
 
     return {"meals": meals}, None
+
+
+def _infeasibility_causes(payload):
+    """Return only hard constraints a caller can adjust; inventory is never one."""
+    candidates = payload["candidates_by_slot"]
+    if any(not candidates.get(slot) for slot in payload["slots"]):
+        return ["no_recipe_for_slot"]
+
+    minimum_cost = sum(
+        min(_candidate_num(candidate, "estimated_cost_cents") for candidate in candidates[slot])
+        for _day in payload["days"]
+        for slot in payload["slots"]
+    )
+    if minimum_cost > _candidate_num(payload["constraints"], "weekly_budget_cents"):
+        return ["budget_too_low"]
+    return ["hard_constraints_unsatisfiable"]
 
 
 def _handle_solve(request_id, payload):
@@ -205,7 +241,8 @@ def _handle_solve(request_id, payload):
 
     result, solve_error = _solve(payload)
     if solve_error is not None:
-        _error_response(request_id, solve_error)
+        reason, causes = solve_error if isinstance(solve_error, tuple) else (solve_error, [])
+        _error_response(request_id, reason, {"causes": causes} if causes else None)
         return
 
     _solution_response(request_id, result)

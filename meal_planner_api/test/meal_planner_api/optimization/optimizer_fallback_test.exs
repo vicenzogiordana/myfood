@@ -60,7 +60,7 @@ defmodule MealPlannerApi.Optimization.OptimizerFallbackTest do
       assert dinner["recipe_id"] == "r5"
     end
 
-    test "preserves selected candidate fields" do
+    test "returns structured infeasibility when any requested slot has no candidate" do
       payload = %{
         "days" => ["monday"],
         "candidates_by_slot" => %{
@@ -72,8 +72,8 @@ defmodule MealPlannerApi.Optimization.OptimizerFallbackTest do
         }
       }
 
-      assert {:ok, %{"meals" => meals}} = OptimizerFallback.select_weekly_menu(payload)
-      assert Enum.find(meals, &(&1["slot"] == "breakfast"))["label"] == "Breakfast"
+      assert {:error, {:infeasible, %{causes: [:no_recipe_for_slot]}}} =
+               OptimizerFallback.select_weekly_menu(payload)
     end
 
     test "handles different day counts" do
@@ -84,7 +84,7 @@ defmodule MealPlannerApi.Optimization.OptimizerFallbackTest do
       assert length(meals) == 9
     end
 
-    test "ignores candidates with nil recipe_id" do
+    test "does not create nil-recipe meals when candidates are invalid" do
       payload = %{
         "days" => ["monday"],
         "slots" => ["breakfast", "lunch", "dinner"],
@@ -99,16 +99,11 @@ defmodule MealPlannerApi.Optimization.OptimizerFallbackTest do
         }
       }
 
-      assert {:ok, %{"meals" => meals}} = OptimizerFallback.select_weekly_menu(payload)
-
-      breakfast = Enum.find(meals, &(&1["slot"] == "breakfast"))
-      assert breakfast["recipe_id"] == "r1"
-
-      lunch = Enum.find(meals, &(&1["slot"] == "lunch"))
-      assert lunch["recipe_id"] == nil
+      assert {:error, {:infeasible, %{causes: [:no_recipe_for_slot]}}} =
+               OptimizerFallback.select_weekly_menu(payload)
     end
 
-    test "returns nil recipe_id when no candidates available" do
+    test "refuses an empty candidate payload" do
       payload = %{
         "days" => ["monday"],
         "slots" => ["breakfast", "lunch", "dinner"],
@@ -116,10 +111,8 @@ defmodule MealPlannerApi.Optimization.OptimizerFallbackTest do
         "candidates_by_slot" => %{}
       }
 
-      assert {:ok, %{"meals" => meals}} = OptimizerFallback.select_weekly_menu(payload)
-      # 1 day × 3 slots
-      assert length(meals) == 3
-      assert Enum.all?(meals, &is_nil(&1["recipe_id"]))
+      assert {:error, {:infeasible, %{causes: [:no_recipe_for_slot]}}} =
+               OptimizerFallback.select_weekly_menu(payload)
     end
   end
 

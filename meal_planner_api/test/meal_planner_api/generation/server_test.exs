@@ -94,6 +94,32 @@ defmodule MealPlannerApi.Generation.ServerTest do
     :ok
   end
 
+  describe "start_generation/4 authorization" do
+    test "rejects an unknown participant before creating a run or proposal" do
+      account = insert_account("generation authorization account")
+      actor = insert_user_with_membership(account, "generation-actor@example.com")
+      foreign_account = insert_account("generation foreign account")
+
+      foreign_member =
+        insert_user_with_membership(foreign_account, "generation-foreign@example.com")
+
+      assert {:error, :forbidden} =
+               Server.start_generation(
+                 account.id,
+                 actor.id,
+                 %{"participant_ids" => [foreign_member.id]},
+                 self()
+               )
+
+      assert MealPlannerApi.Repo.aggregate(
+               MealPlannerApi.Persistence.Planning.PlanningGenerationRun,
+               :count
+             ) == 0
+
+      assert MealPlannerApi.Repo.aggregate(PlanningProposal, :count) == 0
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # @task 3.1 — re-confirm idempotency
   #
