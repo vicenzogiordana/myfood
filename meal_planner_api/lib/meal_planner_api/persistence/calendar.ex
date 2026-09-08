@@ -3,6 +3,8 @@ defmodule MealPlannerApi.Persistence.Calendar do
 
   import Ecto.Query, warn: false
 
+  alias Ecto.Multi
+  alias MealPlannerApi.Data.PlanningRepo
   alias MealPlannerApi.Repo
   alias MealPlannerApi.Persistence.Catalog.{FavoriteRecipe, SlotFavorite}
   alias MealPlannerApi.Persistence.Planning.ScheduledMeal
@@ -93,6 +95,100 @@ defmodule MealPlannerApi.Persistence.Calendar do
       meal -> Repo.delete(meal)
     end
   end
+
+  @spec replace_scheduled_meals_for_range(
+          Ecto.UUID.t(),
+          {Date.t(), Date.t()},
+          [map()]
+        ) :: {:ok, %{replaced: non_neg_integer()}} | {:error, atom()}
+  def replace_scheduled_meals_for_range(account_id, {from_date, to_date}, new_meals)
+      when is_list(new_meals) do
+    with :ok <- validate_range(from_date, to_date),
+         {:ok, normalized_meals} <-
+           normalize_replacement_meals(account_id, from_date, to_date, new_meals) do
+      replace_range_transaction(account_id, from_date, to_date, normalized_meals)
+    end
+  rescue
+    Postgrex.Error -> {:error, :persistence_error}
+    Ecto.ConstraintError -> {:error, :persistence_error}
+  end
+
+  defp replace_range_transaction(account_id, from_date, to_date, normalized_meals) do
+    Multi.new()
+    |> PlanningRepo.delete_scheduled_meals_for_range(account_id, {from_date, to_date})
+    |> PlanningRepo.insert_scheduled_meals(account_id, normalized_meals)
+    |> Repo.transaction()
+    |> map_replacement_result()
+  end
+
+  defp validate_range(%Date{} = from_date, %Date{} = to_date) do
+    if Date.compare(from_date, to_date) in [:lt, :eq],
+      do: :ok,
+      else: {:error, :invalid_date_range}
+  end
+
+  defp validate_range(_from_date, _to_date), do: {:error, :invalid_date_range}
+
+  defp normalize_replacement_meals(account_id, from_date, to_date, meals) do
+    meals
+    |> Enum.reduce_while({:ok, MapSet.new(), []}, fn
+      meal, {:ok, seen, normalized} when is_map(meal) ->
+        with {:ok, date} <- normalize_date(meal_value(meal, :date)),
+             {:ok, slot} <- normalize_slot(meal_value(meal, :slot)),
+             :ok <- validate_meal_account(account_id, meal_value(meal, :account_id)),
+             :ok <- validate_meal_date(date, from_date, to_date),
+             :ok <- validate_unique_slot(seen, date, slot) do
+          normalized_meal =
+            meal
+            |> Map.take([:recipe_id, :is_cooked, :ai_generation_id])
+            |> Map.put(:date, date)
+            |> Map.put(:slot, slot)
+
+          {:cont, {:ok, MapSet.put(seen, {date, slot}), [normalized_meal | normalized]}}
+        else
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+
+      _meal, _acc ->
+        {:halt, {:error, :invalid_meals}}
+    end)
+    |> case do
+      {:ok, _seen, normalized} -> {:ok, Enum.reverse(normalized)}
+      error -> error
+    end
+  end
+
+  defp meal_value(meal, key), do: Map.get(meal, key, Map.get(meal, Atom.to_string(key)))
+
+  defp normalize_date(%Date{} = date), do: {:ok, date}
+  defp normalize_date(_date), do: {:error, :invalid_date}
+
+  defp normalize_slot(slot) when slot in [:breakfast, :lunch, :snack, :dinner], do: {:ok, slot}
+  defp normalize_slot(_slot), do: {:error, :invalid_slot}
+
+  defp validate_meal_account(_account_id, nil), do: :ok
+
+  defp validate_meal_account(account_id, meal_account_id) do
+    if to_string(account_id) == to_string(meal_account_id),
+      do: :ok,
+      else: {:error, :cross_account}
+  end
+
+  defp validate_meal_date(date, from_date, to_date) do
+    if Date.compare(date, from_date) != :lt and Date.compare(date, to_date) != :gt,
+      do: :ok,
+      else: {:error, :meal_outside_range}
+  end
+
+  defp validate_unique_slot(seen, date, slot) do
+    if MapSet.member?(seen, {date, slot}), do: {:error, :duplicate_slot}, else: :ok
+  end
+
+  defp map_replacement_result({:ok, %{scheduled_meals_replacement: {count, _}}}),
+    do: {:ok, %{replaced: count}}
+
+  defp map_replacement_result({:error, _step, _reason, _changes}),
+    do: {:error, :persistence_error}
 
   def set_is_cooked(account_id, meal_id, is_cooked) when is_boolean(is_cooked) do
     case Repo.get_by(ScheduledMeal, id: meal_id, account_id: account_id) do

@@ -127,6 +127,36 @@ defmodule MealPlannerApi.Data.PlanningRepo do
     |> Repo.all()
   end
 
+  @spec delete_scheduled_meals_for_range(Ecto.Multi.t(), pos_integer(), {Date.t(), Date.t()}) ::
+          Ecto.Multi.t()
+  def delete_scheduled_meals_for_range(multi, account_id, {from_date, to_date}) do
+    query =
+      from(m in ScheduledMeal,
+        where: m.account_id == ^account_id and m.date >= ^from_date and m.date <= ^to_date
+      )
+
+    Ecto.Multi.delete_all(multi, :scheduled_meals_range, query)
+  end
+
+  @spec insert_scheduled_meals(Ecto.Multi.t(), pos_integer(), [map()]) :: Ecto.Multi.t()
+  def insert_scheduled_meals(multi, account_id, meals) when is_list(meals) do
+    timestamp = DateTime.utc_now()
+
+    entries =
+      Enum.map(meals, fn meal ->
+        meal
+        |> Map.put(:account_id, account_id)
+        |> Map.put_new(:id, Ecto.UUID.generate())
+        |> Map.put_new(:is_cooked, false)
+        |> Map.put_new(:inserted_at, timestamp)
+        |> Map.put_new(:updated_at, timestamp)
+      end)
+
+    Ecto.Multi.insert_all(multi, :scheduled_meals_replacement, ScheduledMeal, entries,
+      on_conflict: :raise
+    )
+  end
+
   @spec list_uncooked_scheduled_meals(pos_integer(), Date.t(), Date.t()) :: [ScheduledMeal.t()]
   def list_uncooked_scheduled_meals(account_id, from_date, to_date) do
     from(m in ScheduledMeal,
