@@ -438,14 +438,45 @@ defmodule MealPlannerApi.Data.PlanningRepo do
   @spec mark_committed(Ecto.UUID.t(), Ecto.UUID.t()) ::
           {:ok, PlanningSession.t()} | {:error, :not_active}
   def mark_committed(account_id, session_id) do
-    with {:ok, session} <- fetch_active_session(account_id, session_id) do
-      session
-      |> Ecto.Changeset.change(%{
-        status: :committed,
-        terminal_at: DateTime.utc_now()
-      })
-      |> Repo.update()
+    case Repo.transaction(mark_committed(Ecto.Multi.new(), account_id, session_id)) do
+      {:ok, %{mark_committed: committed}} -> {:ok, committed}
+      {:error, :mark_committed, :session_lock_lost, _changes} -> {:error, :not_active}
     end
+  end
+
+  @doc """
+  Composable Multi step (PR2 of issue #35): row-locks the session via
+  `SELECT ... FOR UPDATE` and transitions `:active` → `:committed`.
+
+  The caller (`Generation.Server.do_confirm/3`) is responsible for
+  pre-validating the session — this step is a belt-and-suspenders guard
+  against TOCTOU. If the session is missing or no longer `:active`, the
+  step returns `{:error, :session_lock_lost}`, the Multi aborts, and the
+  whole transaction rolls back.
+
+  Parameter order is `(multi, account_id, session_id)` to match the
+  codebase convention for composable Multi helpers (see
+  `insert_scheduled_meals/3`, `delete_scheduled_meals_for_range/3`).
+  """
+  @spec mark_committed(Ecto.Multi.t(), Ecto.UUID.t(), Ecto.UUID.t()) :: Ecto.Multi.t()
+  def mark_committed(multi, account_id, session_id) do
+    Ecto.Multi.run(multi, :mark_committed, fn _repo, _changes ->
+      lock_query =
+        from(s in PlanningSession,
+          where: s.id == ^session_id and s.account_id == ^account_id and s.status == :active,
+          lock: "FOR UPDATE"
+        )
+
+      case Repo.one(lock_query) do
+        nil ->
+          {:error, :session_lock_lost}
+
+        %PlanningSession{} = session ->
+          session
+          |> PlanningSession.commit_changeset(%{terminal_at: DateTime.utc_now()})
+          |> Repo.update()
+      end
+    end)
   end
 
   # -------------------------------------------------------------------------

@@ -26,6 +26,7 @@ defmodule MealPlannerApi.Generation.Server do
 
   alias MealPlannerApi.Optimization.OptimizerServer
   alias MealPlannerApi.Optimization.PayloadAdapter
+  alias MealPlannerApi.Persistence.Planning.PlanningSession
   alias MealPlannerApi.Services.GenerationService
   alias MealPlannerApi.Services.{PlanningCandidateBuilder, PlanningRequestValidator}
   alias MealPlannerApi.Repo
@@ -105,10 +106,10 @@ defmodule MealPlannerApi.Generation.Server do
     GenServer.cast(pid, {:chat, proposal_id, message})
   end
 
-  @spec confirm(pid(), proposal_id :: pos_integer()) ::
+  @spec confirm(pid(), proposal_id :: pos_integer(), session_id :: Ecto.UUID.t()) ::
           {:ok, map()} | {:error, reason()}
-  def confirm(pid, proposal_id) when is_pid(pid) do
-    GenServer.call(pid, {:confirm, proposal_id})
+  def confirm(pid, proposal_id, session_id) when is_pid(pid) do
+    GenServer.call(pid, {:confirm, proposal_id, session_id})
   end
 
   @spec reject(pid(), proposal_id :: pos_integer()) :: :ok
@@ -189,8 +190,8 @@ defmodule MealPlannerApi.Generation.Server do
   end
 
   @impl true
-  def handle_call({:confirm, proposal_id}, _from, state) do
-    reply = do_confirm(state, proposal_id)
+  def handle_call({:confirm, proposal_id, session_id}, _from, state) do
+    reply = do_confirm(state, proposal_id, session_id)
     {:reply, reply, state}
   end
 
@@ -304,13 +305,14 @@ defmodule MealPlannerApi.Generation.Server do
   # Confirm / reject
   # -------------------------------------------------------------------------
 
-  defp do_confirm(state, proposal_id) do
+  defp do_confirm(state, proposal_id, session_id) do
     with :ok <- PlanningRequestValidator.validate_actor(state.account_id, state.user_id),
          :ok <- verify_ownership(proposal_id, state.account_id),
          {:ok, proposal, run} <- fetch_proposal_with_run(proposal_id),
          :ok <- guard_not_already_confirmed(proposal),
+         :ok <- verify_session_lock(state.account_id, session_id),
          {:ok, summary} <-
-           run_confirm_transaction(state, proposal, run) do
+           run_confirm_transaction(state, proposal, run, session_id) do
       PlanningRepo.update_generation_run(run, %{
         status: :completed,
         completed_at: DateTime.utc_now()
@@ -325,33 +327,95 @@ defmodule MealPlannerApi.Generation.Server do
     end
   end
 
+  # PR2 of issue #35 — PlanningSession lock pre-check. The session MUST
+  # exist, belong to this Account, be `:active`, and have an unexpired
+  # lease. Any other state is rejected before any write. The session
+  # transition to `:committed` happens later, INSIDE the same Multi as
+  # the meals + cart writes, via `PlanningRepo.mark_committed/3`.
+  defp verify_session_lock(account_id, session_id) do
+    with {:ok, uuid} <- cast_session_id(session_id),
+         {:ok, session} <- fetch_session_for_confirm(account_id, uuid),
+         :ok <- classify_session_for_confirm(session),
+         do: :ok
+  end
+
+  defp cast_session_id(session_id) when is_binary(session_id) do
+    case Ecto.UUID.cast(session_id) do
+      {:ok, uuid} -> {:ok, uuid}
+      :error -> {:error, :missing_lock}
+    end
+  end
+
+  defp cast_session_id(_), do: {:error, :missing_lock}
+
+  defp fetch_session_for_confirm(account_id, session_id) do
+    case Repo.get(PlanningSession, session_id) do
+      nil -> {:error, :missing_lock}
+      %PlanningSession{account_id: ^account_id} = session -> {:ok, session}
+      %PlanningSession{} -> {:error, :foreign_lock}
+    end
+  end
+
+  defp classify_session_for_confirm(%PlanningSession{status: :active} = session) do
+    if lease_active?(session.lease_expires_at) do
+      :ok
+    else
+      # Lease expired — flip to :lost_lock OUTSIDE the main Multi so the
+      # audit row is correct even if the transaction later aborts.
+      PlanningRepo.mark_lost_lock(session.account_id, session.id)
+      {:error, :lost_lock}
+    end
+  end
+
+  defp classify_session_for_confirm(%PlanningSession{status: :lost_lock}),
+    do: {:error, :lost_lock}
+
+  defp classify_session_for_confirm(%PlanningSession{status: status})
+       when status in [:committed, :cancelled, :expired],
+       do: {:error, :terminal_lock}
+
+  # Half-open lease window (matches `AccountAccess.trial_active?/2`).
+  # A `nil` lease is treated as expired.
+  defp lease_active?(%DateTime{} = lease),
+    do: DateTime.compare(lease, DateTime.utc_now()) == :gt
+
+  defp lease_active?(_), do: false
+
   # Wraps the scheduled-meals + cart writes in a single DB transaction so
-  # either both persist or neither does. The proposal status update is the
-  # first write inside the transaction — if anything fails after that, the
-  # `:accepted` flip is also rolled back (planning-shopping-extraction
-  # design §4 / spec scenario "Cart persistence and scheduled-meal
-  # persistence are atomic").
-  defp run_confirm_transaction(state, proposal, _run) do
-    Repo.transaction(fn ->
-      with {:ok, _accepted} <-
-             PlanningRepo.update_proposal(proposal, %{status: :accepted}),
-           {:ok, scheduled} <- persist_scheduled_meals(proposal, state),
-           {:ok, cart_summary} <- persist_shopping_cart(scheduled, state) do
-        %{
-          proposal_id: proposal.id,
-          scheduled_meals_count: length(scheduled),
-          cart: cart_summary.cart,
-          shopping_items_count: cart_summary.lines_count,
-          checkout_session_id: cart_summary.checkout_session_id
-        }
-      else
-        {:error, _} = err -> Repo.rollback(err)
-      end
-    end)
-    |> case do
-      {:ok, summary} -> {:ok, summary}
-      {:error, {:error, _} = err} -> err
-      {:error, reason} -> {:error, reason}
+  # either both persist or neither does. PR2 of issue #35 converted this
+  # to one `Ecto.Multi` — the first step (`PlanningRepo.mark_committed/3`)
+  # row-locks the session via `SELECT ... FOR UPDATE` and transitions
+  # `:active` → `:committed` inside the same transaction as the meals,
+  # cart, and proposal writes. The pre-check in `verify_session_lock/2`
+  # has already classified the session; if it passes, the Multi step is
+  # guaranteed to find an `:active` row.
+  defp run_confirm_transaction(state, proposal, _run, session_id) do
+    multi =
+      Ecto.Multi.new()
+      |> PlanningRepo.mark_committed(state.account_id, session_id)
+      |> Ecto.Multi.run(:accept_proposal, fn _repo, _changes ->
+        PlanningRepo.update_proposal(proposal, %{status: :accepted})
+      end)
+      |> Ecto.Multi.run(:scheduled_meals, fn _repo, _changes ->
+        persist_scheduled_meals(proposal, state)
+      end)
+      |> Ecto.Multi.run(:shopping_cart, fn _repo, %{scheduled_meals: scheduled} ->
+        persist_shopping_cart(scheduled, state)
+      end)
+
+    case Repo.transaction(multi) do
+      {:ok, %{scheduled_meals: scheduled, shopping_cart: cart_summary}} ->
+        {:ok,
+         %{
+           proposal_id: proposal.id,
+           scheduled_meals_count: length(scheduled),
+           cart: cart_summary.cart,
+           shopping_items_count: cart_summary.lines_count,
+           checkout_session_id: cart_summary.checkout_session_id
+         }}
+
+      {:error, _step, _reason, _changes} ->
+        {:error, :transaction_failed}
     end
   end
 

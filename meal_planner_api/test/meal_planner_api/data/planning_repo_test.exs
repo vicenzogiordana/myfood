@@ -850,6 +850,145 @@ defmodule MealPlannerApi.Data.PlanningRepoTest do
     end
   end
 
+  describe "mark_committed/3 — composable Multi step (PR2 of #35)" do
+    test "an :active session transitions to :committed inside a Multi and returns the step result" do
+      account = insert_account("Commit Multi Happy")
+
+      owner =
+        insert_user_with_active_membership(account.id, "commit-multi-happy@example.com", :owner)
+
+      membership_id = owner_membership_id(account.id, owner.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-08-01],
+          range_to: ~D[2026-08-08],
+          lock_owner_user_id: owner.id,
+          lock_owner_membership_id: membership_id,
+          lease_expires_at: lease
+        })
+
+      session_id = session.id
+
+      multi =
+        Ecto.Multi.new()
+        |> PlanningRepo.mark_committed(account.id, session_id)
+        |> Ecto.Multi.run(:marker, fn _repo, _changes ->
+          {:ok, :marker_value}
+        end)
+
+      assert {:ok, %{mark_committed: committed, marker: :marker_value}} =
+               Repo.transaction(multi)
+
+      assert committed.id == session_id
+      assert committed.status == :committed
+      assert committed.terminal_at != nil
+
+      reloaded = Repo.get!(PlanningSession, session_id)
+      assert reloaded.status == :committed
+    end
+
+    test "an :active session transitions to :committed inside a Multi with an existing Multi chain" do
+      account = insert_account("Commit Multi Chain")
+      owner = insert_user_with_active_membership(account.id, "commit-chain@example.com", :owner)
+
+      membership_id = owner_membership_id(account.id, owner.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-08-09],
+          range_to: ~D[2026-08-16],
+          lock_owner_user_id: owner.id,
+          lock_owner_membership_id: membership_id,
+          lease_expires_at: lease
+        })
+
+      session_id = session.id
+
+      # Caller passes an EXISTING multi (chaining) — mark_committed/3 must
+      # append to it, not overwrite.
+      base_multi =
+        Ecto.Multi.new() |> Ecto.Multi.run(:opener, fn _repo, _ -> {:ok, :opener_value} end)
+
+      chained_multi = PlanningRepo.mark_committed(base_multi, account.id, session_id)
+
+      assert {:ok, %{opener: :opener_value, mark_committed: committed}} =
+               Repo.transaction(chained_multi)
+
+      assert committed.id == session_id
+      assert committed.status == :committed
+    end
+
+    test "a later Multi step failure rolls back the :committed transition" do
+      account = insert_account("Commit Multi Rollback")
+      owner = insert_user_with_active_membership(account.id, "commit-rb@example.com", :owner)
+
+      membership_id = owner_membership_id(account.id, owner.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-08-17],
+          range_to: ~D[2026-08-24],
+          lock_owner_user_id: owner.id,
+          lock_owner_membership_id: membership_id,
+          lease_expires_at: lease
+        })
+
+      session_id = session.id
+
+      # Append a Multi step that intentionally fails — its `run` closure
+      # returns `{:error, :deliberate}`. The whole transaction must roll
+      # back, leaving the session row as :active (NOT :committed).
+      multi =
+        Ecto.Multi.new()
+        |> PlanningRepo.mark_committed(account.id, session_id)
+        |> Ecto.Multi.run(:boom, fn _repo, _changes -> {:error, :deliberate} end)
+
+      assert {:error, :boom, :deliberate, _changes} = Repo.transaction(multi)
+
+      reloaded = Repo.get!(PlanningSession, session_id)
+      assert reloaded.status == :active
+      assert reloaded.terminal_at == nil
+    end
+
+    test "a terminal session aborts the Multi (caller MUST pre-check)" do
+      account = insert_account("Commit Multi Terminal")
+      owner = insert_user_with_active_membership(account.id, "commit-term@example.com", :owner)
+
+      membership_id = owner_membership_id(account.id, owner.id)
+      lease = DateTime.add(DateTime.utc_now(), 120, :second)
+
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-08-25],
+          range_to: ~D[2026-09-01],
+          lock_owner_user_id: owner.id,
+          lock_owner_membership_id: membership_id,
+          lease_expires_at: lease
+        })
+
+      # Manually transition the session to :cancelled (a terminal status).
+      # mark_committed/3's `FOR UPDATE` lookup filters on `status == :active`,
+      # so when called against a terminal session the step finds nothing
+      # and the Multi aborts. The caller is responsible for pre-checking
+      # so this is a belt-and-suspenders guard, not the primary contract.
+      session
+      |> Ecto.Changeset.change(%{status: :cancelled, terminal_at: DateTime.utc_now()})
+      |> Repo.update!()
+
+      multi = Ecto.Multi.new() |> PlanningRepo.mark_committed(account.id, session.id)
+
+      assert {:error, :mark_committed, :session_lock_lost, _changes} =
+               Repo.transaction(multi)
+
+      reloaded = Repo.get!(PlanningSession, session.id)
+      assert reloaded.status == :cancelled
+    end
+  end
+
   describe "mark_committed/2 — confirm_proposal transition to :committed, children PRESERVED" do
     test "an active session transitions to :committed and children are PRESERVED (audit trail)" do
       account = insert_account("Commit Active")
