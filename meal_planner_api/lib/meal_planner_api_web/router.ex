@@ -179,6 +179,7 @@ defmodule MealPlannerApiWeb.Router do
     # User endpoints (auth required, capability required)
     get("/calendar", CalendarController, :index)
     get("/calendar/slot", CalendarController, :show_slot)
+    put("/calendar/meals/range", CalendarController, :replace_range)
     get("/planning/weekly", PlanningController, :weekly)
     post("/planning/confirm", PlanningController, :confirm)
     get("/planning/favorites", PlanningChatController, :favorites)

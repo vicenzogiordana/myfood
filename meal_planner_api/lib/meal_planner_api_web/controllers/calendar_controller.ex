@@ -34,6 +34,26 @@ defmodule MealPlannerApiWeb.CalendarController do
     end
   end
 
+  def replace_range(conn, params) do
+    membership = conn.assigns.current_membership
+
+    with {:ok, from_date} <- parse_date(range_param(params, "from", "start_date")),
+         {:ok, to_date} <- parse_date(range_param(params, "to", "end_date")),
+         :ok <- validate_date_range(from_date, to_date),
+         {:ok, meals} <- parse_replacement_meals(Map.get(params, "meals")) do
+      case Calendar.replace_scheduled_meals_for_range(
+             membership.account_id,
+             {from_date, to_date},
+             meals
+           ) do
+        {:ok, result} -> json(conn, %{data: result})
+        {:error, reason} -> render_error(conn, reason)
+      end
+    else
+      {:error, reason} -> render_error(conn, reason)
+    end
+  end
+
   def show_slot(conn, params) do
     user = Guardian.Plug.current_resource(conn)
     membership = conn.assigns.current_membership
@@ -55,6 +75,38 @@ defmodule MealPlannerApiWeb.CalendarController do
       nil -> {:ok, nil}
       meal -> {:ok, meal}
     end
+  end
+
+  defp range_param(params, primary, fallback) do
+    Map.get(params, primary) || Map.get(params, fallback)
+  end
+
+  defp parse_replacement_meals(meals) when is_list(meals) do
+    Enum.reduce_while(meals, {:ok, []}, fn
+      meal, {:ok, parsed} when is_map(meal) ->
+        with {:ok, date} <- parse_date(Map.get(meal, "date") || Map.get(meal, :date)),
+             {:ok, slot} <- parse_slot(Map.get(meal, "slot") || Map.get(meal, :slot)) do
+          {:cont, {:ok, [meal |> Map.put(:date, date) |> Map.put(:slot, slot) | parsed]}}
+        else
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+
+      _meal, _acc ->
+        {:halt, {:error, "invalid_meals"}}
+    end)
+    |> case do
+      {:ok, parsed} -> {:ok, Enum.reverse(parsed)}
+      error -> error
+    end
+  end
+
+  defp parse_replacement_meals(nil), do: {:error, "missing_meals"}
+  defp parse_replacement_meals(_), do: {:error, "invalid_meals"}
+
+  defp render_error(conn, reason) do
+    conn
+    |> put_status(:unprocessable_entity)
+    |> json(%{error: reason})
   end
 
   defp validate_date_range(start_date, end_date) do
