@@ -8,7 +8,7 @@ defmodule MealPlannerApiWeb.PlanningChannel do
   Eventos entrantes del cliente:
   - `generate_menu` — inicia generación de menú (usa GenerationServer)
   - `chat` — mensaje de modificación del usuario (usa GenerationServer)
-  - `confirm_proposal` — confirma propuesta (usa PlanningChatService, backward compat)
+  - `confirm_proposal` — confirma propuesta (canal atómico, PlanningSession-lock + Repo.transaction/1; sin fallback HTTP)
   - `reject_proposal` — rechaza propuesta (usa PlanningChatService, backward compat)
 
   Eventos salientes (broadcast):
@@ -445,11 +445,14 @@ defmodule MealPlannerApiWeb.PlanningChannel do
         end
 
       [] ->
-        # No GenerationServer registered — the channel fallback path
-        # (PlanningChatService.confirm_proposal/2) bypasses the lock and
-        # AC #4 atomicity. PR3 removes that fallback entirely; for PR2
-        # the missing server is reported as a transport error so clients
-        # do not silently lose the atomicity guarantee.
+        # No GenerationServer registered — the legacy HTTP
+        # `PlanningChatService.confirm_proposal/2` bypass path is
+        # RETIRED in PR3. The channel is now the SOLE atomic
+        # confirmation path; if no GenerationServer is alive (no
+        # `generate_menu` / `start_planning` is in flight), reply
+        # `:no_active_generation` so the client can recover by
+        # starting a new session instead of silently losing the
+        # AC #4 atomicity guarantee.
         {:reply, {:error, %{reason: "no_active_generation"}}, socket}
     end
   end

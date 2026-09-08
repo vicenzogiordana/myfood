@@ -1,6 +1,5 @@
 defmodule MealPlannerApiWeb.PlanningChatControllerTest do
   use MealPlannerApiWeb.ConnCase, async: false
-  import Ecto.Query
   import MealPlannerApi.FactoryHelpers
 
   alias MealPlannerApi.Accounts
@@ -8,8 +7,6 @@ defmodule MealPlannerApiWeb.PlanningChatControllerTest do
   alias MealPlannerApi.Persistence.Calendar
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApi.Persistence.Identity
-  alias MealPlannerApi.Persistence.Planning.ScheduledMeal
-  alias MealPlannerApi.Repo
 
   # ─── Phase A — Tenancy Refactor (PR 3c task 3.19) ───────────────────────────
   # See calendar_controller_test.exs (task 3.14) for why a tampered
@@ -56,7 +53,28 @@ defmodule MealPlannerApiWeb.PlanningChatControllerTest do
     end
   end
 
-  test "planning chat creates a proposal and confirms scheduled meals", %{conn: conn} do
+  # PR3 of issue #35 — the legacy HTTP `POST
+  # /api/planning/proposals/:proposal_id/confirm` path is RETIRED so
+  # only the atomic channel path remains. Confirmations now flow
+  # exclusively through the `confirm_proposal` channel event, which
+  # runs inside the same `Repo.transaction/1` as the meal/cart writes
+  # (AC #4). Any HTTP attempt must now be a 404 (no route) — clients
+  # that still try the old endpoint get a deterministic "not found"
+  # rather than silently bypassing the lock.
+  test "POST /api/planning/proposals/:proposal_id/confirm is retired (404, no route)",
+       %{conn: conn} do
+    token = issue_token(conn, %{"user_id" => "u_chat_404", "account_id" => "acct_chat_404"})
+    fake_proposal_id = Ecto.UUID.generate()
+
+    conn =
+      conn
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> post("/api/planning/proposals/#{fake_proposal_id}/confirm")
+
+    assert conn.status == 404
+  end
+
+  test "planning chat creates a proposal (PR3 retired HTTP confirm)", %{conn: conn} do
     token = issue_token(conn, %{"user_id" => "u_chat", "account_id" => "acct_chat"})
 
     {:ok, %{account_id: account_id, user_id: user_id}} =
@@ -116,23 +134,6 @@ defmodule MealPlannerApiWeb.PlanningChatControllerTest do
     assert length(body["data"]["proposal"]["scheduled_meals"]) == 6
     assert is_map(body["data"]["proposal"]["weekly_plan"])
     assert length(body["data"]["proposal"]["weekly_plan"]["days"]) >= 2
-
-    conn =
-      build_conn()
-      |> put_req_header("authorization", "Bearer " <> token)
-      |> post("/api/planning/proposals/#{proposal_id}/confirm")
-
-    confirm_body = json_response(conn, 200)
-
-    assert confirm_body["data"]["status"] == "confirmed"
-    assert confirm_body["data"]["scheduled_meals_count"] == 6
-
-    assert Repo.aggregate(
-             from(m in ScheduledMeal, where: m.account_id == ^account_id),
-             :count,
-             :id
-           ) ==
-             6
   end
 
   test "favorites endpoint returns user starred recipes", %{conn: conn} do

@@ -97,72 +97,8 @@ defmodule MealPlannerApi.Services.PlanningChatService do
   end
 
   # -------------------------------------------------------------------------
-  # Proposal confirmation / rejection
+  # Proposal rejection
   # -------------------------------------------------------------------------
-
-  @spec confirm_proposal(map(), binary()) :: {:ok, map()} | {:error, term()}
-  def confirm_proposal(current_user, proposal_id) when is_binary(proposal_id) do
-    with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
-         {:ok, proposal} <-
-           PlanningRepo.get_proposal_with_run!(proposal_id) |> then(fn {p, _} -> {:ok, p} end),
-         :ok <- verify_ownership(proposal, ids.account_id),
-         {:ok, scheduled_meals} <- parse_scheduled_meals(proposal),
-         {:ok, _updated} <-
-           PlanningRepo.update_proposal(proposal, %{status: :accepted}) do
-      confirmed =
-        Enum.flat_map(scheduled_meals, fn meal ->
-          # Build clean attrs map from string-keyed meal data
-          slot_atom =
-            meal
-            |> Map.get("slot")
-            |> case do
-              s when is_binary(s) -> String.to_existing_atom(s)
-              a when is_atom(a) -> a
-              _ -> :dinner
-            end
-
-          date_value =
-            meal
-            |> Map.get("date")
-            |> case do
-              d when is_binary(d) ->
-                case Date.from_iso8601(d) do
-                  {:ok, parsed} -> parsed
-                  {:error, _} -> Date.utc_today()
-                end
-
-              %Date{} = d ->
-                d
-
-              _ ->
-                Date.utc_today()
-            end
-
-          attrs = %{
-            account_id: ids.account_id,
-            user_id: ids.user_id,
-            date: date_value,
-            slot: slot_atom,
-            recipe_id: meal["recipe_id"]
-          }
-
-          case PlanningRepo.schedule_meal(attrs) do
-            {:ok, sm} -> [sm]
-            {:error, _} -> []
-          end
-        end)
-
-      {:ok,
-       %{
-         proposal_id: proposal_id,
-         generation_run_id: proposal.generation_run_id,
-         scheduled_meals_count: length(confirmed),
-         scheduled_meals: confirmed
-       }}
-    else
-      {:error, _} = error -> error
-    end
-  end
 
   @spec reject_proposal(map(), binary()) :: {:ok, map()} | {:error, term()}
   def reject_proposal(current_user, proposal_id) when is_binary(proposal_id) do
@@ -300,20 +236,9 @@ defmodule MealPlannerApi.Services.PlanningChatService do
     }
   end
 
-  defp parse_scheduled_meals(proposal) do
-    json = proposal.proposal_json
-
-    meals =
-      case Map.get(json, "scheduled_meals", []) do
-        list when is_list(list) -> list
-        _ -> []
-      end
-
-    {:ok, meals}
-  rescue
-    _ -> {:ok, []}
-  end
-
+  # `reject_proposal/2` still uses this ownership guard; `confirm_proposal/2`
+  # was retired in PR3 (see planning-sessions/spec.md REMOVED Requirements)
+  # because the HTTP path silently bypassed AC #4 atomicity.
   defp verify_ownership(proposal, account_id) do
     if proposal.generation_run && proposal.generation_run.account_id == account_id do
       :ok
