@@ -457,8 +457,8 @@ defmodule MealPlannerApi.Optimization.OptimizerServer do
     handle_solution(request_id, result, state)
   end
 
-  defp route_frame(%{"type" => "error", "id" => request_id, "error" => reason}, state) do
-    handle_error_frame(request_id, reason, state)
+  defp route_frame(%{"type" => "error", "id" => request_id, "error" => reason} = frame, state) do
+    handle_error_frame(request_id, reason, Map.get(frame, "details", %{}), state)
   end
 
   defp route_frame(%{"type" => _}, %{handshake_phase: :pending} = state) do
@@ -490,7 +490,7 @@ defmodule MealPlannerApi.Optimization.OptimizerServer do
     end
   end
 
-  defp handle_error_frame(request_id, reason, state) do
+  defp handle_error_frame(request_id, reason, details, state) do
     Logger.warning("OptimizerServer error for #{request_id}: #{reason}")
 
     case Map.pop(state.pending_requests, request_id) do
@@ -499,13 +499,24 @@ defmodule MealPlannerApi.Optimization.OptimizerServer do
 
       {%{from: from, timer_ref: timer_ref}, new_pending} ->
         cancel_timer(timer_ref)
-        reply_to(from, {:error, :optimizer_error})
+        reply_to(from, {:error, normalize_optimizer_error(reason, details)})
 
         new_state = %{state | pending_requests: new_pending}
         new_state = %{new_state | consecutive_failures: new_state.consecutive_failures + 1}
         maybe_open_circuit(new_state)
     end
   end
+
+  defp normalize_optimizer_error("infeasible", details) when is_map(details),
+    do: {:infeasible, details}
+
+  defp normalize_optimizer_error("unbounded", details) when is_map(details),
+    do: {:unbounded, details}
+
+  defp normalize_optimizer_error("abnormal", details) when is_map(details),
+    do: {:abnormal, details}
+
+  defp normalize_optimizer_error(_, _), do: :optimizer_error
 
   defp overflow_reply(state) do
     Logger.warning("OptimizerServer dropping oversize frame; affected request unavailable")

@@ -146,7 +146,12 @@ defmodule MealPlannerApi.Services.GenerationService do
   def build_proposal_json(resolved_slots) when is_list(resolved_slots) do
     %{
       slots:
-        Enum.map(resolved_slots, fn slot ->
+        resolved_slots
+        |> Enum.sort_by(fn slot ->
+          {slot["date"] || slot[:date], to_string(slot["slot"] || slot[:slot]),
+           slot["recipe_id"] || slot[:recipe_id]}
+        end)
+        |> Enum.map(fn slot ->
           %{
             slot_key: slot_key(slot["date"] || slot[:date], slot["slot"] || slot[:slot]),
             recipe_id: slot["recipe_id"] || slot[:recipe_id],
@@ -157,8 +162,39 @@ defmodule MealPlannerApi.Services.GenerationService do
               |> Enum.into(%{}, fn {k, v} -> {to_string(k), v} end)
           }
         end),
-      generated_at: DateTime.utc_now() |> DateTime.to_iso8601()
+      fingerprint: proposal_fingerprint(resolved_slots)
     }
+  end
+
+  @doc "Validates optimizer assignments against the canonical server-owned candidate set."
+  @spec validate_optimizer_response(map(), map()) :: :ok | {:error, atom(), map()}
+  def validate_optimizer_response(
+        %{"meals" => meals},
+        %{slots: slots, account_id: account_id} = context
+      )
+      when is_list(meals) and is_list(slots) do
+    expected = MapSet.new(Enum.map(slots, &{&1.date, &1.slot}))
+
+    with :ok <- validate_assignments(meals, slots, account_id),
+         :ok <- validate_coverage(meals, expected),
+         :ok <- validate_hard_constraints(meals, slots, Map.get(context, :constraints, %{})) do
+      :ok
+    end
+  end
+
+  def validate_optimizer_response(_, _), do: {:error, :invalid_optimizer_response, %{}}
+
+  @spec proposal_fingerprint([map()]) :: String.t()
+  def proposal_fingerprint(slots) when is_list(slots) do
+    slots
+    |> Enum.map(fn slot ->
+      {slot["date"] || slot[:date], to_string(slot["slot"] || slot[:slot]),
+       slot["recipe_id"] || slot[:recipe_id]}
+    end)
+    |> Enum.sort()
+    |> :erlang.term_to_binary()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
   end
 
   @doc """
@@ -343,6 +379,106 @@ defmodule MealPlannerApi.Services.GenerationService do
     do: [{:max_calories, "must be 0–3000 kcal"} | errors]
 
   defp check_constraints(errors, _, _), do: errors
+
+  defp validate_assignments(meals, slots, account_id) do
+    slot_candidates =
+      Map.new(
+        slots,
+        &{{&1.date, &1.slot},
+         MapSet.new(Enum.map(&1.candidates, fn candidate -> candidate["recipe_id"] end))}
+      )
+
+    Enum.reduce_while(meals, :ok, fn meal, :ok ->
+      day = meal["day"] || meal[:day]
+      slot = meal["slot"] || meal[:slot]
+      recipe_id = meal["recipe_id"] || meal[:recipe_id]
+
+      cond do
+        not is_binary(recipe_id) ->
+          {:halt, {:error, :unknown_recipe, %{recipe_id: recipe_id, day: day, slot: slot}}}
+
+        not Map.has_key?(slot_candidates, {day, slot}) ->
+          {:halt, {:error, :incomplete_coverage, %{missing: [{day, slot}]}}}
+
+        not MapSet.member?(Map.fetch!(slot_candidates, {day, slot}), recipe_id) ->
+          {:halt,
+           {:error, :recipe_not_in_account,
+            %{account_id: account_id, recipe_id: recipe_id, day: day, slot: slot}}}
+
+        true ->
+          {:cont, :ok}
+      end
+    end)
+  end
+
+  defp validate_coverage(meals, expected) do
+    actual =
+      MapSet.new(
+        Enum.map(meals, fn meal -> {meal["day"] || meal[:day], meal["slot"] || meal[:slot]} end)
+      )
+
+    missing = MapSet.difference(expected, actual) |> MapSet.to_list() |> Enum.sort()
+
+    cond do
+      missing != [] -> {:error, :incomplete_coverage, %{missing: missing}}
+      MapSet.size(actual) != length(meals) -> {:error, :duplicate_assignment, %{}}
+      true -> :ok
+    end
+  end
+
+  defp validate_hard_constraints(meals, slots, constraints) do
+    candidates =
+      Map.new(slots, fn slot ->
+        key = {slot.date, slot.slot}
+        {key, Map.new(slot.candidates, &{&1["recipe_id"], &1})}
+      end)
+
+    selected =
+      Enum.map(meals, fn meal ->
+        key = {meal["day"] || meal[:day], meal["slot"] || meal[:slot]}
+
+        Map.fetch!(Map.fetch!(candidates, key), meal["recipe_id"] || meal[:recipe_id])
+        |> Map.put("day", elem(key, 0))
+      end)
+
+    budget = Map.get(constraints, "weekly_budget_cents")
+    macro_bounds = Map.get(constraints, "macro_bounds", %{})
+
+    cond do
+      is_number(budget) and Enum.sum(Enum.map(selected, & &1["estimated_cost_cents"])) > budget ->
+        {:error, :budget_exceeded, %{budget_cents: budget}}
+
+      macro_violation?(selected, macro_bounds) ->
+        {:error, :macro_bounds_violated, %{}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp macro_violation?(selected, bounds) do
+    fields = %{
+      "protein_g" => "protein_g_per_serving",
+      "carbs_g" => "carbs_g_per_serving",
+      "fat_g" => "fat_g_per_serving",
+      "calories" => "calories_per_serving"
+    }
+
+    selected
+    |> Enum.group_by(& &1["day"])
+    |> Enum.any?(fn {_day, meals} ->
+      Enum.any?(fields, fn {bound_key, candidate_key} ->
+        case Map.get(bounds, bound_key) do
+          %{"min" => min, "max" => max} when is_number(min) and is_number(max) ->
+            total = Enum.sum(Enum.map(meals, &(Map.get(&1, candidate_key, 0) || 0)))
+            total < min or total > max
+
+          _ ->
+            false
+        end
+      end)
+    end)
+  end
 
   defp parse_slot_change(msg) do
     date =

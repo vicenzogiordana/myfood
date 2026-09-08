@@ -14,8 +14,15 @@ defmodule MealPlannerApi.Optimization.OptimizerMock do
     if Application.get_env(:meal_planner_api, :optimizer_mock_error, false) do
       {:error, :optimizer_unavailable}
     else
-      %{"days" => days, "candidates_by_slot" => candidates_by_slot} = payload
-      meals = build_mock_meals(days, candidates_by_slot)
+      days = Map.get(payload, "days", Map.get(payload, :days, []))
+
+      candidates_by_slot =
+        Map.get(payload, "candidates_by_slot", Map.get(payload, :candidates_by_slot, %{}))
+
+      slots =
+        Map.get(payload, "slots", Map.get(payload, :slots, Map.keys(candidates_by_slot)))
+
+      meals = build_mock_meals(days, candidates_by_slot, slots)
       {:ok, %{"meals" => meals}}
     end
   end
@@ -25,14 +32,13 @@ defmodule MealPlannerApi.Optimization.OptimizerMock do
 
   # ---
 
-  defp build_mock_meals(days, candidates_by_slot) do
-    slots = [:breakfast, :lunch, :dinner]
-
+  defp build_mock_meals(days, candidates_by_slot, slots) do
     Enum.flat_map(days, fn day ->
       Enum.map(slots, fn slot ->
-        slot_str = Atom.to_string(slot)
-        candidates = Map.get(candidates_by_slot, slot_str, [])
-        first = List.first(candidates)
+        slot_str = to_string(slot)
+
+        first =
+          candidates_by_slot |> candidates_for_slot(slot_str) |> List.first() |> stringify_keys()
 
         Map.merge(first || %{}, %{
           "day" => day,
@@ -76,4 +82,16 @@ defmodule MealPlannerApi.Optimization.OptimizerMock do
       end)
     end)
   end
+
+  defp candidates_for_slot(candidates_by_slot, slot_name) do
+    Map.get(candidates_by_slot, slot_name) ||
+      Enum.find_value(candidates_by_slot, [], fn {slot, candidates} ->
+        if to_string(slot) == slot_name, do: candidates
+      end) || []
+  end
+
+  defp stringify_keys(nil), do: nil
+
+  defp stringify_keys(candidate),
+    do: Map.new(candidate, fn {key, value} -> {to_string(key), value} end)
 end
