@@ -38,20 +38,6 @@ defmodule MealPlannerApiWeb.PlanningChatController do
     end
   end
 
-  def confirm(conn, %{"proposal_id" => proposal_id}) do
-    user = scoped_user(conn)
-
-    case PlanningChatService.confirm_proposal(user, proposal_id) do
-      {:ok, result} ->
-        json(conn, %{data: serialize_confirmation(result)})
-
-      {:error, reason} ->
-        conn
-        |> put_status(:unprocessable_entity)
-        |> json(%{error: serialize_reason(reason)})
-    end
-  end
-
   def reject(conn, %{"proposal_id" => proposal_id}) do
     user = scoped_user(conn)
 
@@ -100,15 +86,6 @@ defmodule MealPlannerApiWeb.PlanningChatController do
       slots: favorite.slots,
       prep_time_minutes: Map.get(favorite, :prep_time_minutes),
       calories_per_serving: Map.get(favorite, :calories_per_serving)
-    }
-  end
-
-  defp serialize_confirmation(result) do
-    %{
-      proposal_id: result.proposal_id,
-      generation_run_id: result.generation_run_id,
-      scheduled_meals_count: result.scheduled_meals_count,
-      status: "confirmed"
     }
   end
 
