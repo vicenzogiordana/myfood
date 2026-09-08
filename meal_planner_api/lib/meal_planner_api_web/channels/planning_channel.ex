@@ -131,44 +131,27 @@ defmodule MealPlannerApiWeb.PlanningChannel do
     end
   end
 
-  def handle_in("confirm_proposal", %{"proposal_id" => proposal_id}, socket) do
+  def handle_in("confirm_proposal", payload, socket) do
+    # PR2 of issue #35 — `session_id` is required and forwarded into
+    # `Server.do_confirm/3`. The session row IS the confirmation lock —
+    # no lock, no confirm. Missing or invalid payload returns
+    # `:missing_session_id` BEFORE any DB or GenerationServer lookup.
     user = socket.assigns.current_user
     membership = socket.assigns.current_membership
 
-    # Primero intentar con GenerationServer (si existe para este account)
-    case Registry.lookup(
-           MealPlannerApi.Generation.Generations,
-           {:generation, membership.account_id}
-         ) do
-      [{server_pid, _}] ->
-        case Server.confirm(server_pid, proposal_id) do
-          {:ok, result} ->
-            {:reply, {:ok, result}, socket}
+    with {:ok, proposal_id} <- require_proposal_id(Map.get(payload, "proposal_id")),
+         {:ok, session_id} <- require_session_id(Map.get(payload, "session_id")),
+         :ok <- check_handler_entitlement(membership.account_id) do
+      confirm_with_lock(user, membership, proposal_id, session_id, socket)
+    else
+      {:error, :missing_session_id} ->
+        {:reply, {:error, %{reason: "missing_session_id"}}, socket}
 
-          {:error, reason} ->
-            {:reply, {:error, %{reason: serialize_reason(reason)}}, socket}
-        end
+      {:error, :account_expired} ->
+        {:reply, {:error, %{reason: "account_expired"}}, socket}
 
-      [] ->
-        # Fallback: usar PlanningChatService (REST API backward compat)
-        # Catch exceptions from service to return graceful errors
-        try do
-          case PlanningChatService.confirm_proposal(user, proposal_id) do
-            {:ok, result} ->
-              event = Map.put(result, :status, "confirmed")
-              broadcast!(socket, "proposal_confirmed", event)
-              {:reply, {:ok, event}, socket}
-
-            {:error, reason} ->
-              {:reply, {:error, %{reason: serialize_reason(reason)}}, socket}
-          end
-        rescue
-          Ecto.NoResultsError ->
-            {:reply, {:error, %{reason: "not_found"}}, socket}
-
-          Ecto.Query.CastError ->
-            {:reply, {:error, %{reason: "invalid_proposal_id"}}, socket}
-        end
+      {:error, :invalid_proposal_id} ->
+        {:reply, {:error, %{reason: "invalid_proposal_id"}}, socket}
     end
   end
 
@@ -397,6 +380,28 @@ defmodule MealPlannerApiWeb.PlanningChannel do
 
   defp require_uuid(_), do: {:error, :invalid_session_id}
 
+  # PR2 of issue #35 — `confirm_proposal` payload guards. Both
+  # `proposal_id` and `session_id` are required UUIDs; absent or
+  # malformed values map to a single transport reason so the client
+  # gets a deterministic response.
+  defp require_proposal_id(value) when is_binary(value) do
+    case Ecto.UUID.cast(value) do
+      {:ok, uuid} -> {:ok, uuid}
+      :error -> {:error, :invalid_proposal_id}
+    end
+  end
+
+  defp require_proposal_id(_), do: {:error, :invalid_proposal_id}
+
+  defp require_session_id(value) when is_binary(value) do
+    case Ecto.UUID.cast(value) do
+      {:ok, uuid} -> {:ok, uuid}
+      :error -> {:error, :missing_session_id}
+    end
+  end
+
+  defp require_session_id(_), do: {:error, :missing_session_id}
+
   # Phase 4 PR4 task 4.8 — the caller's `session_id` MUST equal the
   # session cached on the socket assigns. Prevents a caller from
   # applying intents to a session they did not start on this socket.
@@ -413,5 +418,39 @@ defmodule MealPlannerApiWeb.PlanningChannel do
       "session_cancelled",
       %{"session_id" => session_id}
     )
+  end
+
+  # PR2 of issue #35 — AC #1 proof: when
+  # `:revenuecat_access_enforcement` is enabled, the per-handler re-check
+  # refuses an expired Account's `confirm_proposal` with `:account_expired`
+  # BEFORE `Server.do_confirm/3` is invoked. Mirrors the join-time
+  # `ChannelCapability.authorize/1` gate.
+  defp check_handler_entitlement(account_id) do
+    cond do
+      not ChannelCapability.enforcement_enabled?() -> :ok
+      AccountAccess.eligible?(account_id) -> :ok
+      true -> {:error, :account_expired}
+    end
+  end
+
+  defp confirm_with_lock(_user, membership, proposal_id, session_id, socket) do
+    case Registry.lookup(
+           MealPlannerApi.Generation.Generations,
+           {:generation, membership.account_id}
+         ) do
+      [{server_pid, _}] ->
+        case Server.confirm(server_pid, proposal_id, session_id) do
+          {:ok, result} -> {:reply, {:ok, result}, socket}
+          {:error, reason} -> {:reply, {:error, %{reason: serialize_reason(reason)}}, socket}
+        end
+
+      [] ->
+        # No GenerationServer registered — the channel fallback path
+        # (PlanningChatService.confirm_proposal/2) bypasses the lock and
+        # AC #4 atomicity. PR3 removes that fallback entirely; for PR2
+        # the missing server is reported as a transport error so clients
+        # do not silently lose the atomicity guarantee.
+        {:reply, {:error, %{reason: "no_active_generation"}}, socket}
+    end
   end
 end
