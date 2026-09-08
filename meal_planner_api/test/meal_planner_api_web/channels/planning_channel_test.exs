@@ -414,12 +414,11 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
   # ==========================================================================
 
   describe "handle_in confirm_proposal" do
-    test "error when proposal not found - graceful error handling", %{
+    test "missing session_id is rejected with :missing_session_id before any DB lookup", %{
       account: account,
       user: user,
       token: token
     } do
-      # Create data so account has valid structure
       {:ok, _recipe} =
         Catalog.create_recipe(%{
           account_id: account.id,
@@ -435,7 +434,9 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
       {:ok, _reply, socket} =
         subscribe_and_join(socket, PlanningChannel, "planning:#{account.id}")
 
-      # Use a valid UUID format but one that doesn't exist
+      # PR2 — session_id is required; the payload guard fires before
+      # proposal_id is even checked, so the well-formed fake proposal_id
+      # never reaches `Server.do_confirm/3`.
       fake_uuid = Ecto.UUID.generate()
 
       ref =
@@ -443,11 +444,10 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
           "proposal_id" => fake_uuid
         })
 
-      # Should get an error (proposal not found) - gracefully handled
-      assert_reply(ref, :error, %{reason: "not_found"})
+      assert_reply(ref, :error, %{reason: "missing_session_id"})
     end
 
-    test "error when invalid proposal_id format", %{
+    test "invalid session_id format returns :missing_session_id", %{
       account: account,
       token: token
     } do
@@ -456,15 +456,35 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
       {:ok, _reply, socket} =
         subscribe_and_join(socket, PlanningChannel, "planning:#{account.id}")
 
-      # Use invalid UUID format
       ref =
         push(socket, "confirm_proposal", %{
-          "proposal_id" => "not-a-valid-uuid"
+          "proposal_id" => Ecto.UUID.generate(),
+          "session_id" => "not-uuid"
         })
 
-      # Should get error due to invalid format
-      assert_reply(ref, :error, %{reason: reason})
-      assert reason in ["invalid_proposal_id", "not_found"]
+      assert_reply(ref, :error, %{reason: "missing_session_id"})
+    end
+
+    test "invalid proposal_id format returns :invalid_proposal_id", %{
+      account: account,
+      token: token
+    } do
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+      {:ok, _reply, socket} =
+        subscribe_and_join(socket, PlanningChannel, "planning:#{account.id}")
+
+      # Use a TRULY malformed UUID — too short, contains non-hex chars.
+      # (Strings like "not-a-valid-uuid" happen to be 36 ASCII bytes
+      # that parse as a valid hex UUID, which would slip past the
+      # cast check.)
+      ref =
+        push(socket, "confirm_proposal", %{
+          "proposal_id" => "not-uuid",
+          "session_id" => Ecto.UUID.generate()
+        })
+
+      assert_reply(ref, :error, %{reason: "invalid_proposal_id"})
     end
 
     # @task 4.3 — channel-layer end-to-end test: confirms that the cart
@@ -542,9 +562,14 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
         id: {:channel_server, account.id, :cart_payload_test}
       )
 
+      # PR2 — pre-create the session lock so `do_confirm/3`'s pre-check
+      # passes and the full atomic pipeline runs.
+      session = insert_active_session(account, user)
+
       ref =
         push(socket, "confirm_proposal", %{
-          "proposal_id" => proposal.id
+          "proposal_id" => proposal.id,
+          "session_id" => session.id
         })
 
       assert_reply(ref, :ok, %{
@@ -564,6 +589,18 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
 
       assert broadcast_session_id == checkout_session_id
       assert broadcast_ingredient_id == flour_id
+
+      # PR2 — the session row must be :committed by the same transaction
+      # that wrote the cart and meals. The cart-payload test now also
+      # proves AC #4 atomicity at the channel boundary.
+      reloaded =
+        MealPlannerApi.Repo.get!(
+          MealPlannerApi.Persistence.Planning.PlanningSession,
+          session.id
+        )
+
+      assert reloaded.status == :committed
+      assert reloaded.terminal_at != nil
     end
 
     test "re-confirming an already-accepted proposal returns :already_confirmed and emits no proposal_confirmed",
@@ -608,9 +645,14 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
         id: {:channel_server, account.id, :already_confirmed_test}
       )
 
+      # PR2 — provide a session_id; the `:already_confirmed` short-circuit
+      # runs BEFORE the session check, so this is just a sanity UUID.
+      session = insert_active_session(account, user)
+
       ref =
         push(socket, "confirm_proposal", %{
-          "proposal_id" => proposal.id
+          "proposal_id" => proposal.id,
+          "session_id" => session.id
         })
 
       assert_reply(ref, :error, %{reason: "already_confirmed"})
@@ -657,7 +699,13 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
         id: {:channel_server, account.id, :rollback_test}
       )
 
-      ref = push(socket, "confirm_proposal", %{"proposal_id" => proposal.id})
+      session = insert_active_session(account, user)
+
+      ref =
+        push(socket, "confirm_proposal", %{
+          "proposal_id" => proposal.id,
+          "session_id" => session.id
+        })
 
       assert_reply(ref, :error, _payload)
 
@@ -667,6 +715,216 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
       assert PlanningRepo.list_scheduled_meals(account.id, ~D[2026-01-01], ~D[2026-12-31]) == []
 
       assert ShoppingRepo.list_checkout_sessions(account.id) == []
+
+      # PR2 — the session MUST stay :active after the rollback; the
+      # :committed transition runs inside the same Multi as the meals
+      # and cart writes and rolls back atomically.
+      reloaded_session =
+        MealPlannerApi.Repo.get!(
+          MealPlannerApi.Persistence.Planning.PlanningSession,
+          session.id
+        )
+
+      assert reloaded_session.status == :active
+      assert reloaded_session.terminal_at == nil
+    end
+
+    # PR2 of issue #35 — Foreign-lock rejection at the channel boundary.
+    # A session that belongs to ANOTHER Account must be refused before
+    # any write — `:foreign_lock` reply, no proposal flip, no
+    # proposal_confirmed broadcast.
+    test "foreign-lock session is rejected with :foreign_lock, no writes fire", %{
+      account: account,
+      user: user,
+      token: token
+    } do
+      _ = persist_trial_window!(account, :eligible)
+
+      # Peer account with its own session owned by a peer user.
+      peer_account =
+        %PersistenceAccount{}
+        |> PersistenceAccount.changeset(%{
+          name: "PR2 Foreign Peer",
+          plan: :family_4,
+          default_budget_cents: 0,
+          subscription_plan_id:
+            MealPlannerApi.Repo.get_by!(MealPlannerApi.Subscriptions.Plan, name: "family_4").id
+        })
+        |> MealPlannerApi.Repo.insert!()
+
+      peer_user =
+        %MealPlannerApi.Persistence.Accounts.User{}
+        |> MealPlannerApi.Persistence.Accounts.User.changeset(%{
+          email: "pr2-foreign-peer@example.com",
+          name: "PR2 Foreign Peer",
+          role: :owner
+        })
+        |> MealPlannerApi.Repo.insert!()
+
+      # peer_user needs an :active membership on peer_account so the
+      # session row can be created with a valid lock_owner_membership_id.
+      %MealPlannerApi.Persistence.Accounts.AccountMembership{}
+      |> MealPlannerApi.Persistence.Accounts.AccountMembership.changeset(%{
+        account_id: peer_account.id,
+        user_id: peer_user.id,
+        role: :owner,
+        status: :active,
+        joined_at: DateTime.utc_now()
+      })
+      |> MealPlannerApi.Repo.insert!()
+
+      foreign_session = insert_active_session(peer_account, peer_user)
+
+      # The current membership's account (driven by `token`) has a
+      # proposal it tries to confirm with the FOREIGN session id.
+      {:ok, _recipe} =
+        Catalog.create_recipe(%{
+          account_id: account.id,
+          created_by_user_id: user.id,
+          name: "PR2 foreign recipe",
+          source: :user_created,
+          servings: 2,
+          suitable_for_slots: [:lunch]
+        })
+
+      {:ok, run} =
+        PlanningRepo.create_generation_run(%{
+          account_id: account.id,
+          user_id: user.id,
+          status: :processing,
+          started_at: DateTime.utc_now(),
+          input_context: %{}
+        })
+
+      {:ok, proposal} =
+        PlanningRepo.create_proposal(%{
+          generation_run_id: run.id,
+          status: :pending,
+          proposal_json: %{slots: []}
+        })
+
+      {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+      {:ok, _reply, socket} =
+        subscribe_and_join(socket, PlanningChannel, "planning:#{account.id}")
+
+      start_supervised!(
+        {Server, account_id: account.id, user_id: user.id, channel_pid: socket.channel_pid},
+        id: {:channel_server, account.id, :foreign_lock_test}
+      )
+
+      ref =
+        push(socket, "confirm_proposal", %{
+          "proposal_id" => proposal.id,
+          "session_id" => foreign_session.id
+        })
+
+      assert_reply(ref, :error, %{reason: "foreign_lock"})
+
+      # The proposal stays :pending — pre-check fired before any write.
+      reloaded_proposal =
+        Repo.get!(MealPlannerApi.Persistence.Planning.PlanningProposal, proposal.id)
+
+      assert reloaded_proposal.status == :pending
+
+      refute_receive %Phoenix.Socket.Broadcast{
+                       topic: "planning:" <> _,
+                       event: "proposal_confirmed"
+                     },
+                     100
+    end
+
+    # PR2 of issue #35 — AC #1 proof at the channel boundary. When
+    # `:revenuecat_access_enforcement` is enabled and the Account is
+    # expired, `confirm_proposal` returns `:account_expired` BEFORE
+    # `Server.do_confirm/3` is invoked. The pre-existing session stays
+    # `:active` and no proposal flip occurs.
+    #
+    # The Account must be eligible AT JOIN TIME so the join-time
+    # `ChannelCapability.authorize/1` guard admits the socket. The
+    # trial window is then flipped to expired mid-session to simulate
+    # a real entitlement lapse, which the per-handler
+    # `check_handler_entitlement/1` re-check catches.
+    test "expired Account is denied confirm when :revenuecat_access_enforcement is enabled (AC #1)",
+         %{account: account, user: user, token: token} do
+      # Eligible AT JOIN TIME.
+      _ = persist_trial_window!(account, :eligible)
+
+      {:ok, _recipe} =
+        Catalog.create_recipe(%{
+          account_id: account.id,
+          created_by_user_id: user.id,
+          name: "PR2 expired recipe",
+          source: :user_created,
+          servings: 2,
+          suitable_for_slots: [:lunch]
+        })
+
+      {:ok, run} =
+        PlanningRepo.create_generation_run(%{
+          account_id: account.id,
+          user_id: user.id,
+          status: :processing,
+          started_at: DateTime.utc_now(),
+          input_context: %{}
+        })
+
+      {:ok, proposal} =
+        PlanningRepo.create_proposal(%{
+          generation_run_id: run.id,
+          status: :pending,
+          proposal_json: %{slots: []}
+        })
+
+      session = insert_active_session(account, user)
+
+      previous = Application.get_env(:meal_planner_api, :revenuecat_access_enforcement)
+      Application.put_env(:meal_planner_api, :revenuecat_access_enforcement, true)
+
+      try do
+        {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+        {:ok, _reply, socket} =
+          subscribe_and_join(socket, PlanningChannel, "planning:#{account.id}")
+
+        start_supervised!(
+          {Server, account_id: account.id, user_id: user.id, channel_pid: socket.channel_pid},
+          id: {:channel_server, account.id, :expired_confirm_test}
+        )
+
+        # Flip the trial window to expired mid-session — the per-handler
+        # check fires on this `confirm_proposal` message and refuses.
+        _ = persist_trial_window!(account, :expired)
+
+        ref =
+          push(socket, "confirm_proposal", %{
+            "proposal_id" => proposal.id,
+            "session_id" => session.id
+          })
+
+        assert_reply(ref, :error, %{reason: "account_expired"})
+
+        # Session stays :active — handler short-circuits BEFORE
+        # `Server.do_confirm/3` and never opens the transaction.
+        reloaded_session =
+          MealPlannerApi.Repo.get!(
+            MealPlannerApi.Persistence.Planning.PlanningSession,
+            session.id
+          )
+
+        assert reloaded_session.status == :active
+
+        reloaded_proposal =
+          Repo.get!(MealPlannerApi.Persistence.Planning.PlanningProposal, proposal.id)
+
+        assert reloaded_proposal.status == :pending
+      after
+        Application.put_env(
+          :meal_planner_api,
+          :revenuecat_access_enforcement,
+          previous
+        )
+      end
     end
   end
 
@@ -1323,6 +1581,24 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
         where: m.account_id == ^account_id and m.user_id == ^user_id and m.status == :active
       )
     ).id
+  end
+
+  # PR2 of issue #35 — Phase 2.3 channel tests create an `:active`
+  # session and forward its id into `confirm_proposal` so the channel
+  # reaches the lock-aware confirm path.
+  defp insert_active_session(account, user) do
+    membership_id = owner_membership_id(account.id, user.id)
+
+    {:ok, session} =
+      PlanningRepo.create_session(account.id, %{
+        range_from: ~D[2026-08-01],
+        range_to: ~D[2026-08-08],
+        lock_owner_user_id: user.id,
+        lock_owner_membership_id: membership_id,
+        lease_expires_at: DateTime.add(DateTime.utc_now(), 120, :second)
+      })
+
+    session
   end
 
   # Fetches the User that owns the JWT — used by the cancel-planning

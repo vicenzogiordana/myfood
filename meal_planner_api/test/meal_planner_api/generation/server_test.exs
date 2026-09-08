@@ -32,8 +32,8 @@ defmodule MealPlannerApi.Generation.ServerTest do
       assert is_function(&Server.chat/3, 3)
     end
 
-    test "confirm/2 has correct arity" do
-      assert is_function(&Server.confirm/2, 2)
+    test "confirm/3 has correct arity" do
+      assert is_function(&Server.confirm/3, 3)
     end
 
     test "reject/2 has correct arity" do
@@ -110,7 +110,7 @@ defmodule MealPlannerApi.Generation.ServerTest do
       account = insert_account("3-1 acct")
       user = insert_user_with_membership(account, "pr2-idemp@example.com")
 
-      {run, proposal} = insert_proposal_with_slots(account, user, [])
+      {_run, proposal} = insert_proposal_with_slots(account, user, [])
 
       # Flip the proposal to :accepted via the persistence layer
       # to mimic a successful prior confirm.
@@ -119,12 +119,17 @@ defmodule MealPlannerApi.Generation.ServerTest do
 
       assert accepted.status == :accepted
 
+      # PR2 — provide a real session id; the `:already_confirmed`
+      # short-circuit runs BEFORE the session check, so this is just
+      # a sanity UUID that proves the order.
+      session = insert_active_session(account, user)
+
       start_server!(account, user)
 
       pid = pid_for_account(account)
 
       assert {:error, :already_confirmed} =
-               Server.confirm(pid, accepted.id)
+               Server.confirm(pid, accepted.id, session.id)
 
       assert count_checkout_sessions(account) == 0
     end
@@ -159,7 +164,7 @@ defmodule MealPlannerApi.Generation.ServerTest do
       attach_recipe_ingredient(recipe_milk_ml, milk, 250_000, :ml)
       attach_recipe_ingredient(recipe_milk_g, milk, 100_000, :g)
 
-      {run, proposal} =
+      {_run, proposal} =
         insert_proposal_with_slots(account, user, [
           slot(~D[2026-08-03], :lunch, recipe_flour_lunch.id),
           slot(~D[2026-08-03], :dinner, recipe_flour_dinner.id),
@@ -167,10 +172,11 @@ defmodule MealPlannerApi.Generation.ServerTest do
           slot(~D[2026-08-04], :dinner, recipe_milk_g.id)
         ])
 
+      session = insert_active_session(account, user)
       start_server!(account, user)
       pid = pid_for_account(account)
 
-      assert {:ok, _reply} = Server.confirm(pid, proposal.id)
+      assert {:ok, _reply} = Server.confirm(pid, proposal.id, session.id)
 
       # ---- CheckoutSession assertions --------------------------------------
       sessions = list_sessions(account)
@@ -232,10 +238,11 @@ defmodule MealPlannerApi.Generation.ServerTest do
           slot(~D[2026-08-05], :lunch, recipe_no_ingredients.id)
         ])
 
+      session = insert_active_session(account, user)
       start_server!(account, user)
       pid = pid_for_account(account)
 
-      assert {:ok, reply} = Server.confirm(pid, proposal.id)
+      assert {:ok, reply} = Server.confirm(pid, proposal.id, session.id)
 
       assert reply.scheduled_meals_count == 1
       assert reply.shopping_items_count == 0
@@ -259,10 +266,11 @@ defmodule MealPlannerApi.Generation.ServerTest do
 
       {_run, proposal} = insert_proposal_with_slots(account, user, [])
 
+      session = insert_active_session(account, user)
       start_server!(account, user)
       pid = pid_for_account(account)
 
-      assert {:ok, reply} = Server.confirm(pid, proposal.id)
+      assert {:ok, reply} = Server.confirm(pid, proposal.id, session.id)
 
       assert reply.scheduled_meals_count == 0
       assert reply.shopping_items_count == 0
@@ -300,6 +308,7 @@ defmodule MealPlannerApi.Generation.ServerTest do
           slot(~D[2026-08-06], :lunch, recipe.id)
         ])
 
+      session = insert_active_session(account, user)
       start_server!(account, user)
       pid = pid_for_account(account)
 
@@ -317,7 +326,7 @@ defmodule MealPlannerApi.Generation.ServerTest do
         |> Ecto.Changeset.change(%{quantity_milli: 0})
         |> MealPlannerApi.Repo.update!()
 
-        assert {:error, _reason} = Server.confirm(pid, proposal.id)
+        assert {:error, _reason} = Server.confirm(pid, proposal.id, session.id)
 
         assert list_all_meals(account.id) == []
         assert list_all_items(account) == []
@@ -369,10 +378,11 @@ defmodule MealPlannerApi.Generation.ServerTest do
           slot(~D[2026-08-07], :lunch, recipe.id)
         ])
 
+      session_a = insert_active_session(account_a, user_a)
       start_server!(account_a, user_a)
       pid_a = pid_for_account(account_a)
 
-      assert {:ok, _} = Server.confirm(pid_a, proposal_a.id)
+      assert {:ok, _} = Server.confirm(pid_a, proposal_a.id, session_a.id)
 
       # Account A reads its own session.
       sessions_a = list_sessions(account_a)
@@ -413,10 +423,11 @@ defmodule MealPlannerApi.Generation.ServerTest do
           slot(~D[2026-08-08], :lunch, recipe_lunch.id)
         ])
 
+      session = insert_active_session(account, user)
       start_server!(account, user)
       pid = pid_for_account(account)
 
-      assert {:ok, reply} = Server.confirm(pid, proposal.id)
+      assert {:ok, reply} = Server.confirm(pid, proposal.id, session.id)
 
       # All four cart-aware keys exist.
       assert reply.proposal_id == proposal.id
@@ -427,7 +438,296 @@ defmodule MealPlannerApi.Generation.ServerTest do
     end
   end
 
+  # ===========================================================================
+  # PR2 — Phase 2.2: do_confirm/3 PlanningSession-locked confirm
+  #
+  # `Server.confirm/3` is now the only public confirmation path. Each
+  # scenario below drives `do_confirm/3` end-to-end through the DB and
+  # asserts the structured error reply from the contract
+  # (`design.md` §"Interfaces / Contracts"). The existing @task 3.x tests
+  # are kept above to prove backward compat for the cart + meal
+  # persistence pipeline.
+  # ===========================================================================
+
+  describe "confirm/3 — missing lock rejection (PR2 of #35)" do
+    test "a missing session_id returns {:error, :missing_lock} before any write" do
+      account = insert_account("2-2 missing acct")
+      user = insert_user_with_membership(account, "pr2-missing@example.com")
+
+      {_run, proposal} = insert_proposal_with_slots(account, user, [])
+
+      start_server!(account, user)
+      pid = pid_for_account(account)
+
+      # Use a well-formed UUID that does NOT match any row — pre-check
+      # returns :missing_lock BEFORE the ownership/guard checks fire.
+      fake_session_id = Ecto.UUID.generate()
+
+      assert {:error, :missing_lock} =
+               Server.confirm(pid, proposal.id, fake_session_id)
+
+      assert list_all_meals(account.id) == []
+      assert count_checkout_sessions(account) == 0
+    end
+  end
+
+  describe "confirm/3 — foreign-lock rejection (PR2 of #35)" do
+    test "a session belonging to another Account returns {:error, :foreign_lock} before any write" do
+      account_a = insert_account("2-2 foreign A")
+      user_a = insert_user_with_membership(account_a, "pr2-foreign-a@example.com")
+
+      account_b = insert_account("2-2 foreign B")
+      user_b = insert_user_with_membership(account_b, "pr2-foreign-b@example.com")
+
+      # Session exists on Account B; Account A tries to confirm with it.
+      foreign_session = insert_active_session(account_b, user_b)
+
+      {_run, proposal} = insert_proposal_with_slots(account_a, user_a, [])
+
+      start_server!(account_a, user_a)
+      pid_a = pid_for_account(account_a)
+
+      assert {:error, :foreign_lock} =
+               Server.confirm(pid_a, proposal.id, foreign_session.id)
+
+      # Account A is untouched.
+      assert list_all_meals(account_a.id) == []
+      assert count_checkout_sessions(account_a) == 0
+
+      # Account B's session is still :active — pre-check does not write.
+      assert fetch_session(foreign_session.id).status == :active
+    end
+  end
+
+  describe "confirm/3 — lost-lock rejection (PR2 of #35)" do
+    test "a manually :lost_lock session returns {:error, :lost_lock} before any write" do
+      account = insert_account("2-2 lost-lock acct")
+      user = insert_user_with_membership(account, "pr2-lost@example.com")
+
+      session = insert_active_session(account, user)
+
+      # Manually drive the session to :lost_lock via the existing path
+      # (mirrors what `mark_lost_lock/2` does on owner-process crash).
+      assert {:ok, lost_lock} =
+               PlanningRepo.mark_lost_lock(account.id, session.id)
+
+      assert lost_lock.status == :lost_lock
+
+      {_run, proposal} = insert_proposal_with_slots(account, user, [])
+
+      start_server!(account, user)
+      pid = pid_for_account(account)
+
+      assert {:error, :lost_lock} = Server.confirm(pid, proposal.id, session.id)
+
+      assert list_all_meals(account.id) == []
+      assert count_checkout_sessions(account) == 0
+    end
+
+    test "an expired lease transitions the row to :lost_lock and returns :lost_lock" do
+      account = insert_account("2-2 expired acct")
+      user = insert_user_with_membership(account, "pr2-expired@example.com")
+
+      membership_id = owner_membership_id(account.id, user.id)
+
+      # Create a session whose lease is already in the past.
+      {:ok, session} =
+        PlanningRepo.create_session(account.id, %{
+          range_from: ~D[2026-09-01],
+          range_to: ~D[2026-09-08],
+          lock_owner_user_id: user.id,
+          lock_owner_membership_id: membership_id,
+          lease_expires_at: DateTime.add(DateTime.utc_now(), -10, :second)
+        })
+
+      {_run, proposal} = insert_proposal_with_slots(account, user, [])
+
+      start_server!(account, user)
+      pid = pid_for_account(account)
+
+      assert {:error, :lost_lock} = Server.confirm(pid, proposal.id, session.id)
+
+      # The pre-check transitioned the expired-active row to :lost_lock
+      # BEFORE the main transaction, so the audit row is correct.
+      assert fetch_session(session.id).status == :lost_lock
+      assert fetch_session(session.id).terminal_at != nil
+
+      assert list_all_meals(account.id) == []
+      assert count_checkout_sessions(account) == 0
+    end
+  end
+
+  describe "confirm/3 — terminal-lock rejection (PR2 of #35)" do
+    test "a :committed session returns {:error, :terminal_lock} before any write" do
+      account = insert_account("2-2 terminal acct")
+      user = insert_user_with_membership(account, "pr2-terminal@example.com")
+
+      session = insert_active_session(account, user)
+
+      # Manually drive the session to :committed via the existing path.
+      assert {:ok, committed} =
+               PlanningRepo.mark_committed(account.id, session.id)
+
+      assert committed.status == :committed
+
+      {_run, proposal} = insert_proposal_with_slots(account, user, [])
+
+      start_server!(account, user)
+      pid = pid_for_account(account)
+
+      assert {:error, :terminal_lock} =
+               Server.confirm(pid, proposal.id, session.id)
+
+      assert list_all_meals(account.id) == []
+      assert count_checkout_sessions(account) == 0
+    end
+
+    test "a :cancelled session returns {:error, :terminal_lock} before any write" do
+      account = insert_account("2-2 cancelled acct")
+      user = insert_user_with_membership(account, "pr2-cancelled@example.com")
+
+      membership_id = owner_membership_id(account.id, user.id)
+
+      session = insert_active_session(account, user)
+
+      assert {:ok, cancelled} =
+               PlanningRepo.cancel_session(account.id, session.id, membership_id, true)
+
+      assert cancelled.status == :cancelled
+
+      {_run, proposal} = insert_proposal_with_slots(account, user, [])
+
+      start_server!(account, user)
+      pid = pid_for_account(account)
+
+      assert {:error, :terminal_lock} =
+               Server.confirm(pid, proposal.id, session.id)
+    end
+  end
+
+  describe "confirm/3 — atomic session commit (PR2 of #35)" do
+    test "a successful confirm transitions the session row to :committed alongside meals + cart" do
+      account = insert_account("2-2 commit acct")
+      user = insert_user_with_membership(account, "pr2-commit@example.com")
+
+      recipe = insert_recipe("2-2 commit recipe")
+      flour = insert_ingredient("2-2 commit flour")
+      attach_recipe_ingredient(recipe, flour, 200_000, :g)
+
+      session = insert_active_session(account, user)
+
+      {_run, proposal} =
+        insert_proposal_with_slots(account, user, [
+          slot(~D[2026-09-10], :lunch, recipe.id)
+        ])
+
+      start_server!(account, user)
+      pid = pid_for_account(account)
+
+      assert {:ok, _reply} = Server.confirm(pid, proposal.id, session.id)
+
+      # Session row is now :committed with terminal_at stamped.
+      committed = fetch_session(session.id)
+      assert committed.status == :committed
+      assert committed.terminal_at != nil
+
+      # And the rest of the pipeline ran.
+      assert list_all_meals(account.id) |> length() == 1
+      assert count_checkout_sessions(account) == 1
+    end
+
+    test "a failed confirm preserves the session as :active (rollback contract)" do
+      account = insert_account("2-2 rollback acct")
+      user = insert_user_with_membership(account, "pr2-rb@example.com")
+
+      session = insert_active_session(account, user)
+
+      recipe = insert_recipe("2-2 rb recipe")
+      ingredient = insert_ingredient("2-2 rb ingredient")
+
+      {:ok, recipe_ingredient} =
+        MealPlannerApi.Data.RecipeRepo.add_recipe_ingredient(%{
+          recipe_id: recipe.id,
+          ingredient_id: ingredient.id,
+          quantity_milli: 1_000,
+          unit: :g
+        })
+
+      {_run, proposal} =
+        insert_proposal_with_slots(account, user, [
+          slot(~D[2026-09-12], :lunch, recipe.id)
+        ])
+
+      start_server!(account, user)
+      pid = pid_for_account(account)
+
+      # Drop the recipe_ingredients.quantity_positive CHECK, mutate the
+      # row to 0 so the cart line becomes 0 (fails the
+      # shopping_items.quantity_positive CHECK). Mirrors the @task 3.7
+      # rollback test pattern. The whole Multi must abort and the
+      # session row MUST stay :active (NOT :committed).
+      try do
+        drop_recipe_ingredient_quantity_check!()
+
+        recipe_ingredient
+        |> Ecto.Changeset.change(%{quantity_milli: 0})
+        |> MealPlannerApi.Repo.update!()
+
+        assert {:error, _reason} = Server.confirm(pid, proposal.id, session.id)
+
+        # Session remains :active — the :committed transition was rolled back.
+        reloaded = fetch_session(session.id)
+        assert reloaded.status == :active
+        assert reloaded.terminal_at == nil
+
+        # Meals + cart never landed.
+        assert list_all_meals(account.id) == []
+        assert count_checkout_sessions(account) == 0
+      after
+        MealPlannerApi.Repo.update_all(
+          from(ri in MealPlannerApi.Persistence.Catalog.RecipeIngredient,
+            where: ri.id == ^recipe_ingredient.id
+          ),
+          set: [quantity_milli: 1_000]
+        )
+
+        restore_recipe_ingredient_quantity_check!()
+      end
+    end
+  end
+
   # -- private helpers --------------------------------------------------------
+
+  # PR2 of issue #35 — Phase 2.2 lock tests. Creates an :active session
+  # on (account, user) with a 120-second lease, returns the persisted
+  # session row. Reused by every test that drives a successful
+  # confirm through the new `do_confirm/3` path.
+  defp insert_active_session(account, user) do
+    membership_id = owner_membership_id(account.id, user.id)
+
+    {:ok, session} =
+      PlanningRepo.create_session(account.id, %{
+        range_from: ~D[2026-08-01],
+        range_to: ~D[2026-08-08],
+        lock_owner_user_id: user.id,
+        lock_owner_membership_id: membership_id,
+        lease_expires_at: DateTime.add(DateTime.utc_now(), 120, :second)
+      })
+
+    session
+  end
+
+  defp owner_membership_id(account_id, user_id) do
+    MealPlannerApi.Repo.one!(
+      from(m in MealPlannerApi.Persistence.Accounts.AccountMembership,
+        where: m.account_id == ^account_id and m.user_id == ^user_id and m.status == :active
+      )
+    ).id
+  end
+
+  defp fetch_session(id) do
+    MealPlannerApi.Repo.get!(MealPlannerApi.Persistence.Planning.PlanningSession, id)
+  end
 
   defp list_all_meals(account_id) do
     MealPlannerApi.Data.PlanningRepo.list_scheduled_meals(
