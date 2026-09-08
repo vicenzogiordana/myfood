@@ -8,6 +8,8 @@ defmodule MealPlannerApiWeb.CalendarControllerTest do
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApi.Persistence.Identity
   alias MealPlannerApi.Persistence.Planning
+  alias MealPlannerApi.Repo
+  alias MealPlannerApi.Persistence.Accounts.Account
 
   # ─── Phase A — Tenancy Refactor (PR 3c task 3.14) ───────────────────────────
   # Controller sweep: `CalendarController` must resolve tenancy scope from
@@ -476,6 +478,262 @@ defmodule MealPlannerApiWeb.CalendarControllerTest do
 
         assert meal["can_create"] == false,
                "meal can_create should be false: #{inspect(meal)}"
+      end
+    end
+  end
+
+  describe "PUT /api/calendar/meals/range — capability and tenancy" do
+    test "denies an expired account when capability enforcement is enabled", %{conn: conn} do
+      user =
+        user_with_memberships(
+          %{email: "calendar-expired@example.com"},
+          [{%{name: "Expired calendar account", plan: :family_4}, :owner}]
+        )
+
+      membership = hd(user.memberships)
+      account = Repo.get!(Account, membership.account_id)
+      now = DateTime.utc_now()
+
+      account
+      |> Account.changeset(%{
+        trial_started_at: DateTime.add(now, -86_400, :second),
+        trial_ends_at: DateTime.add(now, -1, :second)
+      })
+      |> Repo.update!()
+
+      token = issue_access_v2_token(user, membership)
+      previous = Application.get_env(:meal_planner_api, :revenuecat_access_enforcement)
+      Application.put_env(:meal_planner_api, :revenuecat_access_enforcement, true)
+
+      try do
+        conn =
+          conn
+          |> put_req_header("authorization", "Bearer " <> token)
+          |> put("/api/calendar/meals/range", %{
+            "from" => "2026-07-01",
+            "to" => "2026-07-07",
+            "meals" => []
+          })
+
+        assert %{"error" => "subscription_required"} = json_response(conn, 403)
+      after
+        Application.put_env(:meal_planner_api, :revenuecat_access_enforcement, previous)
+      end
+    end
+
+    test "rejects replacement input from another account before writing", %{conn: conn} do
+      user =
+        user_with_memberships(
+          %{email: "calendar-controller-scope@example.com"},
+          [
+            {%{name: "Controller account A", plan: :family_4}, :owner},
+            {%{name: "Controller account B", plan: :family_4}, :member}
+          ]
+        )
+
+      [membership_a, membership_b] = user.memberships
+
+      {:ok, existing} =
+        Calendar.upsert_scheduled_meal(membership_b.account_id, %{
+          date: ~D[2026-07-02],
+          slot: :lunch
+        })
+
+      token = issue_access_v2_token(user, membership_a)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> put("/api/calendar/meals/range", %{
+          "from" => "2026-07-01",
+          "to" => "2026-07-07",
+          "meals" => [
+            %{
+              "account_id" => membership_b.account_id,
+              "date" => "2026-07-03",
+              "slot" => "dinner"
+            }
+          ]
+        })
+
+      assert %{"error" => "cross_account"} = json_response(conn, 422)
+
+      assert [meal] =
+               MealPlannerApi.Data.PlanningRepo.list_scheduled_meals(
+                 membership_b.account_id,
+                 ~D[2026-07-01],
+                 ~D[2026-07-07]
+               )
+
+      assert meal.id == existing.id
+    end
+  end
+
+  describe "PUT /api/calendar/meals/range — happy path and validation" do
+    test "replaces meals in the selected range and returns the replaced count", %{conn: conn} do
+      user =
+        user_with_memberships(
+          %{email: "calendar-controller-happy@example.com"},
+          [{%{name: "Calendar happy path account", plan: :family_4}, :owner}]
+        )
+
+      [membership] = user.memberships
+      token = issue_access_v2_token(user, membership)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> put("/api/calendar/meals/range", %{
+          "from" => "2026-07-01",
+          "to" => "2026-07-07",
+          "meals" => [
+            %{"date" => "2026-07-02", "slot" => "lunch"},
+            %{"date" => "2026-07-03", "slot" => "dinner"}
+          ]
+        })
+
+      assert %{"data" => %{"replaced" => 2}} = json_response(conn, 200)
+
+      meals =
+        MealPlannerApi.Data.PlanningRepo.list_scheduled_meals(
+          membership.account_id,
+          ~D[2026-07-01],
+          ~D[2026-07-07]
+        )
+
+      assert length(meals) == 2
+      assert Enum.any?(meals, &(&1.date == ~D[2026-07-02] and &1.slot == :lunch))
+      assert Enum.any?(meals, &(&1.date == ~D[2026-07-03] and &1.slot == :dinner))
+    end
+
+    test "returns 422 when `from` is missing", %{conn: conn} do
+      user =
+        user_with_memberships(
+          %{email: "calendar-controller-missing-from@example.com"},
+          [{%{name: "Calendar validation missing-from account", plan: :family_4}, :owner}]
+        )
+
+      [membership] = user.memberships
+      token = issue_access_v2_token(user, membership)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> put("/api/calendar/meals/range", %{
+          "to" => "2026-07-07",
+          "meals" => []
+        })
+
+      assert %{"error" => "missing_date_param"} = json_response(conn, 422)
+    end
+
+    test "returns 422 when `to` is not a valid ISO date", %{conn: conn} do
+      user =
+        user_with_memberships(
+          %{email: "calendar-controller-bad-to@example.com"},
+          [{%{name: "Calendar validation bad-to account", plan: :family_4}, :owner}]
+        )
+
+      [membership] = user.memberships
+      token = issue_access_v2_token(user, membership)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> put("/api/calendar/meals/range", %{
+          "from" => "2026-07-01",
+          "to" => "not-a-date",
+          "meals" => []
+        })
+
+      assert %{"error" => "invalid_date_format"} = json_response(conn, 422)
+    end
+
+    test "returns 422 when the range is reversed", %{conn: conn} do
+      user =
+        user_with_memberships(
+          %{email: "calendar-controller-reversed@example.com"},
+          [{%{name: "Calendar validation reversed account", plan: :family_4}, :owner}]
+        )
+
+      [membership] = user.memberships
+      token = issue_access_v2_token(user, membership)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> put("/api/calendar/meals/range", %{
+          "from" => "2026-07-07",
+          "to" => "2026-07-01",
+          "meals" => []
+        })
+
+      assert %{"error" => "invalid_date_range"} = json_response(conn, 422)
+    end
+
+    test "returns 422 when `meals` is missing", %{conn: conn} do
+      user =
+        user_with_memberships(
+          %{email: "calendar-controller-no-meals@example.com"},
+          [{%{name: "Calendar validation no-meals account", plan: :family_4}, :owner}]
+        )
+
+      [membership] = user.memberships
+      token = issue_access_v2_token(user, membership)
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> put("/api/calendar/meals/range", %{
+          "from" => "2026-07-01",
+          "to" => "2026-07-07"
+        })
+
+      assert %{"error" => "missing_meals"} = json_response(conn, 422)
+    end
+  end
+
+  # ─── Calendar access — capability enforcement on GET /api/calendar ──────────
+  # Spec scenarios: Eligible Account reads its calendar (covered above by
+  # the multi-familia tenancy tests + show_slot tests) and Expired Account
+  # read is denied (this block).
+  describe "GET /api/calendar — capability enforcement" do
+    test "denies an expired account when capability enforcement is enabled", %{conn: conn} do
+      user =
+        user_with_memberships(
+          %{email: "calendar-get-expired@example.com"},
+          [{%{name: "Expired calendar read account", plan: :family_4}, :owner}]
+        )
+
+      membership = hd(user.memberships)
+      account = Repo.get!(Account, membership.account_id)
+      now = DateTime.utc_now()
+
+      account
+      |> Account.changeset(%{
+        trial_started_at: DateTime.add(now, -86_400, :second),
+        trial_ends_at: DateTime.add(now, -1, :second)
+      })
+      |> Repo.update!()
+
+      token = issue_access_v2_token(user, membership)
+      previous = Application.get_env(:meal_planner_api, :revenuecat_access_enforcement)
+      Application.put_env(:meal_planner_api, :revenuecat_access_enforcement, true)
+
+      try do
+        today = Date.utc_today()
+
+        conn =
+          conn
+          |> put_req_header("authorization", "Bearer " <> token)
+          |> get("/api/calendar", %{
+            "start_date" => Date.to_iso8601(today),
+            "end_date" => Date.to_iso8601(Date.add(today, 6))
+          })
+
+        assert %{"error" => "subscription_required"} = json_response(conn, 403)
+      after
+        Application.put_env(:meal_planner_api, :revenuecat_access_enforcement, previous)
       end
     end
   end
