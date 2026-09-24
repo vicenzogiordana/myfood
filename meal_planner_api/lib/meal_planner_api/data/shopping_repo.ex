@@ -122,6 +122,31 @@ defmodule MealPlannerApi.Data.ShoppingRepo do
   end
 
   # -------------------------------------------------------------------------
+  # Window wipe (shopping-derived-from-confirmed-plan PR1)
+  # -------------------------------------------------------------------------
+
+  @doc """
+  Deletes all ShoppingItems for the given account whose `planned_date`
+  falls within `[range_from, range_to]` AND whose status is `:pending`
+  or `:in_cart`.
+
+  Terminal statuses (`:checked_out`, `:archived`, `:pending_delivery`)
+  are preserved.
+
+  Returns `{deleted_count, nil}`.
+  """
+  @spec delete_pending_for_window(String.t(), Date.t(), Date.t()) ::
+          {non_neg_integer(), nil}
+  def delete_pending_for_window(account_id, range_from, range_to) do
+    from(i in ShoppingItem,
+      where: i.account_id == ^account_id,
+      where: i.planned_date >= ^range_from and i.planned_date <= ^range_to,
+      where: i.status in [:pending, :in_cart]
+    )
+    |> Repo.delete_all()
+  end
+
+  # -------------------------------------------------------------------------
   # Shopping items
   # -------------------------------------------------------------------------
 
