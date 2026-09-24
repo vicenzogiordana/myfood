@@ -20,7 +20,6 @@ defmodule MealPlannerApi.Generation.Server do
 
   alias MealPlannerApi.Data.{
     PlanningRepo,
-    RecipeRepo,
     ShoppingRepo
   }
 
@@ -28,6 +27,7 @@ defmodule MealPlannerApi.Generation.Server do
   alias MealPlannerApi.Optimization.PayloadAdapter
   alias MealPlannerApi.Persistence.Planning.PlanningSession
   alias MealPlannerApi.Services.GenerationService
+  alias MealPlannerApi.Services.ShoppingRebuilder
   alias MealPlannerApi.Services.{PlanningCandidateBuilder, PlanningRequestValidator}
   alias MealPlannerApi.Repo
 
@@ -399,8 +399,8 @@ defmodule MealPlannerApi.Generation.Server do
       |> Ecto.Multi.run(:scheduled_meals, fn _repo, _changes ->
         persist_scheduled_meals(proposal, state)
       end)
-      |> Ecto.Multi.run(:shopping_cart, fn _repo, %{scheduled_meals: scheduled} ->
-        persist_shopping_cart(scheduled, state)
+      |> Ecto.Multi.run(:shopping_cart, fn _repo, %{mark_committed: session} ->
+        rebuild_shopping_cart(session, state)
       end)
 
     case Repo.transaction(multi) do
@@ -718,35 +718,52 @@ defmodule MealPlannerApi.Generation.Server do
   # Will fail loudly in `Date.from_iso8601!/1` / `String.to_existing_atom/1` rather than silently filter.
   defp split_slot_key(_), do: [nil, nil]
 
-  # Builds and persists the shopping cart derived from the confirmed
-  # scheduled meals. Pure-Elixir aggregation inside the same `Repo.transaction`
-  # as `persist_scheduled_meals/2` (planning-shopping-extraction design §4).
+  # Rebuilds the shopping cart from the FULL confirmed window.
   #
-  # Returns `{:ok, %{cart, lines_count, checkout_session_id}}` so the
-  # caller can surface the deduped summary, the persisted row count, and the
-  # session id back to the client.
-  defp persist_shopping_cart(scheduled_meals, state) do
-    recipe_ids =
-      scheduled_meals
-      |> Enum.map(& &1.recipe_id)
-      |> Enum.reject(&is_nil/1)
+  # Unlike the prior `persist_shopping_cart/2` (which used only the current
+  # proposal's slots), this reads ALL `scheduled_meals` in the session's
+  # `[range_from, range_to]` window, subtracts usable inventory via
+  # `ShoppingRebuilder.compute_net_shortages/2`, wipes prior pending/in_cart
+  # rows, and inserts per-meal net-shortage rows.
+  #
+  # Runs inside the same `Ecto.Multi` as `mark_committed/3` — atomic.
+  # Returns `{:ok, %{cart, lines_count, checkout_session_id}}`.
+  defp rebuild_shopping_cart(session, state) do
+    range_from = session.range_from
+    range_to = session.range_to
 
-    by_recipe = RecipeRepo.list_ingredients_for_recipes(recipe_ids)
+    # 1. Load ALL scheduled meals in the window (not just this proposal's)
+    all_meals =
+      PlanningRepo.list_scheduled_meals(state.account_id, range_from, range_to)
+      |> MealPlannerApi.Repo.preload(recipe: :recipe_ingredients)
 
-    lines = GenerationService.build_cart_lines(scheduled_meals, by_recipe)
+    # 2. Build the usable inventory pool
+    pool =
+      MealPlannerApi.Inventory.available_for(
+        %{account_id: state.account_id},
+        %{exclude_range: {range_from, range_to}}
+      )
+      |> Enum.into(%{}, fn item -> {{item.ingredient_id, item.unit}, item.quantity_milli} end)
 
-    with {:ok, session} <-
+    # 3. Compute net shortages (pure)
+    lines = ShoppingRebuilder.compute_net_shortages(all_meals, pool)
+
+    # 4. Wipe existing pending/in_cart items in the window
+    ShoppingRepo.delete_pending_for_window(state.account_id, range_from, range_to)
+
+    # 5. Create checkout session and insert net-shortage rows
+    with {:ok, checkout} <-
            ShoppingRepo.create_checkout_session(%{
              account_id: state.account_id,
              status: :draft,
              checkout_type: :physical
            }),
-         :ok <- insert_cart_items(lines, state.account_id, session.id) do
+         :ok <- insert_cart_items(lines, state.account_id, checkout.id) do
       {:ok,
        %{
          cart: GenerationService.summarize_cart(lines),
          lines_count: length(lines),
-         checkout_session_id: session.id
+         checkout_session_id: checkout.id
        }}
     end
   end

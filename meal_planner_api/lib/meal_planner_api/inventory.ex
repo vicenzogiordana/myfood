@@ -12,14 +12,14 @@ defmodule MealPlannerApi.Inventory do
 
   @spec available_for(map(), map()) :: [map()]
   def available_for(user, params \\ %{}) when is_map(user) and is_map(params) do
-    _ = params
+    exclude_range = Map.get(params, :exclude_range)
 
     case Map.get(user, :account_id) do
       account_id when is_binary(account_id) ->
         case Ecto.UUID.cast(account_id) do
           {:ok, _} ->
             physical_items = load_physical_inventory(account_id)
-            reserved_by_key = load_reserved_future_quantities(account_id)
+            reserved_by_key = load_reserved_future_quantities(account_id, exclude_range)
             apply_reservations(physical_items, reserved_by_key, account_id)
 
           :error ->
@@ -60,19 +60,29 @@ defmodule MealPlannerApi.Inventory do
     |> Repo.all()
   end
 
-  defp load_reserved_future_quantities(account_id) do
+  defp load_reserved_future_quantities(account_id, exclude_range) do
     today = Date.utc_today()
 
-    from(m in ScheduledMeal,
-      join: ri in RecipeIngredient,
-      on: ri.recipe_id == m.recipe_id,
-      where: m.account_id == ^account_id and m.is_cooked == false and m.date > ^today,
-      group_by: [ri.ingredient_id, ri.unit],
-      select: {ri.ingredient_id, ri.unit, sum(ri.quantity_milli)}
-    )
+    query =
+      from(m in ScheduledMeal,
+        join: ri in RecipeIngredient,
+        on: ri.recipe_id == m.recipe_id,
+        where: m.account_id == ^account_id and m.is_cooked == false and m.date > ^today,
+        group_by: [ri.ingredient_id, ri.unit],
+        select: {ri.ingredient_id, ri.unit, sum(ri.quantity_milli)}
+      )
+
+    query
+    |> exclude_scheduled_meals_in_range(exclude_range)
     |> Repo.all()
     |> Map.new(fn {ingredient_id, unit, quantity} -> {{ingredient_id, unit}, quantity || 0} end)
   end
+
+  defp exclude_scheduled_meals_in_range(query, {%Date{} = range_from, %Date{} = range_to}) do
+    where(query, [m, _ri], m.date < ^range_from or m.date > ^range_to)
+  end
+
+  defp exclude_scheduled_meals_in_range(query, _exclude_range), do: query
 
   defp apply_reservations(physical_items, reserved_by_key, account_id) do
     grouped =
