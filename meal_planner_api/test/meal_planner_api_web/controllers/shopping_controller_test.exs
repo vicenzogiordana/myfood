@@ -714,7 +714,6 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       })
 
     checkout_body = json_response(checkout_conn, 200)
-    checkout_session_id = checkout_body["data"]["checkout_session_id"]
 
     # Physical checkout is immediate - completes and moves to inventory
     assert checkout_body["data"]["status"] == "completed"
