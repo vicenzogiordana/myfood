@@ -49,7 +49,7 @@
   - GREEN: verify
   - Commit: `test(shopping): provenance invariant + account isolation`
 
-- [ ] **T6**: Fixture refresh for existing tests
+- [x] **T6**: Fixture refresh for existing tests
   - Update PR #18/#70 fixtures to expect net-shortage math
   - Commit: `refactor(shopping): refresh test fixtures for net-shortage math`
 
@@ -61,7 +61,8 @@
 | T2   | 20b66d6 | 3 focused; 821 full |
 | T3   | b606068 | 43 focused; 825 full |
 | T4   | 6a68221 | 7 focused controller |
-| T5   | fa89ea9 | 40 focused (4 new) |
+| T5   | dbd5c4f | 40 focused (4 new) |
+| T6   | a76fe48 | full suite 831 passed; format fix |
 | T4   |        |       |
 | T5   |        |       |
 | T6   |        |       |

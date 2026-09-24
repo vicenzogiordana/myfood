@@ -52,7 +52,8 @@ defmodule MealPlannerApi.Data.ShoppingRepo.DeletePendingForWindowTest do
       checked_out = insert_item(ctx, :checked_out, ~D[2026-09-25])
       archived = insert_item(ctx, :archived, ~D[2026-09-25])
 
-      {deleted, _} = ShoppingRepo.delete_pending_for_window(ctx.account.id, ctx.range_from, ctx.range_to)
+      {deleted, _} =
+        ShoppingRepo.delete_pending_for_window(ctx.account.id, ctx.range_from, ctx.range_to)
 
       assert deleted == 2
       assert Repo.get(ShoppingItem, pending.id) == nil
@@ -71,7 +72,8 @@ defmodule MealPlannerApi.Data.ShoppingRepo.DeletePendingForWindowTest do
       inside = insert_item(ctx, :pending, ~D[2026-09-25])
       outside = insert_item(ctx, :pending, ~D[2026-09-30])
 
-      {deleted, _} = ShoppingRepo.delete_pending_for_window(ctx.account.id, ctx.range_from, ctx.range_to)
+      {deleted, _} =
+        ShoppingRepo.delete_pending_for_window(ctx.account.id, ctx.range_from, ctx.range_to)
 
       assert deleted == 1
       assert Repo.get(ShoppingItem, inside.id) == nil
@@ -80,7 +82,10 @@ defmodule MealPlannerApi.Data.ShoppingRepo.DeletePendingForWindowTest do
 
     test "does not affect other accounts", ctx do
       other_account = insert_account("other-wipe")
-      _other_user = insert_user_with_active_membership(other_account.id, "other-wipe@example.com", :owner)
+
+      _other_user =
+        insert_user_with_active_membership(other_account.id, "other-wipe@example.com", :owner)
+
       other_recipe = insert_recipe("other-bread")
       other_meal = insert_scheduled_meal(other_account.id, other_recipe.id, ~D[2026-09-25])
 
@@ -105,7 +110,8 @@ defmodule MealPlannerApi.Data.ShoppingRepo.DeletePendingForWindowTest do
 
       _own_item = insert_item(ctx, :pending, ~D[2026-09-25])
 
-      {deleted, _} = ShoppingRepo.delete_pending_for_window(ctx.account.id, ctx.range_from, ctx.range_to)
+      {deleted, _} =
+        ShoppingRepo.delete_pending_for_window(ctx.account.id, ctx.range_from, ctx.range_to)
 
       assert deleted == 1
       assert Repo.get(ShoppingItem, other_item.id) != nil
