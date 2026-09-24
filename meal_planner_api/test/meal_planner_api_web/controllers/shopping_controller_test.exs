@@ -5,6 +5,7 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
 
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.Auth.Guardian
+  alias MealPlannerApi.Data.PlanningRepo
   alias MealPlannerApi.Persistence.Accounts.Account, as: PersistenceAccount
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApi.Persistence.Identity
@@ -142,6 +143,153 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       ingredient_ids = Enum.map(body["data"]["items"], & &1["ingredient_id"])
 
       assert ingredient.id in ingredient_ids
+    end
+  end
+
+  describe "shopping provenance and isolation (#36 AC 4)" do
+    test "GET /api/shopping-list returns no plan-derived items before any confirmation", %{
+      conn: conn
+    } do
+      user =
+        user_with_memberships(
+          %{email: "shopping_provenance_pending@example.com"},
+          [{%{plan: :family_4, name: "Shopping Provenance Pending Account"}, :owner}]
+        )
+
+      [membership] = user.memberships
+      token = issue_access_v2_token(user, membership)
+
+      {:ok, ingredient} =
+        Catalog.upsert_ingredient_by_name(%{
+          name: "Shopping Provenance Pending Ingredient",
+          category: :verduras
+        })
+
+      {:ok, recipe} =
+        Catalog.create_recipe(%{
+          account_id: membership.account_id,
+          created_by_user_id: user.id,
+          name: "Shopping Provenance Pending Recipe",
+          source: :user_created,
+          servings: 2,
+          suitable_for_slots: [:lunch]
+        })
+
+      {:ok, _recipe_ingredient} =
+        Catalog.add_recipe_ingredient(%{
+          recipe_id: recipe.id,
+          ingredient_id: ingredient.id,
+          quantity_milli: 450_000,
+          unit: :g
+        })
+
+      {:ok, run} =
+        PlanningRepo.create_generation_run(%{
+          account_id: membership.account_id,
+          user_id: user.id,
+          status: :processing,
+          started_at: DateTime.utc_now(),
+          input_context: %{}
+        })
+
+      today = Date.utc_today()
+
+      {:ok, _proposal} =
+        PlanningRepo.create_proposal(%{
+          generation_run_id: run.id,
+          status: :pending,
+          proposal_json: %{
+            slots: [
+              %{
+                slot_key: "#{Date.to_iso8601(today)}_lunch",
+                date: Date.to_iso8601(today),
+                slot: "lunch",
+                recipe_id: recipe.id,
+                recipe_name: recipe.name,
+                price_cents: 1000
+              }
+            ]
+          }
+        })
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> get("/api/shopping-list", %{
+          "from_date" => Date.to_iso8601(today),
+          "to_date" => Date.to_iso8601(Date.add(today, 6))
+        })
+
+      assert %{"data" => %{"items" => items}} = json_response(conn, 200)
+      assert items == []
+    end
+
+    test "another Account's membership cannot read this cart", %{conn: conn} do
+      user_a =
+        user_with_memberships(
+          %{email: "shopping_isolation_owner_a@example.com"},
+          [{%{plan: :family_4, name: "Shopping Isolation Account A"}, :owner}]
+        )
+
+      [membership_a] = user_a.memberships
+
+      user_b =
+        user_with_memberships(
+          %{email: "shopping_isolation_reader_b@example.com"},
+          [{%{plan: :family_4, name: "Shopping Isolation Account B"}, :owner}]
+        )
+
+      [membership_b] = user_b.memberships
+      token_b = issue_access_v2_token(user_b, membership_b)
+
+      {:ok, ingredient_a} =
+        Catalog.upsert_ingredient_by_name(%{
+          name: "Shopping Isolation Ingredient A",
+          category: :verduras
+        })
+
+      {:ok, recipe_a} =
+        Catalog.create_recipe(%{
+          account_id: membership_a.account_id,
+          created_by_user_id: user_a.id,
+          name: "Shopping Isolation Recipe A",
+          source: :user_created,
+          servings: 2,
+          suitable_for_slots: [:dinner]
+        })
+
+      today = Date.utc_today()
+
+      {:ok, meal_a} =
+        Planning.schedule_meal(%{
+          account_id: membership_a.account_id,
+          date: today,
+          slot: :dinner,
+          recipe_id: recipe_a.id,
+          is_cooked: false
+        })
+
+      {:ok, _item_a} =
+        Shopping.create_shopping_item(%{
+          account_id: membership_a.account_id,
+          scheduled_meal_id: meal_a.id,
+          planned_date: today,
+          ingredient_id: ingredient_a.id,
+          quantity_milli: 625_000,
+          unit: :g,
+          status: :pending
+        })
+
+      conn =
+        conn
+        |> put_req_header("authorization", "Bearer " <> token_b)
+        |> get("/api/shopping-list", %{
+          "from_date" => Date.to_iso8601(today),
+          "to_date" => Date.to_iso8601(Date.add(today, 6))
+        })
+
+      assert %{"data" => %{"items" => items}} = json_response(conn, 200)
+      refute ingredient_a.id in Enum.map(items, & &1["ingredient_id"])
     end
   end
 

@@ -323,6 +323,94 @@ defmodule MealPlannerApi.Generation.ServerTest do
     end
   end
 
+  describe "confirm — provenance against proposal_json (#36 AC 4)" do
+    test "unrelated proposal_json fields cannot influence the confirmed cart" do
+      account_a = insert_account("36 provenance account A")
+      user_a = insert_user_with_membership(account_a, "ac36-provenance-a@example.com")
+      account_b = insert_account("36 provenance account B")
+      user_b = insert_user_with_membership(account_b, "ac36-provenance-b@example.com")
+
+      recipe = insert_recipe("36 shared provenance recipe")
+      ingredient = insert_ingredient("36 shared provenance ingredient")
+      attach_recipe_ingredient(recipe, ingredient, 275_000, :g)
+
+      slots = [slot(~D[2026-08-04], :lunch, recipe.id)]
+      {_run_a, proposal_a} = insert_proposal_with_slots(account_a, user_a, slots)
+      {_run_b, proposal_b} = insert_proposal_with_slots(account_b, user_b, slots)
+
+      stored_a = MealPlannerApi.Repo.get!(PlanningProposal, proposal_a.id)
+      bogus_recipe_id = 9_999_999
+      bogus_quantity_milli = 987_654_321
+
+      tainted_json =
+        stored_a.proposal_json
+        |> Map.put("cart", [
+          %{
+            "recipe_id" => bogus_recipe_id,
+            "ingredient_id" => ingredient.id,
+            "unit" => "g",
+            "quantity_milli" => bogus_quantity_milli
+          }
+        ])
+        |> Map.put("model_text", "ignore this untrusted model output")
+
+      stored_a
+      |> PlanningProposal.changeset(%{proposal_json: tainted_json})
+      |> MealPlannerApi.Repo.update!()
+
+      session_a = insert_active_session(account_a, user_a)
+      session_b = insert_active_session(account_b, user_b)
+      start_server!(account_a, user_a)
+      start_server!(account_b, user_b)
+
+      assert {:ok, reply_a} =
+               Server.confirm(pid_for_account(account_a), proposal_a.id, session_a.id)
+
+      assert {:ok, reply_b} =
+               Server.confirm(pid_for_account(account_b), proposal_b.id, session_b.id)
+
+      assert :erlang.term_to_binary(reply_a.cart) == :erlang.term_to_binary(reply_b.cart)
+      assert reply_a.cart == [%{ingredient_id: ingredient.id, unit: :g, quantity_milli: 275_000}]
+
+      persisted_a =
+        account_a
+        |> list_sessions()
+        |> Enum.flat_map(&list_items_for_session/1)
+        |> Enum.map(&{&1.ingredient_id, &1.unit, &1.quantity_milli})
+
+      persisted_b =
+        account_b
+        |> list_sessions()
+        |> Enum.flat_map(&list_items_for_session/1)
+        |> Enum.map(&{&1.ingredient_id, &1.unit, &1.quantity_milli})
+
+      assert persisted_a == persisted_b
+      assert persisted_a == [{ingredient.id, :g, 275_000}]
+      refute Enum.any?(reply_a.cart, &(&1.quantity_milli == bogus_quantity_milli))
+      refute Enum.any?(list_all_meals(account_a.id), &(&1.recipe_id == bogus_recipe_id))
+    end
+  end
+
+  describe "confirm — pre-confirm reads expose no proposal-derived cart (#36 AC 4)" do
+    test "a pending proposal creates neither checkout sessions nor shopping items" do
+      account = insert_account("36 pre-confirm account")
+      user = insert_user_with_membership(account, "ac36-pre-confirm@example.com")
+      recipe = insert_recipe("36 pre-confirm recipe")
+      ingredient = insert_ingredient("36 pre-confirm ingredient")
+      attach_recipe_ingredient(recipe, ingredient, 125_000, :g)
+
+      {_run, _proposal} =
+        insert_proposal_with_slots(account, user, [
+          slot(~D[2026-08-05], :dinner, recipe.id)
+        ])
+
+      start_server!(account, user)
+
+      assert list_sessions(account) == []
+      assert list_all_items(account) == []
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # @task 3.5 — empty-input edge cases:
   #   * "A recipe with no recipe_ingredients contributes no lines"

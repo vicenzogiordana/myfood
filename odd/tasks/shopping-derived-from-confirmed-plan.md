@@ -41,7 +41,7 @@
   - GREEN: verify existing plugs cover it
   - Commit: `test(shopping): flag-on capability gate proof`
 
-- [ ] **T5**: Provenance + isolation tests
+- [x] **T5**: Provenance + isolation tests
   - RED: proposal text cannot change equivalent cart
   - RED: empty proposal → zero items
   - RED: pre-confirm read → no proposal-derived cart
@@ -60,7 +60,8 @@
 | T1   | bede8e5 | 8 focused; 818 full |
 | T2   | 20b66d6 | 3 focused; 821 full |
 | T3   | b606068 | 43 focused; 825 full |
-| T4   | 8f130ce | 7 focused controller |
+| T4   | 6a68221 | 7 focused controller |
+| T5   | fa89ea9 | 40 focused (4 new) |
 | T4   |        |       |
 | T5   |        |       |
 | T6   |        |       |
