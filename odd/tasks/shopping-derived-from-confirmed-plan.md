@@ -34,7 +34,7 @@
   - GREEN: implement
   - Commit: `feat(shopping): atomic full-window rebuild on confirm`
 
-- [ ] **T4**: Capability gate proof (flag-on tests)
+- [x] **T4**: Capability gate proof (flag-on tests)
   - RED: expired HTTP read refused (403)
   - RED: expired confirmation push refused
   - RED: active Account not falsely denied
@@ -59,7 +59,8 @@
 |------|--------|-------|
 | T1   | bede8e5 | 8 focused; 818 full |
 | T2   | 20b66d6 | 3 focused; 821 full |
-| T3   | pending | 43 focused; 825 full |
+| T3   | b606068 | 43 focused; 825 full |
+| T4   | 8f130ce | 7 focused controller |
 | T4   |        |       |
 | T5   |        |       |
 | T6   |        |       |

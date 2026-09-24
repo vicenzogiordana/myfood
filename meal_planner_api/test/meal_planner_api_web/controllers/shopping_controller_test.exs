@@ -5,11 +5,67 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
 
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.Auth.Guardian
+  alias MealPlannerApi.Persistence.Accounts.Account, as: PersistenceAccount
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApi.Persistence.Identity
   alias MealPlannerApi.Persistence.Inventory
   alias MealPlannerApi.Persistence.Planning
   alias MealPlannerApi.Persistence.Shopping
+  alias MealPlannerApi.Repo
+
+  describe "shopping capability gate — flag enabled (#36 AC 1)" do
+    test "expired Account receives 403 subscription_required", %{conn: conn} do
+      user =
+        user_with_memberships(
+          %{email: "shopping_expired_#{Ecto.UUID.generate()}@example.com"},
+          [{%{plan: :family_4, name: "Expired shopping account"}, :owner}]
+        )
+
+      [membership] = user.memberships
+      _account = persist_trial_window!(membership.account, :expired)
+      token = issue_access_v2_token(user, membership)
+
+      with_capability_enforcement(fn ->
+        today = Date.utc_today()
+
+        conn =
+          conn
+          |> put_req_header("authorization", "Bearer " <> token)
+          |> get("/api/shopping-list", %{
+            "from_date" => Date.to_iso8601(today),
+            "to_date" => Date.to_iso8601(Date.add(today, 6))
+          })
+
+        assert %{"error" => "subscription_required"} = json_response(conn, 403)
+      end)
+    end
+
+    test "active Account can read shopping without a false denial", %{conn: conn} do
+      user =
+        user_with_memberships(
+          %{email: "shopping_active_#{Ecto.UUID.generate()}@example.com"},
+          [{%{plan: :family_4, name: "Active shopping account"}, :owner}]
+        )
+
+      [membership] = user.memberships
+      _account = persist_trial_window!(membership.account, :eligible)
+      token = issue_access_v2_token(user, membership)
+
+      with_capability_enforcement(fn ->
+        today = Date.utc_today()
+
+        conn =
+          conn
+          |> put_req_header("authorization", "Bearer " <> token)
+          |> get("/api/shopping-list", %{
+            "from_date" => Date.to_iso8601(today),
+            "to_date" => Date.to_iso8601(Date.add(today, 6))
+          })
+
+        assert %{"data" => _} = json_response(conn, 200)
+      end)
+    end
+  end
 
   # ─── Phase A — Tenancy Refactor (PR 3c task 3.17) ───────────────────────────
   # See calendar_controller_test.exs (task 3.14) for why a tampered
@@ -531,5 +587,35 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       Guardian.encode_and_sign(user, Accounts.claims_for(user, account), token_type: "access")
 
     token
+  end
+
+  # ---- capability-gate helpers (#36 AC 1) ---------------------------------
+
+  defp persist_trial_window!(%PersistenceAccount{} = account, :eligible) do
+    started = DateTime.utc_now()
+    ends = DateTime.add(started, 7 * 86_400, :second)
+
+    account
+    |> PersistenceAccount.changeset(%{trial_started_at: started, trial_ends_at: ends})
+    |> Repo.update!()
+  end
+
+  defp persist_trial_window!(%PersistenceAccount{} = account, :expired) do
+    past = DateTime.add(DateTime.utc_now(), -30 * 86_400, :second)
+
+    account
+    |> PersistenceAccount.changeset(%{trial_started_at: past, trial_ends_at: past})
+    |> Repo.update!()
+  end
+
+  defp with_capability_enforcement(fun) do
+    previous = Application.get_env(:meal_planner_api, :revenuecat_access_enforcement)
+    Application.put_env(:meal_planner_api, :revenuecat_access_enforcement, true)
+
+    try do
+      fun.()
+    after
+      Application.put_env(:meal_planner_api, :revenuecat_access_enforcement, previous)
+    end
   end
 end
