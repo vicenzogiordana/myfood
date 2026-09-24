@@ -535,8 +535,8 @@ defmodule MealPlannerApiWeb.PlanningChannelTest do
           proposal_json: %{
             slots: [
               %{
-                slot_key: "2026-08-09_lunch",
-                date: "2026-08-09",
+                slot_key: "2026-08-08_lunch",
+                date: "2026-08-08",
                 slot: "lunch",
                 recipe_id: recipe.id,
                 recipe_name: "4-3 recipe",

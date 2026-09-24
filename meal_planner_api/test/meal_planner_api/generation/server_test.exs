@@ -244,6 +244,83 @@ defmodule MealPlannerApi.Generation.ServerTest do
       refetched = get_proposal(proposal.id)
       assert refetched.status == :accepted
     end
+
+    test "rebuild includes every scheduled meal in the locked session window" do
+      account = insert_account("full-window acct")
+      user = insert_user_with_membership(account, "full-window@example.com")
+
+      prior_recipe = insert_recipe("Prior confirmed recipe")
+      new_recipe = insert_recipe("New confirmed recipe")
+      prior_ingredient = insert_ingredient("Prior ingredient")
+      new_ingredient = insert_ingredient("New ingredient")
+
+      attach_recipe_ingredient(prior_recipe, prior_ingredient, 100_000, :g)
+      attach_recipe_ingredient(new_recipe, new_ingredient, 200_000, :g)
+
+      prior_meal =
+        MealPlannerApi.Repo.insert!(%MealPlannerApi.Persistence.Planning.ScheduledMeal{
+          account_id: account.id,
+          recipe_id: prior_recipe.id,
+          date: ~D[2026-08-02],
+          slot: :breakfast,
+          is_cooked: false
+        })
+
+      {_run, proposal} =
+        insert_proposal_with_slots(account, user, [
+          slot(~D[2026-08-03], :lunch, new_recipe.id)
+        ])
+
+      session = insert_active_session(account, user)
+      start_server!(account, user)
+      pid = pid_for_account(account)
+
+      assert {:ok, reply} = Server.confirm(pid, proposal.id, session.id)
+      assert reply.shopping_items_count == 2
+
+      [checkout] = list_sessions(account)
+      items = list_items_for_session(checkout)
+
+      assert MapSet.new(Enum.map(items, & &1.ingredient_id)) ==
+               MapSet.new([prior_ingredient.id, new_ingredient.id])
+
+      assert Enum.any?(items, &(&1.scheduled_meal_id == prior_meal.id))
+    end
+
+    test "rebuild stores exact net shortage after usable inventory subtraction" do
+      account = insert_account("net-shortage integration acct")
+      user = insert_user_with_membership(account, "net-shortage@example.com")
+      recipe = insert_recipe("Inventory-aware recipe")
+      flour = insert_ingredient("Inventory-aware flour")
+
+      attach_recipe_ingredient(recipe, flour, 200_000, :g)
+
+      MealPlannerApi.Repo.insert!(%MealPlannerApi.Persistence.Inventory.InventoryItem{
+        account_id: account.id,
+        ingredient_id: flour.id,
+        quantity_milli: 100_000,
+        unit: :g,
+        source_kind: :extra,
+        last_mutation_at: DateTime.utc_now()
+      })
+
+      {_run, proposal} =
+        insert_proposal_with_slots(account, user, [
+          slot(~D[2026-08-04], :lunch, recipe.id)
+        ])
+
+      session = insert_active_session(account, user)
+      start_server!(account, user)
+      pid = pid_for_account(account)
+
+      assert {:ok, reply} = Server.confirm(pid, proposal.id, session.id)
+      assert [%{ingredient_id: ingredient_id, unit: :g, quantity_milli: 100_000}] = reply.cart
+      assert ingredient_id == flour.id
+
+      [checkout] = list_sessions(account)
+      [item] = list_items_for_session(checkout)
+      assert item.quantity_milli == 100_000
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -338,19 +415,20 @@ defmodule MealPlannerApi.Generation.ServerTest do
       start_server!(account, user)
       pid = pid_for_account(account)
 
-      # The schema-level check `shopping_items.quantity_milli > 0` will
-      # reject our zero-quantity cart line. That same constraint applies
-      # to `recipe_ingredients.quantity_milli > 0`, blocking a regular
-      # update — so we drop the constraint at the DB layer, mutate the
-      # row to 0, run the failure, and restore the constraint in a
-      # `try/after` so the cleanup happens while the sandbox is still
-      # checked out to this process (no on_exit needed).
-      try do
-        drop_recipe_ingredient_quantity_check!()
+      # Force a ShoppingItem FK failure while keeping the recipe quantity
+      # valid: temporarily point the recipe ingredient at a nonexistent
+      # ingredient. The rebuilder emits the row; shopping_items rejects it.
+      invalid_ingredient_id = Ecto.UUID.generate()
 
-        recipe_ingredient
-        |> Ecto.Changeset.change(%{quantity_milli: 0})
-        |> MealPlannerApi.Repo.update!()
+      try do
+        drop_recipe_ingredient_ingredient_fk!()
+
+        MealPlannerApi.Repo.update_all(
+          from(ri in MealPlannerApi.Persistence.Catalog.RecipeIngredient,
+            where: ri.id == ^recipe_ingredient.id
+          ),
+          set: [ingredient_id: invalid_ingredient_id]
+        )
 
         assert {:error, _reason} = Server.confirm(pid, proposal.id, session.id)
 
@@ -361,21 +439,14 @@ defmodule MealPlannerApi.Generation.ServerTest do
         rolled_back = get_proposal(proposal.id)
         assert rolled_back.status == :pending
       after
-        # Restore the row to a positive quantity so re-adding the CHECK
-        # constraint doesn't reject existing data — the original
-        # `quantity_milli: 0` mutation has not been reverted by the
-        # rolled-back `confirm` call (it was never part of the
-        # transaction). Use Ecto's update_all so binary_id parameters
-        # encode correctly (the raw SQL `query!/4` path was failing on
-        # UUID encoding).
         MealPlannerApi.Repo.update_all(
           from(ri in MealPlannerApi.Persistence.Catalog.RecipeIngredient,
             where: ri.id == ^recipe_ingredient.id
           ),
-          set: [quantity_milli: 1_000]
+          set: [ingredient_id: ingredient.id]
         )
 
-        restore_recipe_ingredient_quantity_check!()
+        restore_recipe_ingredient_ingredient_fk!()
       end
     end
   end
@@ -681,23 +752,25 @@ defmodule MealPlannerApi.Generation.ServerTest do
 
       {_run, proposal} =
         insert_proposal_with_slots(account, user, [
-          slot(~D[2026-09-12], :lunch, recipe.id)
+          slot(~D[2026-08-07], :lunch, recipe.id)
         ])
 
       start_server!(account, user)
       pid = pid_for_account(account)
 
-      # Drop the recipe_ingredients.quantity_positive CHECK, mutate the
-      # row to 0 so the cart line becomes 0 (fails the
-      # shopping_items.quantity_positive CHECK). Mirrors the @task 3.7
-      # rollback test pattern. The whole Multi must abort and the
-      # session row MUST stay :active (NOT :committed).
-      try do
-        drop_recipe_ingredient_quantity_check!()
+      # Force the cart insert to violate shopping_items_ingredient_id_fkey.
+      # The whole Multi must abort and the session row MUST stay :active.
+      invalid_ingredient_id = Ecto.UUID.generate()
 
-        recipe_ingredient
-        |> Ecto.Changeset.change(%{quantity_milli: 0})
-        |> MealPlannerApi.Repo.update!()
+      try do
+        drop_recipe_ingredient_ingredient_fk!()
+
+        MealPlannerApi.Repo.update_all(
+          from(ri in MealPlannerApi.Persistence.Catalog.RecipeIngredient,
+            where: ri.id == ^recipe_ingredient.id
+          ),
+          set: [ingredient_id: invalid_ingredient_id]
+        )
 
         assert {:error, _reason} = Server.confirm(pid, proposal.id, session.id)
 
@@ -714,10 +787,10 @@ defmodule MealPlannerApi.Generation.ServerTest do
           from(ri in MealPlannerApi.Persistence.Catalog.RecipeIngredient,
             where: ri.id == ^recipe_ingredient.id
           ),
-          set: [quantity_milli: 1_000]
+          set: [ingredient_id: ingredient.id]
         )
 
-        restore_recipe_ingredient_quantity_check!()
+        restore_recipe_ingredient_ingredient_fk!()
       end
     end
   end
@@ -799,24 +872,22 @@ defmodule MealPlannerApi.Generation.ServerTest do
 
   defp get_proposal(id), do: MealPlannerApi.Repo.get!(PlanningProposal, id)
 
-  # Drops and restores the `recipe_ingredients_quantity_positive` check
-  # constraint so the @task 3.7 test can mutate a recipe_ingredient to
-  # `quantity_milli: 0`. Without this, the same CHECK that we want to
-  # trip on `shopping_items.quantity_milli > 0` would block the test
-  # setup itself.
-  defp drop_recipe_ingredient_quantity_check! do
+  # Drops and restores the recipe-ingredient FK so rollback tests can
+  # seed a line that passes the rebuilder but fails the ShoppingItem FK.
+  defp drop_recipe_ingredient_ingredient_fk! do
     Ecto.Adapters.SQL.query!(
       MealPlannerApi.Repo,
-      "ALTER TABLE recipe_ingredients DROP CONSTRAINT recipe_ingredients_quantity_positive"
+      "ALTER TABLE recipe_ingredients DROP CONSTRAINT recipe_ingredients_ingredient_id_fkey"
     )
   end
 
-  defp restore_recipe_ingredient_quantity_check! do
+  defp restore_recipe_ingredient_ingredient_fk! do
     Ecto.Adapters.SQL.query!(
       MealPlannerApi.Repo,
       """
       ALTER TABLE recipe_ingredients
-      ADD CONSTRAINT recipe_ingredients_quantity_positive CHECK (quantity_milli > 0)
+      ADD CONSTRAINT recipe_ingredients_ingredient_id_fkey
+      FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE RESTRICT
       """
     )
   end
