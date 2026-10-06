@@ -189,6 +189,8 @@ defmodule MealPlannerApiWeb.CalendarController do
       slot: Atom.to_string(meal.slot),
       is_cooked: meal.is_cooked,
       recipe_id: meal.recipe_id,
+      recipe_version_id: meal.recipe_version_id,
+      selected_quantity: meal.selected_quantity,
       recipe_name: meal.recipe_name,
       is_favorite: meal.is_favorite,
       can_create: false,

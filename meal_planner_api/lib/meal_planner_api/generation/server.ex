@@ -417,6 +417,15 @@ defmodule MealPlannerApi.Generation.Server do
       {:error, _step, _reason, _changes} ->
         {:error, :transaction_failed}
     end
+  rescue
+    error in Postgrex.Error ->
+      case error.postgres do
+        %{code: :raise_exception, message: "recipe does not belong to Account"} ->
+          {:error, :transaction_failed}
+
+        _ ->
+          reraise error, __STACKTRACE__
+      end
   end
 
   # Re-confirm idempotency guard (planning-shopping-extraction design §3 Decision 5).
@@ -692,6 +701,8 @@ defmodule MealPlannerApi.Generation.Server do
           date: Date.from_iso8601!(date),
           slot: String.to_existing_atom(slot_name),
           recipe_id: parse_recipe_id(Map.get(slot, :recipe_id) || Map.get(slot, "recipe_id")),
+          selected_quantity:
+            Map.get(slot, :selected_quantity, Map.get(slot, "selected_quantity", 1)),
           is_cooked: false
         }
 

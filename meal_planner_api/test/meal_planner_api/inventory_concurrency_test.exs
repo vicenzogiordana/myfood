@@ -18,26 +18,27 @@ defmodule MealPlannerApi.InventoryConcurrencyTest do
   @migration_version 20_260_903_000_000
   @migration_module MealPlannerApi.Repo.Migrations.AddPositiveStockLotLookupIndex
 
+  unless String.starts_with?(Repo.config()[:database] || "", @database_prefix) do
+    @moduletag skip:
+                 "real-connection inventory tests require an explicitly disposable #{@database_prefix}* database"
+  end
+
   setup_all do
     database = Repo.config()[:database] || ""
+    assert String.starts_with?(database, @database_prefix)
 
-    if String.starts_with?(database, @database_prefix) do
-      Sandbox.mode(Repo, :auto)
-      :ok = MealPlannerApi.SubscriptionPlanFixtures.ensure_plans!()
+    Sandbox.mode(Repo, :auto)
+    :ok = MealPlannerApi.SubscriptionPlanFixtures.ensure_plans!()
 
-      Code.require_file(
-        Path.expand(
-          "../../priv/repo/migrations/20260903000000_add_unique_index_to_inventory_items.exs",
-          __DIR__
-        )
+    Code.require_file(
+      Path.expand(
+        "../../priv/repo/migrations/20260903000000_add_unique_index_to_inventory_items.exs",
+        __DIR__
       )
+    )
 
-      on_exit(fn -> Sandbox.mode(Repo, :manual) end)
-      {:ok, database: database}
-    else
-      {:skip,
-       "real-connection inventory tests require an explicitly disposable #{@database_prefix}* database"}
-    end
+    on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+    {:ok, database: database}
   end
 
   setup do

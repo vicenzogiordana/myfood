@@ -52,6 +52,10 @@ defmodule MealPlannerApiWeb.CrossAccountIsolationTest do
 
     [membership_a, membership_b] = user.memberships
 
+    for membership <- [membership_a, membership_b] do
+      MealPlannerApiWeb.ChannelHelpers.persist_trial_window!(membership.account, :eligible)
+    end
+
     fixtures_a = seed_account_fixtures(user, membership_a, "A")
     fixtures_b = seed_account_fixtures(user, membership_b, "B")
 

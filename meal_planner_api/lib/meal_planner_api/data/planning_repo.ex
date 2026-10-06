@@ -20,7 +20,6 @@ defmodule MealPlannerApi.Data.PlanningRepo do
 
   alias MealPlannerApi.Persistence.Planning.{
     ContextSnapshot,
-    CookingChatMessage,
     CookingSession,
     CookingStepEvent,
     PlanningException,
@@ -228,6 +227,7 @@ defmodule MealPlannerApi.Data.PlanningRepo do
     base_ids =
       from(r in Recipe,
         where: is_nil(r.account_id) or r.account_id == ^account_id,
+        where: is_nil(r.superseded_by_id),
         where: fragment("? && ?", r.suitable_for_slots, ^slot_strings),
         select: r.id
       )
@@ -268,6 +268,7 @@ defmodule MealPlannerApi.Data.PlanningRepo do
   def recipes_for_ids(recipe_ids, account_id) when is_list(recipe_ids) do
     from(r in Recipe,
       where: r.id in ^recipe_ids,
+      where: is_nil(r.superseded_by_id),
       where: is_nil(r.account_id) or r.account_id == ^account_id,
       select: %{
         id: r.id,
@@ -553,7 +554,6 @@ defmodule MealPlannerApi.Data.PlanningRepo do
     from(s in CookingSession,
       where: s.id == ^session_id and s.account_id == ^account_id,
       preload: [
-        :chat_messages,
         :context_snapshots,
         scheduled_meal: [
           recipe: [
@@ -566,9 +566,8 @@ defmodule MealPlannerApi.Data.PlanningRepo do
     |> Repo.one()
   end
 
-  @spec add_chat_message(map()) :: {:ok, CookingChatMessage.t()} | {:error, Ecto.Changeset.t()}
-  def add_chat_message(attrs),
-    do: %CookingChatMessage{} |> CookingChatMessage.changeset(attrs) |> Repo.insert()
+  @spec add_chat_message(map()) :: {:error, :ephemeral_chat_only}
+  def add_chat_message(_attrs), do: {:error, :ephemeral_chat_only}
 
   @spec add_step_event(map()) :: {:ok, CookingStepEvent.t()} | {:error, Ecto.Changeset.t()}
   def add_step_event(attrs),

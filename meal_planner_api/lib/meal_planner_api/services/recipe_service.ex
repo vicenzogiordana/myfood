@@ -26,15 +26,22 @@ defmodule MealPlannerApi.Services.RecipeService do
 
   @spec get_recipe(map(), pos_integer()) :: {:ok, map()} | {:error, :not_found | term()}
   def get_recipe(user, recipe_id) do
-    case Identity.ensure_persistent_identity(user) do
-      {:ok, _identity} ->
-        case RecipeRepo.get_recipe_with_details!(recipe_id) do
-          nil -> {:error, :not_found}
-          recipe -> {:ok, serialize_recipe_full(recipe)}
-        end
+    with {:ok, ids} <- MealPlannerApi.Services.RecipeAccess.authorize(user),
+         {:ok, _} <- Ecto.UUID.cast(recipe_id),
+         recipe when not is_nil(recipe) <-
+           RecipeRepo.get_visible_recipe(ids.account_id, recipe_id) do
+      version = MealPlannerApi.Services.RecipeVersions.freeze(recipe.id)
+      detail = MealPlannerApi.Services.RecipeVersions.decode(version.snapshot)
 
-      {:error, reason} ->
-        {:error, reason}
+      {:ok,
+       Map.merge(detail, %{
+         version: version.number,
+         recipe_version_id: version.id,
+         successor_recipe_id: recipe.superseded_by_id
+       })}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :not_found}
     end
   end
 
@@ -137,33 +144,12 @@ defmodule MealPlannerApi.Services.RecipeService do
     %{
       id: r.id,
       name: r.name,
-      title: r.title,
       description: r.description,
       prep_time_minutes: r.prep_time_minutes,
       cook_time_minutes: r.cook_time_minutes,
       calories_per_serving: r.calories_per_serving,
-      suitable_for_slots: Enum.map(r.suitable_for_slots || [], &Atom.to_string/1)
+      suitable_for_slots: Enum.map(r.suitable_for_slots || [], &to_string/1)
     }
-  end
-
-  defp serialize_recipe_full(r) do
-    base = serialize_recipe(r)
-
-    Map.merge(base, %{
-      recipe_steps:
-        Enum.map(r.recipe_steps || [], fn s ->
-          %{id: s.id, step_number: s.step_number, instruction: s.instruction}
-        end),
-      recipe_ingredients:
-        Enum.map(r.recipe_ingredients || [], fn ri ->
-          %{
-            id: ri.id,
-            quantity_milli: ri.quantity_milli,
-            unit: Atom.to_string(ri.unit),
-            ingredient: ri.ingredient && %{id: ri.ingredient.id, name: ri.ingredient.name}
-          }
-        end)
-    })
   end
 
   defp serialize_ingredient(i) do

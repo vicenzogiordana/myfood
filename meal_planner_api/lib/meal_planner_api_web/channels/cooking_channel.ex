@@ -3,7 +3,7 @@ defmodule MealPlannerApiWeb.CookingChannel do
 
   alias MealPlannerApi.Data.PlanningRepo
   alias MealPlannerApi.Services.CookingService
-  alias MealPlannerApiWeb.ChannelCapability
+  alias MealPlannerApi.Services.RecipeAccess
   alias MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket
 
   @impl true
@@ -26,11 +26,14 @@ defmodule MealPlannerApiWeb.CookingChannel do
         {:error, %{reason: "forbidden"}}
 
       true ->
-        case ChannelCapability.authorize(membership) do
-          :ok ->
+        user = Map.put(socket.assigns.current_user, :account_id, membership.account_id)
+
+        case RecipeAccess.authorize(user) do
+          {:ok, _} ->
             {:ok,
              socket
              |> assign(:account_id, topic_account_id)
+             |> assign(:current_user, user)
              |> assign(:current_membership, membership)}
 
           {:error, :subscription_required} ->
@@ -40,8 +43,15 @@ defmodule MealPlannerApiWeb.CookingChannel do
   end
 
   @impl true
-  def handle_in("start_session", %{"scheduled_meal_id" => meal_id}, socket)
-      when is_binary(meal_id) do
+  def handle_in(event, payload, socket) do
+    case RecipeAccess.authorize(socket.assigns.current_user) do
+      {:ok, _} -> handle_authorized_in(event, payload, socket)
+      {:error, reason} -> {:reply, {:error, %{reason: reason}}, socket}
+    end
+  end
+
+  defp handle_authorized_in("start_session", %{"scheduled_meal_id" => meal_id}, socket)
+       when is_binary(meal_id) do
     user = socket.assigns.current_user
     membership = socket.assigns.current_membership
 
@@ -69,13 +79,12 @@ defmodule MealPlannerApiWeb.CookingChannel do
     end
   end
 
-  def handle_in("start_session", _payload, socket) do
+  defp handle_authorized_in("start_session", _payload, socket) do
     {:reply, {:error, %{reason: "missing_scheduled_meal_id"}}, socket}
   end
 
-  @impl true
-  def handle_in("get_state", %{"session_id" => session_id}, socket)
-      when is_binary(session_id) do
+  defp handle_authorized_in("get_state", %{"session_id" => session_id}, socket)
+       when is_binary(session_id) do
     user = socket.assigns.current_user
 
     case CookingService.session_state(user, session_id) do
@@ -87,17 +96,16 @@ defmodule MealPlannerApiWeb.CookingChannel do
     end
   end
 
-  def handle_in("get_state", _payload, socket) do
+  defp handle_authorized_in("get_state", _payload, socket) do
     {:reply, {:error, %{reason: "missing_session_id"}}, socket}
   end
 
-  @impl true
-  def handle_in(
-        "track_step",
-        %{"session_id" => session_id, "recipe_step_id" => step_id, "status" => status} = payload,
-        socket
-      )
-      when is_binary(session_id) and is_binary(step_id) do
+  defp handle_authorized_in(
+         "track_step",
+         %{"session_id" => session_id, "recipe_step_id" => step_id, "status" => status} = payload,
+         socket
+       )
+       when is_binary(session_id) and is_binary(step_id) do
     user = socket.assigns.current_user
 
     atom_status =
@@ -121,13 +129,12 @@ defmodule MealPlannerApiWeb.CookingChannel do
     end
   end
 
-  def handle_in("track_step", _payload, socket) do
+  defp handle_authorized_in("track_step", _payload, socket) do
     {:reply, {:error, %{reason: "missing_fields"}}, socket}
   end
 
-  @impl true
-  def handle_in("finish_session", %{"session_id" => session_id}, socket)
-      when is_binary(session_id) do
+  defp handle_authorized_in("finish_session", %{"session_id" => session_id}, socket)
+       when is_binary(session_id) do
     user = socket.assigns.current_user
 
     case CookingService.finish_session(user, session_id) do
@@ -140,13 +147,12 @@ defmodule MealPlannerApiWeb.CookingChannel do
     end
   end
 
-  def handle_in("finish_session", _payload, socket) do
+  defp handle_authorized_in("finish_session", _payload, socket) do
     {:reply, {:error, %{reason: "missing_session_id"}}, socket}
   end
 
-  @impl true
-  def handle_in("ask_assistant", %{"message" => message} = payload, socket)
-      when is_binary(message) do
+  defp handle_authorized_in("ask_assistant", %{"message" => message} = payload, socket)
+       when is_binary(message) do
     user = socket.assigns.current_user
     session_id = Map.get(payload, "session_id") || Map.get(socket.assigns, :session_id)
     content_type = Map.get(payload, "content_type", "text")
@@ -165,11 +171,11 @@ defmodule MealPlannerApiWeb.CookingChannel do
     end
   end
 
-  def handle_in("ask_assistant", _payload, socket) do
+  defp handle_authorized_in("ask_assistant", _payload, socket) do
     {:reply, {:error, %{reason: "missing_message"}}, socket}
   end
 
-  def handle_in(_event, _payload, socket) do
+  defp handle_authorized_in(_event, _payload, socket) do
     {:reply, {:error, %{reason: "event_not_implemented"}}, socket}
   end
 end

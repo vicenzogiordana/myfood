@@ -116,6 +116,13 @@ defmodule MealPlannerApi.Services.TenancySweepTest do
       scoped_user_a: scoped_user_a,
       scoped_user_b: scoped_user_b
     } do
+      for actor <- [scoped_user_a, scoped_user_b] do
+        account =
+          MealPlannerApi.Repo.get!(MealPlannerApi.Persistence.Accounts.Account, actor.account_id)
+
+        MealPlannerApiWeb.ChannelHelpers.persist_trial_window!(account, :eligible)
+      end
+
       {:ok, recipe} =
         Catalog.create_recipe(%{
           account_id: membership_a.account_id,

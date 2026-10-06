@@ -12,26 +12,25 @@ defmodule MealPlannerApi.Services.CookingAtomicityTest do
   alias MealPlannerApi.Services.CookingService
 
   @moduletag :runtime_db_concurrency
-  @isolated_database "meal_planner_api_t1_verify_20261005_t1"
-  if System.get_env("MYFOOD_TEST_DATABASE") != @isolated_database do
-    @moduletag skip: "requires the explicitly isolated T1 verification database"
+  unless MealPlannerApi.Issue38Database.enabled?() do
+    @moduletag skip: "requires test/support/issue38_concurrency_runner.exs and a fresh database"
   end
 
   setup_all do
-    assert Repo.config()[:database] == @isolated_database
+    database = MealPlannerApi.Issue38Database.database!()
 
     repo =
       start_supervised!(
         {Repo,
          name: nil,
-         database: @isolated_database,
+         database: database,
          pool: DBConnection.ConnectionPool,
          pool_size: 4,
          timeout: 10_000,
          parameters: [lock_timeout: "3000", statement_timeout: "8000"]}
       )
 
-    assert %{rows: [[@isolated_database]]} =
+    assert %{rows: [[^database]]} =
              Ecto.Adapters.SQL.query!(repo, "SELECT current_database()", [])
 
     {:ok, repo: repo}
@@ -42,11 +41,8 @@ defmodule MealPlannerApi.Services.CookingAtomicityTest do
     :ok = MealPlannerApi.SubscriptionPlanFixtures.ensure_plans!()
     fixture = fixture()
 
-    on_exit(fn ->
-      Repo.put_dynamic_repo(repo)
-      cleanup(fixture)
-    end)
-
+    # UUID-scoped committed fixtures remain in this fresh database. Recipe versions
+    # are immutable, so deleting their recipe/account roots is not valid cleanup.
     {:ok, fixture}
   end
 
@@ -91,20 +87,16 @@ defmodule MealPlannerApi.Services.CookingAtomicityTest do
   test "another account cannot finish the session or consume its stock", f do
     foreign = fixture()
 
-    try do
-      assert {:error, :session_not_found} =
-               CookingService.finish_session(foreign.actor, f.session.id)
+    assert {:error, :session_not_found} =
+             CookingService.finish_session(foreign.actor, f.session.id)
 
-      assert_unchanged(f)
-      assert_unchanged(foreign)
-    after
-      cleanup(foreign)
-    end
+    assert_unchanged(f)
+    assert_unchanged(foreign)
   end
 
   for {table, field} <- [
         {"inventory_mutation_events", "source_user_id"},
-        {"scheduled_meals", "account_id"},
+        {"scheduled_meals", "ai_generation_id"},
         {"cooking_sessions", "account_id"}
       ] do
     test "failure writing #{table} rolls back session, meal, all lots and audit events", f do
@@ -262,6 +254,8 @@ defmodule MealPlannerApi.Services.CookingAtomicityTest do
         "subscription_tier" => "premium"
       })
 
+    account = MealPlannerApiWeb.ChannelHelpers.persist_trial_window!(account, :eligible)
+
     {:ok, recipe} =
       Catalog.create_recipe(%{
         account_id: account.id,
@@ -341,29 +335,5 @@ defmodule MealPlannerApi.Services.CookingAtomicityTest do
       )
     )
     |> Repo.insert!()
-  end
-
-  defp cleanup(f) do
-    Repo.delete_all(from(e in InventoryMutationEvent, where: e.account_id == ^f.account.id))
-    Repo.delete_all(from(i in InventoryItem, where: i.account_id == ^f.account.id))
-    Repo.delete_all(from(m in ScheduledMeal, where: m.account_id == ^f.account.id))
-    Repo.delete_all(from(r in Catalog.Recipe, where: r.account_id == ^f.account.id))
-
-    Repo.delete_all(
-      from(m in MealPlannerApi.Persistence.Accounts.AccountMembership,
-        where: m.account_id == ^f.account.id
-      )
-    )
-
-    Repo.delete_all(
-      from(u in MealPlannerApi.Persistence.Accounts.User, where: u.id == ^f.user.id)
-    )
-
-    Repo.delete_all(
-      from(a in MealPlannerApi.Persistence.Accounts.Account, where: a.id == ^f.account.id)
-    )
-
-    ids = Enum.map(f.ingredients, & &1.id)
-    Repo.delete_all(from(i in Catalog.Ingredient, where: i.id in ^ids))
   end
 end
