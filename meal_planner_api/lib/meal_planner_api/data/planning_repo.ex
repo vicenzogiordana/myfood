@@ -515,6 +515,27 @@ defmodule MealPlannerApi.Data.PlanningRepo do
   # Cooking sessions
   # -------------------------------------------------------------------------
 
+  @doc "Locks cooking completion state; call only inside a transaction."
+  def lock_cooking_session_for_account(account_id, session_id) do
+    Repo.one(
+      from(s in CookingSession,
+        where: s.id == ^session_id and s.account_id == ^account_id,
+        lock: "FOR UPDATE"
+      )
+    )
+  end
+
+  @doc "Locks the meal before checking completion, including across distinct cooking sessions."
+  def lock_cooking_meal_for_account(account_id, meal_id) do
+    Repo.one(
+      from(m in ScheduledMeal,
+        where: m.id == ^meal_id and m.account_id == ^account_id,
+        lock: "FOR UPDATE",
+        preload: [recipe: [:recipe_ingredients]]
+      )
+    )
+  end
+
   @spec create_cooking_session(map()) :: {:ok, CookingSession.t()} | {:error, Ecto.Changeset.t()}
   def create_cooking_session(attrs),
     do: %CookingSession{} |> CookingSession.changeset(attrs) |> Repo.insert()

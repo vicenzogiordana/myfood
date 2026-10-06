@@ -4,7 +4,7 @@ config :meal_planner_api, MealPlannerApi.Repo,
   username: "postgres",
   password: "postgres",
   hostname: "localhost",
-  database: "meal_planner_api_test",
+  database: System.get_env("MYFOOD_TEST_DATABASE", "meal_planner_api_test"),
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: 10
 

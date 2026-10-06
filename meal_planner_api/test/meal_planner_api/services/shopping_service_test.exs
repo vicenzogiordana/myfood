@@ -1,8 +1,6 @@
 defmodule MealPlannerApi.ShoppingServiceTest do
   use ExUnit.Case, async: true
 
-  alias MealPlannerApi.Accounts
-  alias MealPlannerApi.Auth.Guardian
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApi.Persistence.Identity
   alias MealPlannerApi.Persistence.Planning
@@ -15,7 +13,7 @@ defmodule MealPlannerApi.ShoppingServiceTest do
     :ok = MealPlannerApi.SubscriptionPlanFixtures.ensure_plans!()
   end
 
-  defp create_test_ingredient(account_id) do
+  defp create_test_ingredient(_account_id) do
     {:ok, ingredient} =
       Catalog.upsert_ingredient_by_name(%{
         name: "Test Ingredient #{:rand.uniform(10000)}",
@@ -66,6 +64,7 @@ defmodule MealPlannerApi.ShoppingServiceTest do
 
       account_id = identity.account_id
       user = %{id: identity.user_id, account_id: account_id, plan: :family_4}
+      ensure_membership!(user)
 
       ingredient = create_test_ingredient(account_id)
       recipe = create_test_recipe(account_id, identity.user_id)
@@ -95,7 +94,7 @@ defmodule MealPlannerApi.ShoppingServiceTest do
           started_at: DateTime.utc_now()
         })
 
-      {:ok, _item} =
+      {:ok, item} =
         Shopping.create_shopping_item(%{
           account_id: account_id,
           scheduled_meal_id: meal.id,
@@ -104,10 +103,21 @@ defmodule MealPlannerApi.ShoppingServiceTest do
           ingredient_id: ingredient.id,
           quantity_milli: 500,
           unit: :g,
-          status: :checked_out
+          status: :pending
         })
 
-      result = ShoppingService.confirm_checkout(user, session.id, %{"actual_total_cents" => 5000})
+      {:ok, cart} = ShoppingService.mark_in_cart(user, [item.id])
+
+      result =
+        ShoppingService.confirm_checkout(user, cart.session_id, %{
+          "checkout_type" => "physical",
+          "items" =>
+            Enum.map(
+              cart.reservations,
+              &(Map.new(&1, fn {k, v} -> {Atom.to_string(k), v} end)
+                |> Map.put("total_cents", 5000))
+            )
+        })
 
       assert {:ok, response} = result
       assert response.status == "completed"
@@ -124,6 +134,7 @@ defmodule MealPlannerApi.ShoppingServiceTest do
 
       account_id = identity.account_id
       user = %{id: identity.user_id, account_id: account_id, plan: :family_4}
+      ensure_membership!(user)
 
       ingredient = create_test_ingredient(account_id)
       recipe = create_test_recipe(account_id, identity.user_id)
@@ -153,7 +164,7 @@ defmodule MealPlannerApi.ShoppingServiceTest do
           started_at: DateTime.utc_now()
         })
 
-      {:ok, _item1} =
+      {:ok, item1} =
         Shopping.create_shopping_item(%{
           account_id: account_id,
           scheduled_meal_id: meal.id,
@@ -162,10 +173,10 @@ defmodule MealPlannerApi.ShoppingServiceTest do
           ingredient_id: ingredient.id,
           quantity_milli: 200,
           unit: :g,
-          status: :checked_out
+          status: :pending
         })
 
-      {:ok, _item2} =
+      {:ok, item2} =
         Shopping.create_shopping_item(%{
           account_id: account_id,
           scheduled_meal_id: meal.id,
@@ -174,17 +185,28 @@ defmodule MealPlannerApi.ShoppingServiceTest do
           ingredient_id: ingredient.id,
           quantity_milli: 100,
           unit: :g,
-          status: :checked_out
+          status: :pending
         })
 
-      result = ShoppingService.confirm_checkout(user, session.id, %{"actual_total_cents" => 3000})
+      {:ok, cart} = ShoppingService.mark_in_cart(user, [item1.id, item2.id])
+
+      result =
+        ShoppingService.confirm_checkout(user, cart.session_id, %{
+          "checkout_type" => "physical",
+          "items" =>
+            Enum.map(
+              cart.reservations,
+              &(Map.new(&1, fn {k, v} -> {Atom.to_string(k), v} end)
+                |> Map.put("total_cents", 1500))
+            )
+        })
 
       assert {:ok, response} = result
       assert Map.has_key?(response, :moved_to_inventory_count)
       assert is_integer(response.moved_to_inventory_count)
     end
 
-    test "rolls back and returns transaction_failed on session update failure" do
+    test "rejects a missing cart" do
       {:ok, identity} =
         Identity.ensure_persistent_identity(%{
           id: "u_rollback_#{:rand.uniform(10000)}",
@@ -193,6 +215,7 @@ defmodule MealPlannerApi.ShoppingServiceTest do
         })
 
       user = %{id: identity.user_id, account_id: identity.account_id, plan: :family_4}
+      ensure_membership!(user)
 
       # Try to confirm a non-existent session
       fake_session_id = Ecto.UUID.generate()
@@ -201,8 +224,20 @@ defmodule MealPlannerApi.ShoppingServiceTest do
         ShoppingService.confirm_checkout(user, fake_session_id, %{"actual_total_cents" => 1000})
 
       # Should return error for session not found
-      assert result == {:error, :session_not_found}
+      assert result == {:error, :cart_not_found}
     end
+  end
+
+  defp ensure_membership!(user) do
+    %MealPlannerApi.Persistence.Accounts.AccountMembership{}
+    |> MealPlannerApi.Persistence.Accounts.AccountMembership.changeset(%{
+      account_id: user.account_id,
+      user_id: user.id,
+      role: :owner,
+      status: :active,
+      joined_at: DateTime.utc_now()
+    })
+    |> Repo.insert!()
   end
 
   describe "get_shopping_list/2" do

@@ -16,6 +16,9 @@ defmodule MealPlannerApi.Persistence.Shopping.CheckoutSession do
     field(:total_cents, :integer)
     field(:confirmed_at, :utc_datetime_usec)
     field(:invalidated_at, :utc_datetime_usec)
+    field(:lease_expires_at, :utc_datetime_usec)
+    field(:purchase_result, :map)
+    belongs_to(:reserved_by_user, MealPlannerApi.Persistence.Accounts.User)
 
     belongs_to(:account, MealPlannerApi.Persistence.Accounts.Account)
     belongs_to(:confirmed_by_user, MealPlannerApi.Persistence.Accounts.User)
@@ -39,7 +42,10 @@ defmodule MealPlannerApi.Persistence.Shopping.CheckoutSession do
       :total_cents,
       :confirmed_by_user_id,
       :confirmed_at,
-      :invalidated_at
+      :invalidated_at,
+      :reserved_by_user_id,
+      :lease_expires_at,
+      :purchase_result
     ])
     |> validate_required([:account_id, :status, :checkout_type])
     |> validate_number(:total_cents, greater_than_or_equal_to: 0)

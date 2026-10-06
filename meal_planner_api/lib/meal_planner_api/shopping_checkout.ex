@@ -5,7 +5,6 @@ defmodule MealPlannerApi.ShoppingCheckout do
 
   alias MealPlannerApi.Inventory, as: DomainInventory
   alias MealPlannerApi.Persistence.Identity
-  alias MealPlannerApi.Persistence.Inventory
   alias MealPlannerApi.Persistence.Planning
   alias MealPlannerApi.Persistence.Shopping
 
@@ -47,25 +46,12 @@ defmodule MealPlannerApi.ShoppingCheckout do
   @spec mark_cart(map(), binary(), boolean(), map()) :: {:ok, map()} | {:error, term()}
   def mark_cart(current_user, ingredient_id, in_cart, params \\ %{})
       when is_binary(ingredient_id) and is_boolean(in_cart) and is_map(params) do
-    with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
-         {:ok, from_date, to_date} <- parse_date_range(params) do
-      status = if(in_cart, do: :in_cart, else: :pending)
-
-      {updated, _} =
-        Shopping.update_open_items_for_ingredient(
-          ids.account_id,
-          ingredient_id,
-          %{status: status},
-          from_date,
-          to_date
-        )
-
-      {:ok,
-       %{
-         ingredient_id: ingredient_id,
-         status: Atom.to_string(status),
-         updated_rows: updated
-       }}
+    with {:ok, from_date, to_date} <- parse_date_range(params) do
+      if in_cart do
+        MealPlannerApi.Cart.reserve_ingredient(current_user, ingredient_id, from_date, to_date)
+      else
+        MealPlannerApi.Cart.remove(current_user, params["session_id"], params["items"])
+      end
     end
   end
 
@@ -99,82 +85,13 @@ defmodule MealPlannerApi.ShoppingCheckout do
 
   @spec confirm_checkout(map(), map()) :: {:ok, map()} | {:error, term()}
   def confirm_checkout(current_user, payload) when is_map(payload) do
-    with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
-         {:ok, from_date, to_date} <- parse_date_range(payload),
-         {:ok, checkout_type} <- parse_checkout_type(Map.get(payload, "checkout_type")),
-         :ok <- prune_past_unpurchased(ids.account_id),
-         items <- Shopping.list_in_cart_items_with_context(ids.account_id, from_date, to_date),
-         false <- items == [] do
-      now = DateTime.utc_now()
-      session_status = if(checkout_type == :online, do: :pending_delivery, else: :completed)
-
-      grouped = grouping_map(items)
-
-      {:ok, session} =
-        Shopping.create_checkout_session(%{
-          account_id: ids.account_id,
-          status: session_status,
-          checkout_type: checkout_type,
-          grouping_by_supermarket: grouped,
-          total_cents:
-            Enum.reduce(items, 0, fn item, acc -> (item.estimated_price_cents || 0) + acc end),
-          confirmed_by_user_id: ids.user_id,
-          confirmed_at: now
-        })
-
-      {moved_to_inventory_count, checked_out_items_count} =
-        if checkout_type == :online do
-          Enum.each(items, fn item ->
-            {:ok, _updated_item} =
-              Shopping.update_shopping_item(item, %{status: :pending_delivery})
-          end)
-
-          {0, length(items)}
-        else
-          count = apply_items_to_inventory(ids, session.id, items)
-          {count, count}
-        end
-
-      {:ok,
-       %{
-         checkout_session_id: session.id,
-         status: Atom.to_string(session_status),
-         checkout_type: Atom.to_string(checkout_type),
-         moved_to_inventory_count: moved_to_inventory_count,
-         checked_out_items_count: checked_out_items_count,
-         grouped_by_supermarket: grouped
-       }}
-    else
-      true -> {:error, :empty_cart}
-      {:error, _} = error -> error
-    end
+    MealPlannerApi.Cart.purchase(current_user, payload["session_id"], payload)
   end
 
   @spec confirm_delivery_arrived(map(), binary()) :: {:ok, map()} | {:error, term()}
   def confirm_delivery_arrived(current_user, checkout_session_id)
       when is_binary(checkout_session_id) do
-    with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
-         session when not is_nil(session) <-
-           Shopping.get_checkout_session_for_account(ids.account_id, checkout_session_id),
-         true <- session.status == :pending_delivery,
-         item_ids when is_list(item_ids) and item_ids != [] <- extract_item_ids(session),
-         items when is_list(items) <- Shopping.list_items_by_ids(ids.account_id, item_ids),
-         true <- items != [] do
-      moved = apply_items_to_inventory(ids, session.id, items)
-      {:ok, _updated_session} = Shopping.update_checkout_session(session, %{status: :completed})
-
-      {:ok,
-       %{
-         checkout_session_id: session.id,
-         status: "completed",
-         moved_to_inventory_count: moved,
-         checked_out_items_count: moved
-       }}
-    else
-      nil -> {:error, :checkout_session_not_found}
-      false -> {:error, :invalid_checkout_status}
-      _ -> {:error, :invalid_checkout_payload}
-    end
+    MealPlannerApi.Cart.delivery(current_user, checkout_session_id)
   end
 
   defp parse_date_range(params) do
@@ -232,10 +149,6 @@ defmodule MealPlannerApi.ShoppingCheckout do
   defp parse_bool("true"), do: true
   defp parse_bool(true), do: true
   defp parse_bool(_), do: false
-
-  defp parse_checkout_type("physical"), do: {:ok, :physical}
-  defp parse_checkout_type("online"), do: {:ok, :online}
-  defp parse_checkout_type(_), do: {:error, :invalid_checkout_type}
 
   defp prune_past_unpurchased(account_id) do
     _ = Shopping.archive_outdated_unpurchased(account_id, Date.utc_today())
@@ -367,59 +280,5 @@ defmodule MealPlannerApi.ShoppingCheckout do
       }
     end)
     |> Enum.sort_by(& &1.category)
-  end
-
-  defp grouping_map(items) do
-    grouped =
-      items
-      |> Enum.group_by(fn item -> item.assigned_supermarket_id || "unassigned" end)
-
-    Enum.into(grouped, %{}, fn {supermarket_id, rows} ->
-      total = Enum.reduce(rows, 0, &((&1.estimated_price_cents || 0) + &2))
-
-      {to_string(supermarket_id),
-       %{
-         item_count: length(rows),
-         total_cents: total,
-         item_ids: Enum.map(rows, & &1.id)
-       }}
-    end)
-  end
-
-  defp extract_item_ids(session) do
-    session.grouping_by_supermarket
-    |> Map.values()
-    |> Enum.flat_map(fn row -> Map.get(row, "item_ids") || Map.get(row, :item_ids) || [] end)
-    |> Enum.uniq()
-  end
-
-  defp apply_items_to_inventory(ids, checkout_session_id, items) do
-    Enum.reduce_while(items, 0, fn item, acc ->
-      result =
-        Inventory.apply_delta_and_log(%{
-          account_id: ids.account_id,
-          ingredient_id: item.ingredient_id,
-          unit: item.unit,
-          source_kind: :planned,
-          delta: item.quantity_milli,
-          source_user_id: ids.user_id,
-          trigger_type: :purchase,
-          operation: :add,
-          source_checkout_session_id: checkout_session_id,
-          metadata: %{
-            shopping_item_id: item.id,
-            planned_date: Date.to_iso8601(item.planned_date)
-          }
-        })
-
-      case result do
-        {:ok, _} ->
-          {:ok, _updated_item} = Shopping.update_shopping_item(item, %{status: :checked_out})
-          {:cont, acc + 1}
-
-        {:error, _} ->
-          {:halt, acc}
-      end
-    end)
   end
 end

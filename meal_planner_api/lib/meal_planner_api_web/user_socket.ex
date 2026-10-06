@@ -68,6 +68,7 @@ defmodule MealPlannerApiWeb.UserSocket do
   use Phoenix.Socket
 
   channel("ai_chat:*", MealPlannerApiWeb.AIChannel)
+  channel("shopping:*", MealPlannerApiWeb.ShoppingChannel)
   channel("calendar:*", MealPlannerApiWeb.CalendarChannel)
   channel("planning:*", MealPlannerApiWeb.PlanningChannel)
   channel("cooking:*", MealPlannerApiWeb.CookingChannel)

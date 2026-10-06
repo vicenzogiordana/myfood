@@ -16,6 +16,7 @@ defmodule MealPlannerApi.Persistence.Shopping.ShoppingItem do
     )
 
     field(:estimated_price_cents, :integer)
+    field(:reservation_token, Ecto.UUID)
 
     belongs_to(:account, MealPlannerApi.Persistence.Accounts.Account)
     belongs_to(:scheduled_meal, MealPlannerApi.Persistence.Planning.ScheduledMeal)
@@ -45,7 +46,8 @@ defmodule MealPlannerApi.Persistence.Shopping.ShoppingItem do
       :assigned_supermarket_id,
       :checkout_session_id,
       :status,
-      :estimated_price_cents
+      :estimated_price_cents,
+      :reservation_token
     ])
     |> validate_required([
       :account_id,

@@ -150,8 +150,8 @@ defmodule MealPlannerApi.Data.InventoryRepoTest do
       account_a = insert_account("Find A")
       account_b = insert_account("Find B")
 
-      _user = insert_user_with_active_membership(account_a.id, "find-inv@example.com", :owner)
-      _family_membership = insert_active_membership_for(account_b.id, _user, :member)
+      user = insert_user_with_active_membership(account_a.id, "find-inv@example.com", :owner)
+      _family_membership = insert_active_membership_for(account_b.id, user, :member)
 
       flour = insert_ingredient("Find Flour")
 
@@ -165,7 +165,7 @@ defmodule MealPlannerApi.Data.InventoryRepoTest do
           last_mutation_at: DateTime.utc_now()
         })
 
-      {:ok, _item_b} =
+      {:ok, item_b} =
         InventoryRepo.create_inventory_item(%{
           account_id: account_b.id,
           ingredient_id: flour.id,
@@ -183,10 +183,10 @@ defmodule MealPlannerApi.Data.InventoryRepoTest do
 
       assert found_a.id == item_a.id
       assert found_a.account_id == account_a.id
-      refute found_a.id == _item_b.id
+      refute found_a.id == item_b.id
 
       assert found_b.account_id == account_b.id
-      assert found_b.id == _item_b.id
+      assert found_b.id == item_b.id
     end
   end
 
@@ -246,7 +246,6 @@ defmodule MealPlannerApi.Data.InventoryRepoTest do
         })
 
       today = Date.utc_today()
-      now = DateTime.utc_now()
 
       from_dt = DateTime.new!(Date.add(today, -1), ~T[00:00:00.000])
       to_dt = DateTime.new!(Date.add(today, 1), ~T[23:59:59.999])
