@@ -33,9 +33,29 @@ defmodule MealPlannerApi.Persistence.Calendar do
           slot: m.slot,
           is_cooked: m.is_cooked,
           recipe_id: m.recipe_id,
-          recipe_name: r.name,
-          calories_per_serving: r.calories_per_serving,
-          prep_time_minutes: r.prep_time_minutes,
+          recipe_name:
+            fragment(
+              "CASE WHEN ? IS NULL THEN ? ELSE ?->>'name' END",
+              m.recipe_snapshot,
+              r.name,
+              m.recipe_snapshot
+            ),
+          calories_per_serving:
+            fragment(
+              "CASE WHEN ? IS NULL THEN ? ELSE (?->>'calories_per_serving')::integer END",
+              m.recipe_snapshot,
+              r.calories_per_serving,
+              m.recipe_snapshot
+            ),
+          prep_time_minutes:
+            fragment(
+              "CASE WHEN ? IS NULL THEN ? ELSE (?->>'prep_time_minutes')::integer END",
+              m.recipe_snapshot,
+              r.prep_time_minutes,
+              m.recipe_snapshot
+            ),
+          recipe_version_id: m.recipe_version_id,
+          selected_quantity: m.selected_quantity,
           is_favorite: not is_nil(sf.id)
         }
       )
@@ -140,7 +160,7 @@ defmodule MealPlannerApi.Persistence.Calendar do
              :ok <- validate_unique_slot(seen, date, slot) do
           normalized_meal =
             meal
-            |> Map.take([:recipe_id, :is_cooked, :ai_generation_id])
+            |> Map.take([:recipe_id, :is_cooked, :ai_generation_id, :selected_quantity])
             |> Map.put(:date, date)
             |> Map.put(:slot, slot)
 
@@ -224,9 +244,29 @@ defmodule MealPlannerApi.Persistence.Calendar do
         slot: m.slot,
         is_cooked: m.is_cooked,
         recipe_id: m.recipe_id,
-        recipe_name: r.name,
-        calories_per_serving: r.calories_per_serving,
-        prep_time_minutes: r.prep_time_minutes,
+        recipe_name:
+          fragment(
+            "CASE WHEN ? IS NULL THEN ? ELSE ?->>'name' END",
+            m.recipe_snapshot,
+            r.name,
+            m.recipe_snapshot
+          ),
+        calories_per_serving:
+          fragment(
+            "CASE WHEN ? IS NULL THEN ? ELSE (?->>'calories_per_serving')::integer END",
+            m.recipe_snapshot,
+            r.calories_per_serving,
+            m.recipe_snapshot
+          ),
+        prep_time_minutes:
+          fragment(
+            "CASE WHEN ? IS NULL THEN ? ELSE (?->>'prep_time_minutes')::integer END",
+            m.recipe_snapshot,
+            r.prep_time_minutes,
+            m.recipe_snapshot
+          ),
+        recipe_version_id: m.recipe_version_id,
+        selected_quantity: m.selected_quantity,
         is_favorite: not is_nil(sf.id)
       }
     )

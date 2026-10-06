@@ -57,11 +57,12 @@ defmodule MealPlannerApi.Services.ShoppingRebuilder do
     Enum.reverse(rows)
   end
 
-  defp get_recipe_ingredients(%{recipe: %{recipe_ingredients: ingredients}})
-       when is_list(ingredients),
-       do: ingredients
-
-  defp get_recipe_ingredients(_), do: []
+  defp get_recipe_ingredients(meal) do
+    case MealPlannerApi.Services.RecipeVersions.recipe_for_meal(meal) do
+      %{recipe_ingredients: ingredients} when is_list(ingredients) -> ingredients
+      _ -> []
+    end
+  end
 
   defp process_meal_ingredients(meal, ingredients, acc, pool) do
     Enum.reduce(ingredients, {acc, pool}, fn ri, {rows, current_pool} ->

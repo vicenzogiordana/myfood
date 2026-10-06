@@ -62,6 +62,14 @@ defmodule MealPlannerApi.Data.RecipeRepo do
   @spec get_recipe!(pos_integer()) :: Recipe.t()
   def get_recipe!(id), do: Repo.get!(Recipe, id)
 
+  def get_visible_recipe(account_id, id) do
+    Repo.one(
+      from(r in Recipe,
+        where: r.id == ^id and (r.account_id == ^account_id or is_nil(r.account_id))
+      )
+    )
+  end
+
   @spec create_recipe(map()) :: {:ok, Recipe.t()} | {:error, Ecto.Changeset.t()}
   def create_recipe(attrs), do: %Recipe{} |> Recipe.changeset(attrs) |> Repo.insert()
 

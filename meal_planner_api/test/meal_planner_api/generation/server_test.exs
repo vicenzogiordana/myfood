@@ -120,6 +120,39 @@ defmodule MealPlannerApi.Generation.ServerTest do
     end
   end
 
+  test "confirmation after a correction keeps the proposal version and rebuilds its frozen quantities" do
+    account = insert_account("Versioned confirmation")
+    user = insert_user_with_membership(account, "versioned-confirmation@example.com")
+    recipe = insert_recipe("Original confirmed recipe")
+    ingredient = insert_ingredient("Versioned ingredient")
+
+    {:ok, _} =
+      MealPlannerApi.Data.RecipeRepo.add_recipe_ingredient(%{
+        recipe_id: recipe.id,
+        ingredient_id: ingredient.id,
+        quantity_milli: 1000,
+        unit: :g
+      })
+
+    {_run, proposal} =
+      insert_proposal_with_slots(account, user, [slot(~D[2026-08-06], :lunch, recipe.id)])
+
+    {:ok, successor} =
+      MealPlannerApi.Services.RecipeVersions.correct(recipe.id, %{
+        name: "Corrected recipe",
+        recipe_ingredients: [%{ingredient_id: ingredient.id, quantity_milli: 500, unit: :g}]
+      })
+
+    session = insert_active_session(account, user)
+    start_server!(account, user)
+    assert {:ok, _} = Server.confirm(pid_for_account(account), proposal.id, session.id)
+    [meal] = list_all_meals(account.id)
+    assert meal.recipe_id == recipe.id
+    assert meal.recipe_version_id != successor.id
+    assert meal.recipe_snapshot["name"] == "Original confirmed recipe"
+    assert [%{quantity_milli: 1000}] = list_all_items(account)
+  end
+
   # ---------------------------------------------------------------------------
   # @task 3.1 — re-confirm idempotency
   #
@@ -486,7 +519,7 @@ defmodule MealPlannerApi.Generation.ServerTest do
       recipe = insert_recipe("Atomicity")
       ingredient = insert_ingredient("Atomicity ingredient")
 
-      {:ok, recipe_ingredient} =
+      {:ok, _recipe_ingredient} =
         MealPlannerApi.Data.RecipeRepo.add_recipe_ingredient(%{
           recipe_id: recipe.id,
           ingredient_id: ingredient.id,
@@ -503,20 +536,9 @@ defmodule MealPlannerApi.Generation.ServerTest do
       start_server!(account, user)
       pid = pid_for_account(account)
 
-      # Force a ShoppingItem FK failure while keeping the recipe quantity
-      # valid: temporarily point the recipe ingredient at a nonexistent
-      # ingredient. The rebuilder emits the row; shopping_items rejects it.
-      invalid_ingredient_id = Ecto.UUID.generate()
-
+      # Fail the actual shopping write, not the already-frozen recipe content.
       try do
-        drop_recipe_ingredient_ingredient_fk!()
-
-        MealPlannerApi.Repo.update_all(
-          from(ri in MealPlannerApi.Persistence.Catalog.RecipeIngredient,
-            where: ri.id == ^recipe_ingredient.id
-          ),
-          set: [ingredient_id: invalid_ingredient_id]
-        )
+        reject_shopping_inserts!(account.id)
 
         assert {:error, _reason} = Server.confirm(pid, proposal.id, session.id)
 
@@ -527,14 +549,7 @@ defmodule MealPlannerApi.Generation.ServerTest do
         rolled_back = get_proposal(proposal.id)
         assert rolled_back.status == :pending
       after
-        MealPlannerApi.Repo.update_all(
-          from(ri in MealPlannerApi.Persistence.Catalog.RecipeIngredient,
-            where: ri.id == ^recipe_ingredient.id
-          ),
-          set: [ingredient_id: ingredient.id]
-        )
-
-        restore_recipe_ingredient_ingredient_fk!()
+        restore_shopping_inserts!()
       end
     end
   end
@@ -830,7 +845,7 @@ defmodule MealPlannerApi.Generation.ServerTest do
       recipe = insert_recipe("2-2 rb recipe")
       ingredient = insert_ingredient("2-2 rb ingredient")
 
-      {:ok, recipe_ingredient} =
+      {:ok, _recipe_ingredient} =
         MealPlannerApi.Data.RecipeRepo.add_recipe_ingredient(%{
           recipe_id: recipe.id,
           ingredient_id: ingredient.id,
@@ -848,17 +863,8 @@ defmodule MealPlannerApi.Generation.ServerTest do
 
       # Force the cart insert to violate shopping_items_ingredient_id_fkey.
       # The whole Multi must abort and the session row MUST stay :active.
-      invalid_ingredient_id = Ecto.UUID.generate()
-
       try do
-        drop_recipe_ingredient_ingredient_fk!()
-
-        MealPlannerApi.Repo.update_all(
-          from(ri in MealPlannerApi.Persistence.Catalog.RecipeIngredient,
-            where: ri.id == ^recipe_ingredient.id
-          ),
-          set: [ingredient_id: invalid_ingredient_id]
-        )
+        reject_shopping_inserts!(account.id)
 
         assert {:error, _reason} = Server.confirm(pid, proposal.id, session.id)
 
@@ -871,14 +877,7 @@ defmodule MealPlannerApi.Generation.ServerTest do
         assert list_all_meals(account.id) == []
         assert count_checkout_sessions(account) == 0
       after
-        MealPlannerApi.Repo.update_all(
-          from(ri in MealPlannerApi.Persistence.Catalog.RecipeIngredient,
-            where: ri.id == ^recipe_ingredient.id
-          ),
-          set: [ingredient_id: ingredient.id]
-        )
-
-        restore_recipe_ingredient_ingredient_fk!()
+        restore_shopping_inserts!()
       end
     end
   end
@@ -960,23 +959,33 @@ defmodule MealPlannerApi.Generation.ServerTest do
 
   defp get_proposal(id), do: MealPlannerApi.Repo.get!(PlanningProposal, id)
 
-  # Drops and restores the recipe-ingredient FK so rollback tests can
-  # seed a line that passes the rebuilder but fails the ShoppingItem FK.
-  defp drop_recipe_ingredient_ingredient_fk! do
+  # Sandbox-scoped failure injection preserves immutable recipe versions.
+  defp reject_shopping_inserts!(account_id) do
     Ecto.Adapters.SQL.query!(
       MealPlannerApi.Repo,
-      "ALTER TABLE recipe_ingredients DROP CONSTRAINT recipe_ingredients_ingredient_id_fkey"
+      """
+      CREATE FUNCTION reject_test_shopping_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.account_id = '#{account_id}'::uuid THEN
+          NEW.ingredient_id := '#{Ecto.UUID.generate()}'::uuid;
+        END IF;
+        RETURN NEW;
+      END $$
+      """
+    )
+
+    Ecto.Adapters.SQL.query!(
+      MealPlannerApi.Repo,
+      "CREATE TRIGGER reject_test_shopping_insert BEFORE INSERT ON shopping_items FOR EACH ROW EXECUTE FUNCTION reject_test_shopping_insert()"
     )
   end
 
-  defp restore_recipe_ingredient_ingredient_fk! do
+  defp restore_shopping_inserts! do
     Ecto.Adapters.SQL.query!(
       MealPlannerApi.Repo,
-      """
-      ALTER TABLE recipe_ingredients
-      ADD CONSTRAINT recipe_ingredients_ingredient_id_fkey
-      FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE RESTRICT
-      """
+      "DROP TRIGGER reject_test_shopping_insert ON shopping_items"
     )
+
+    Ecto.Adapters.SQL.query!(MealPlannerApi.Repo, "DROP FUNCTION reject_test_shopping_insert()")
   end
 end

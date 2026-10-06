@@ -155,6 +155,7 @@ defmodule MealPlannerApi.Services.PlanningService do
                  date: parse_date(meal["day"]),
                  slot: String.to_existing_atom(meal["slot"]),
                  recipe_id: meal["recipe_id"],
+                 selected_quantity: Map.get(meal, "selected_quantity", 1),
                  is_cooked: false
                }) do
             {:ok, scheduled_meal} -> [scheduled_meal.id]
@@ -239,44 +240,25 @@ defmodule MealPlannerApi.Services.PlanningService do
   @spec start_cooking_session(pos_integer(), pos_integer(), pos_integer()) ::
           {:ok, map()} | {:error, :meal_not_found}
   def start_cooking_session(account_id, user_id, scheduled_meal_id) do
-    meal = PlanningRepo.get_scheduled_meal_for_account(account_id, scheduled_meal_id)
+    case MealPlannerApi.Services.CookingService.start_session(
+           %{id: user_id, account_id: account_id},
+           scheduled_meal_id
+         ) do
+      {:ok, session} ->
+        {:ok,
+         %{session_id: session.session_id, meal_id: scheduled_meal_id, recipe: session.recipe}}
 
-    case meal do
-      nil ->
+      {:error, :scheduled_meal_not_found} ->
         {:error, :meal_not_found}
 
-      _ ->
-        {:ok, session} =
-          PlanningRepo.create_cooking_session(%{
-            account_id: account_id,
-            user_id: user_id,
-            scheduled_meal_id: scheduled_meal_id,
-            status: :in_progress,
-            started_at: DateTime.utc_now()
-          })
-
-        {:ok,
-         %{
-           session_id: session.id,
-           meal_id: scheduled_meal_id,
-           recipe: serialize_recipe(meal.recipe)
-         }}
+      error ->
+        error
     end
   end
 
   @spec add_chat_message(pos_integer(), String.t()) ::
           {:ok, map()} | {:error, term()}
-  def add_chat_message(session_id, content) do
-    {:ok, msg} =
-      PlanningRepo.add_chat_message(%{
-        cooking_session_id: session_id,
-        role: :user,
-        content: content,
-        sent_at: DateTime.utc_now()
-      })
-
-    {:ok, %{message_id: msg.id, content: msg.content}}
-  end
+  def add_chat_message(_session_id, _content), do: {:error, :ephemeral_chat_only}
 
   # -------------------------------------------------------------------------
   # Helpers
@@ -418,17 +400,6 @@ defmodule MealPlannerApi.Services.PlanningService do
       slot: Atom.to_string(meal.slot),
       recipe_id: meal.recipe_id,
       is_cooked: meal.is_cooked
-    }
-  end
-
-  defp serialize_recipe(nil), do: nil
-
-  defp serialize_recipe(recipe) do
-    %{
-      id: recipe.id,
-      name: recipe.name,
-      prep_time_minutes: recipe.prep_time_minutes,
-      calories_per_serving: recipe.calories_per_serving
     }
   end
 

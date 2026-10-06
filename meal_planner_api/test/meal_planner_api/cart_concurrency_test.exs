@@ -5,26 +5,25 @@ defmodule MealPlannerApi.CartConcurrencyTest do
   alias MealPlannerApi.Persistence.Shopping.CheckoutSession
 
   @moduletag :runtime_db_concurrency
-  @database "meal_planner_api_t1_verify_20261005_t1"
-  if System.get_env("MYFOOD_TEST_DATABASE") != @database do
-    @moduletag skip: "requires the explicitly isolated verification database"
+  unless MealPlannerApi.Issue38Database.enabled?() do
+    @moduletag skip: "requires test/support/issue38_concurrency_runner.exs and a fresh database"
   end
 
   setup_all do
-    assert Repo.config()[:database] == @database
+    database = MealPlannerApi.Issue38Database.database!()
 
     repo =
       start_supervised!(
         {Repo,
          name: nil,
-         database: @database,
+         database: database,
          pool: DBConnection.ConnectionPool,
          pool_size: 4,
          timeout: 10_000,
          parameters: [lock_timeout: "3000", statement_timeout: "8000"]}
       )
 
-    assert %{rows: [[@database]]} =
+    assert %{rows: [[^database]]} =
              Ecto.Adapters.SQL.query!(repo, "SELECT current_database()", [])
 
     {:ok, repo: repo}

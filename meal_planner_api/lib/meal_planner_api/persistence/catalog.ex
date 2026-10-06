@@ -67,6 +67,7 @@ defmodule MealPlannerApi.Persistence.Catalog do
 
     from(r in Recipe,
       where: is_nil(r.account_id) or r.account_id == ^account_id,
+      where: is_nil(r.superseded_by_id),
       where: ^slot_str in r.suitable_for_slots
     )
     |> Repo.all()

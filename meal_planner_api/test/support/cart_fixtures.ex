@@ -2,8 +2,8 @@ defmodule MealPlannerApi.CartFixtures do
   @moduledoc false
   import Ecto.Query
   alias MealPlannerApi.Generation.ServerTestFixtures, as: Fixtures
-  alias MealPlannerApi.Persistence.{Catalog, Planning, Shopping}
-  alias MealPlannerApi.Persistence.Accounts.{Account, AccountMembership, User}
+  alias MealPlannerApi.Persistence.{Planning, Shopping}
+  alias MealPlannerApi.Persistence.Accounts.Account
   alias MealPlannerApi.Persistence.Inventory.{InventoryItem, InventoryMutationEvent}
   alias MealPlannerApi.Persistence.Shopping.{CheckoutSession, ShoppingItem}
   alias MealPlannerApi.Repo
@@ -117,17 +117,16 @@ defmodule MealPlannerApi.CartFixtures do
     do: Repo.all(from(i in ShoppingItem, where: i.account_id == ^f.account.id, order_by: i.id))
 
   def cleanup(f) do
+    MealPlannerApi.Issue38Database.database!()
+
+    # Remove mutable cart state for the migration round-trip, but retain the
+    # immutable recipe history and its UUID-scoped ownership roots.
     Repo.transaction(fn ->
       Repo.delete_all(from(e in InventoryMutationEvent, where: e.account_id == ^f.account.id))
       Repo.delete_all(from(i in InventoryItem, where: i.account_id == ^f.account.id))
       Repo.delete_all(from(i in ShoppingItem, where: i.account_id == ^f.account.id))
       Repo.delete_all(from(c in CheckoutSession, where: c.account_id == ^f.account.id))
       Repo.delete_all(from(m in Planning.ScheduledMeal, where: m.account_id == ^f.account.id))
-      Repo.delete_all(from(r in Catalog.Recipe, where: r.account_id == ^f.account.id))
-      Repo.delete_all(from(m in AccountMembership, where: m.account_id == ^f.account.id))
-      Repo.delete_all(from(u in User, where: u.id in ^[f.owner.id, f.member.id]))
-      Repo.delete_all(from(a in Account, where: a.id == ^f.account.id))
-      Repo.delete_all(from(i in Catalog.Ingredient, where: i.id == ^f.ingredient.id))
     end)
   end
 end

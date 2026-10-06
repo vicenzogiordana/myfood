@@ -9,7 +9,6 @@ defmodule MealPlannerApi.Persistence.Planning do
 
   alias MealPlannerApi.Persistence.Planning.{
     ContextSnapshot,
-    CookingChatMessage,
     CookingSession,
     CookingStepEvent,
     PlanningGenerationRun,
@@ -72,6 +71,7 @@ defmodule MealPlannerApi.Persistence.Planning do
     base_ids =
       from(r in Recipe,
         where: is_nil(r.account_id) or r.account_id == ^account_id,
+        where: is_nil(r.superseded_by_id),
         where: ^slot in r.suitable_for_slots,
         select: r.id
       )
@@ -99,8 +99,7 @@ defmodule MealPlannerApi.Persistence.Planning do
   def update_cooking_session(session, attrs),
     do: session |> CookingSession.changeset(attrs) |> Repo.update()
 
-  def add_cooking_message(attrs),
-    do: %CookingChatMessage{} |> CookingChatMessage.changeset(attrs) |> Repo.insert()
+  def add_cooking_message(_attrs), do: {:error, :ephemeral_chat_only}
 
   def add_step_event(attrs),
     do: %CookingStepEvent{} |> CookingStepEvent.changeset(attrs) |> Repo.insert()
@@ -125,7 +124,6 @@ defmodule MealPlannerApi.Persistence.Planning do
     from(s in CookingSession,
       where: s.id == ^session_id and s.account_id == ^account_id,
       preload: [
-        :chat_messages,
         :context_snapshots,
         scheduled_meal: [
           recipe: [

@@ -9,7 +9,7 @@ defmodule MealPlannerApi.Inventory do
   alias MealPlannerApi.Repo
   alias MealPlannerApi.Persistence.Inventory.InventoryItem
   alias MealPlannerApi.Persistence.Planning.ScheduledMeal
-  alias MealPlannerApi.Persistence.Catalog.RecipeIngredient
+  alias MealPlannerApi.Services.RecipeVersions
 
   @spec available_for(map(), map()) :: [map()]
   def available_for(user, params \\ %{}) when is_map(user) and is_map(params) do
@@ -70,21 +70,32 @@ defmodule MealPlannerApi.Inventory do
 
     query =
       from(m in ScheduledMeal,
-        join: ri in RecipeIngredient,
-        on: ri.recipe_id == m.recipe_id,
-        where: m.account_id == ^account_id and m.is_cooked == false and m.date > ^today,
-        group_by: [ri.ingredient_id, ri.unit],
-        select: {ri.ingredient_id, ri.unit, sum(ri.quantity_milli)}
+        where: m.account_id == ^account_id and m.is_cooked == false and m.date > ^today
       )
 
     query
     |> exclude_scheduled_meals_in_range(exclude_range)
     |> Repo.all()
-    |> Map.new(fn {ingredient_id, unit, quantity} -> {{ingredient_id, unit}, quantity || 0} end)
+    |> Enum.reduce(%{}, fn meal, acc ->
+      case RecipeVersions.recipe_for_meal(meal) do
+        %{recipe_ingredients: ingredients} ->
+          Enum.reduce(ingredients, acc, fn item, totals ->
+            Map.update(
+              totals,
+              {item.ingredient_id, item.unit},
+              item.quantity_milli,
+              &(&1 + item.quantity_milli)
+            )
+          end)
+
+        _ ->
+          acc
+      end
+    end)
   end
 
   defp exclude_scheduled_meals_in_range(query, {%Date{} = range_from, %Date{} = range_to}) do
-    where(query, [m, _ri], m.date < ^range_from or m.date > ^range_to)
+    where(query, [m], m.date < ^range_from or m.date > ^range_to)
   end
 
   defp exclude_scheduled_meals_in_range(query, _exclude_range), do: query

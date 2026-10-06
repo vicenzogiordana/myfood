@@ -114,6 +114,8 @@ defmodule MealPlannerApiWeb.CookingController do
   end
 
   defp error_status(:scheduled_meal_not_found), do: :not_found
+  defp error_status(:subscription_required), do: :forbidden
+  defp error_status(:session_closed), do: :conflict
   defp error_status(:session_not_found), do: :not_found
   defp error_status(:recipe_step_not_found), do: :not_found
   defp error_status(:inventory_mutation_failed), do: :unprocessable_entity

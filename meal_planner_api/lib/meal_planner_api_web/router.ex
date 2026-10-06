@@ -177,6 +177,7 @@ defmodule MealPlannerApiWeb.Router do
     pipe_through([:api, :auth, :enforce_capability])
 
     # User endpoints (auth required, capability required)
+    get("/recipes/:id", RecipeController, :show)
     get("/calendar", CalendarController, :index)
     get("/calendar/slot", CalendarController, :show_slot)
     put("/calendar/meals/range", CalendarController, :replace_range)

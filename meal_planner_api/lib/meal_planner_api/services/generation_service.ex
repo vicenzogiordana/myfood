@@ -251,8 +251,16 @@ defmodule MealPlannerApi.Services.GenerationService do
           []
 
         recipe_id ->
-          by_recipe
-          |> Map.get(recipe_id, [])
+          ingredients =
+            case Map.get(meal, :recipe_snapshot) do
+              snapshot when is_map(snapshot) ->
+                MealPlannerApi.Services.RecipeVersions.decode(snapshot).recipe_ingredients
+
+              _ ->
+                Map.get(by_recipe, recipe_id, [])
+            end
+
+          ingredients
           |> Enum.map(fn recipe_ingredient ->
             %{
               scheduled_meal_id: meal.id,

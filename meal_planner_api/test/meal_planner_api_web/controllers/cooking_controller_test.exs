@@ -22,6 +22,7 @@ defmodule MealPlannerApiWeb.CookingControllerTest do
         ])
 
       [membership_a, membership_b] = user.memberships
+      MealPlannerApiWeb.ChannelHelpers.persist_trial_window!(membership_a.account, :eligible)
 
       {:ok, recipe} =
         Catalog.create_recipe(%{
@@ -68,6 +69,11 @@ defmodule MealPlannerApiWeb.CookingControllerTest do
         account_id: "acct_cook",
         plan: :family_4
       })
+
+    MealPlannerApiWeb.ChannelHelpers.persist_trial_window!(
+      MealPlannerApi.Repo.get!(MealPlannerApi.Persistence.Accounts.Account, account_id),
+      :eligible
+    )
 
     {:ok, ingredient} =
       Catalog.upsert_ingredient_by_name(%{

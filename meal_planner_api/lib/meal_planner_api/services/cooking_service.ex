@@ -5,7 +5,7 @@ defmodule MealPlannerApi.Services.CookingService do
   Coordinates:
   - Session lifecycle (start, state, finish)
   - Step tracking with snapshot persistence
-  - Chat messages with contextual AI answers
+  - Ephemeral questions with contextual AI answers (no transcript storage)
   - Inventory deduction on session completion
 
   Stateless service — all DB via PlanningRepo and InventoryRepo.
@@ -13,7 +13,7 @@ defmodule MealPlannerApi.Services.CookingService do
 
   alias MealPlannerApi.AI
   alias MealPlannerApi.Data.{InventoryRepo, PlanningRepo}
-  alias MealPlannerApi.Persistence.Identity
+  alias MealPlannerApi.Services.{RecipeAccess, RecipeVersions}
   alias MealPlannerApi.Persistence.Planning
   alias MealPlannerApi.Repo
 
@@ -25,9 +25,10 @@ defmodule MealPlannerApi.Services.CookingService do
 
   @spec start_session(map(), binary()) :: {:ok, map()} | {:error, term()}
   def start_session(current_user, scheduled_meal_id) when is_binary(scheduled_meal_id) do
-    with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
+    with {:ok, ids} <- RecipeAccess.authorize(current_user),
          meal when not is_nil(meal) <-
            PlanningRepo.get_scheduled_meal_for_account(ids.account_id, scheduled_meal_id),
+         :ok <- planned_meal(meal, ids.account_id),
          {:ok, session} <- create_session(ids, meal) do
       snapshot = PlanningRepo.latest_context_snapshot(session.id)
       # Preload scheduled_meal on session for serialization
@@ -41,9 +42,10 @@ defmodule MealPlannerApi.Services.CookingService do
 
   @spec session_state(map(), binary()) :: {:ok, map()} | {:error, term()}
   def session_state(current_user, session_id) when is_binary(session_id) do
-    with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
+    with {:ok, ids} <- RecipeAccess.authorize(current_user),
          session when not is_nil(session) <-
-           PlanningRepo.get_cooking_session_for_account(ids.account_id, session_id) do
+           PlanningRepo.get_cooking_session_for_account(ids.account_id, session_id),
+         :ok <- planned_meal(session.scheduled_meal, ids.account_id) do
       snapshot = PlanningRepo.latest_context_snapshot(session.id)
       {:ok, serialize_session_payload(session, snapshot)}
     else
@@ -54,7 +56,7 @@ defmodule MealPlannerApi.Services.CookingService do
 
   @spec finish_session(map(), binary()) :: {:ok, map()} | {:error, term()}
   def finish_session(current_user, session_id) when is_binary(session_id) do
-    with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
+    with {:ok, ids} <- RecipeAccess.authorize(current_user),
          {:ok, result} <- persist_finish(ids, session_id) do
       {:ok,
        %{
@@ -78,9 +80,10 @@ defmodule MealPlannerApi.Services.CookingService do
   def track_step(current_user, session_id, recipe_step_id, status, extra \\ %{})
       when is_binary(session_id) and is_binary(recipe_step_id) and
              status in [:started, :paused, :completed, :error] do
-    with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
+    with {:ok, ids} <- RecipeAccess.authorize(current_user),
          session when not is_nil(session) <-
            PlanningRepo.get_cooking_session_for_account(ids.account_id, session_id),
+         :ok <- active_session(session),
          true <- belongs_to_recipe?(session, recipe_step_id),
          {:ok, event} <-
            PlanningRepo.add_step_event(%{
@@ -117,25 +120,18 @@ defmodule MealPlannerApi.Services.CookingService do
   @spec answer_question(map(), binary(), binary(), String.t()) :: {:ok, map()} | {:error, term()}
   def answer_question(current_user, session_id, message, content_type \\ "text")
       when is_binary(session_id) and is_binary(message) and is_binary(content_type) do
-    with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
+    with {:ok, ids} <- RecipeAccess.authorize(current_user),
          session when not is_nil(session) <-
            PlanningRepo.get_cooking_session_for_account(ids.account_id, session_id),
-         {:ok, _user_msg} <-
-           PlanningRepo.add_chat_message(%{
-             cooking_session_id: session.id,
-             user_id: ids.user_id,
-             role: :user,
-             content: message
-           }),
+         :ok <- active_session(session),
          current_snapshot <- PlanningRepo.latest_context_snapshot(session.id),
          assistant_text <-
            build_contextual_answer(session, current_snapshot, message, content_type),
-         {:ok, _assistant_msg} <-
-           PlanningRepo.add_chat_message(%{
-             cooking_session_id: session.id,
-             role: :assistant,
-             content: assistant_text
-           }) do
+         {:ok, _ids} <- RecipeAccess.authorize(current_user),
+         :ok <-
+           active_session(
+             PlanningRepo.get_cooking_session_for_account(ids.account_id, session_id)
+           ) do
       {:ok,
        %{
          session_id: session.id,
@@ -149,12 +145,25 @@ defmodule MealPlannerApi.Services.CookingService do
     end
   end
 
+  defp active_session(%{status: :active} = session),
+    do: planned_meal(session.scheduled_meal, session.account_id)
+
+  defp active_session(_), do: {:error, :session_closed}
+
+  defp planned_meal(
+         %{account_id: account_id, recipe_version_id: version_id, recipe_snapshot: snapshot},
+         account_id
+       )
+       when is_binary(version_id) and is_map(snapshot), do: :ok
+
+  defp planned_meal(_, _), do: {:error, :scheduled_meal_not_found}
+
   # -------------------------------------------------------------------------
   # Private helpers
   # -------------------------------------------------------------------------
 
   defp create_session(ids, meal) do
-    recipe = meal.recipe
+    recipe = RecipeVersions.recipe_for_meal(meal)
 
     first_step_id =
       recipe &&
@@ -221,6 +230,11 @@ defmodule MealPlannerApi.Services.CookingService do
           PlanningRepo.lock_cooking_meal_for_account(ids.account_id, session.scheduled_meal_id) ||
             Repo.rollback(:scheduled_meal_not_found)
 
+        case planned_meal(meal, ids.account_id) do
+          :ok -> :ok
+          {:error, reason} -> Repo.rollback(reason)
+        end
+
         count = if meal.is_cooked, do: 0, else: deduct_ingredients(ids, session, meal)
 
         with {:ok, _meal} <- PlanningRepo.update_scheduled_meal(meal, %{is_cooked: true}),
@@ -238,7 +252,8 @@ defmodule MealPlannerApi.Services.CookingService do
   end
 
   defp deduct_ingredients(ids, session, meal) do
-    ingredients = (meal.recipe && meal.recipe.recipe_ingredients) || []
+    recipe = RecipeVersions.recipe_for_meal(meal)
+    ingredients = (recipe && recipe.recipe_ingredients) || []
 
     # All cooking transactions acquire ingredient locks in the same order.
     # Nested inventory transactions share this transaction, including their audit writes.
@@ -266,11 +281,8 @@ defmodule MealPlannerApi.Services.CookingService do
   end
 
   defp belongs_to_recipe?(session, recipe_step_id) do
-    (session.scheduled_meal &&
-       session.scheduled_meal.recipe &&
-       session.scheduled_meal.recipe.recipe_steps &&
-       Enum.any?(session.scheduled_meal.recipe.recipe_steps, &(&1.id == recipe_step_id))) ||
-      false
+    recipe = RecipeVersions.recipe_for_meal(session.scheduled_meal)
+    recipe && Enum.any?(recipe.recipe_steps, &(&1.id == recipe_step_id))
   end
 
   defp build_snapshot_data(session, recipe_step_id, status, extra) do
@@ -290,7 +302,7 @@ defmodule MealPlannerApi.Services.CookingService do
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp build_contextual_answer(session, snapshot, question, content_type) do
-    recipe = session.scheduled_meal && session.scheduled_meal.recipe
+    recipe = session.scheduled_meal && RecipeVersions.recipe_for_meal(session.scheduled_meal)
 
     step_text =
       if recipe do
@@ -407,7 +419,7 @@ defmodule MealPlannerApi.Services.CookingService do
 
     recipe =
       scheduled_meal &&
-        case scheduled_meal.recipe do
+        case RecipeVersions.recipe_for_meal(scheduled_meal) do
           %Ecto.Association.NotLoaded{} -> nil
           r -> r
         end
@@ -415,6 +427,8 @@ defmodule MealPlannerApi.Services.CookingService do
     %{
       session_id: session.id,
       scheduled_meal_id: session.scheduled_meal_id,
+      recipe_version_id: scheduled_meal && scheduled_meal.recipe_version_id,
+      selected_quantity: scheduled_meal && scheduled_meal.selected_quantity,
       status: Atom.to_string(session.status),
       slot:
         (scheduled_meal &&
@@ -439,10 +453,7 @@ defmodule MealPlannerApi.Services.CookingService do
         (latest_snapshot && latest_snapshot.snapshot_data) ||
           session.context_snapshot ||
           %{},
-      chat_messages:
-        (session.chat_messages &&
-           not is_struct(session.chat_messages, Ecto.Association.NotLoaded) &&
-           Enum.map(session.chat_messages, &serialize_chat/1)) || []
+      chat_messages: []
     }
   end
 
@@ -474,14 +485,5 @@ defmodule MealPlannerApi.Services.CookingService do
         unit: Atom.to_string(item.unit)
       }
     end)
-  end
-
-  defp serialize_chat(msg) do
-    %{
-      id: msg.id,
-      role: Atom.to_string(msg.role),
-      content: msg.content,
-      inserted_at: msg.inserted_at
-    }
   end
 end

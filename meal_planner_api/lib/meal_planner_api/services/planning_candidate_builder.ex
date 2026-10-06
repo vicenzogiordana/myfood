@@ -7,7 +7,8 @@ defmodule MealPlannerApi.Services.PlanningCandidateBuilder do
   payload. Inventory is represented only as an objective signal.
   """
 
-  alias MealPlannerApi.Data.{PlanningRepo, RecipeRepo}
+  alias MealPlannerApi.Data.PlanningRepo
+  alias MealPlannerApi.Services.RecipeVersions
   alias MealPlannerApi.Services.InventoryService
 
   @type dated_slot :: %{required(:date) => Date.t(), required(:slot) => atom() | String.t()}
@@ -94,22 +95,22 @@ defmodule MealPlannerApi.Services.PlanningCandidateBuilder do
   end
 
   defp build_candidates_by_slot(recipes, inventory) do
-    costs = PlanningRepo.latest_recipe_costs(Enum.map(recipes, & &1.id))
-    ingredients_by_recipe = RecipeRepo.list_ingredients_for_recipes(Enum.map(recipes, & &1.id))
+    versions = Map.new(recipes, fn recipe -> {recipe.id, RecipeVersions.freeze(recipe.id)} end)
 
     recipes
     |> Enum.sort_by(&{&1.slot, &1.id, &1.name})
     |> Enum.group_by(& &1.slot, fn recipe ->
+      recipe = RecipeVersions.decode(versions[recipe.id].snapshot)
+
       %{
         "recipe_id" => recipe.id,
         "label" => recipe.name,
-        "estimated_cost_cents" => Map.get(costs, recipe.id, 0),
+        "estimated_cost_cents" => recipe.estimated_cost_cents,
         "protein_g_per_serving" => decimal_number(recipe.protein_g_per_serving),
         "carbs_g_per_serving" => decimal_number(recipe.carbs_g_per_serving),
         "fat_g_per_serving" => decimal_number(recipe.fat_g_per_serving),
         "calories_per_serving" => recipe.calories_per_serving || 0,
-        "inventory_hit_count" =>
-          inventory_hits(Map.get(ingredients_by_recipe, recipe.id, []), inventory)
+        "inventory_hit_count" => inventory_hits(recipe.recipe_ingredients, inventory)
       }
     end)
   end
@@ -126,4 +127,7 @@ defmodule MealPlannerApi.Services.PlanningCandidateBuilder do
   defp decimal_number(nil), do: 0
   defp decimal_number(%Decimal{} = value), do: Decimal.to_float(value)
   defp decimal_number(value) when is_number(value), do: value
+
+  defp decimal_number(value) when is_binary(value),
+    do: value |> Decimal.new() |> Decimal.to_float()
 end

@@ -12,6 +12,7 @@ defmodule MealPlannerApiWeb.CookingChannelTest do
 
   setup do
     {:ok, user, account, token} = issue_identity_and_token("u_cook_test", "acct_cook_test")
+    account = persist_trial_window!(account, :eligible)
     %{user: user, account: account, token: token}
   end
 
@@ -44,6 +45,63 @@ defmodule MealPlannerApiWeb.CookingChannelTest do
   # ==========================================================================
   # Join tests
   # ==========================================================================
+
+  test "an already joined channel denies commands after Account expiry", %{
+    account: account,
+    token: token
+  } do
+    {:ok, socket} = connect(UserSocket, %{"token" => token})
+    {:ok, _, socket} = subscribe_and_join(socket, CookingChannel, "cooking:#{account.id}:active")
+    persist_trial_window!(account, :expired)
+    ref = push(socket, "get_state", %{"session_id" => Ecto.UUID.generate()})
+    assert_reply ref, :error, %{reason: :subscription_required}
+    refute_push "assistant_reply", _
+  end
+
+  test "a delayed provider reply is not pushed after expiry", %{
+    account: account,
+    user: user,
+    token: token
+  } do
+    {:ok, recipe} =
+      Catalog.create_recipe(%{
+        account_id: account.id,
+        name: "Delayed soup",
+        source: :user_created
+      })
+
+    {:ok, meal} =
+      Planning.schedule_meal(%{
+        account_id: account.id,
+        recipe_id: recipe.id,
+        date: Date.utc_today(),
+        slot: :dinner
+      })
+
+    {:ok, session} = MealPlannerApi.Services.CookingService.start_session(user, meal.id)
+    previous = Application.get_env(:meal_planner_api, :ai_client)
+    Application.put_env(:meal_planner_api, :ai_client, MealPlannerApi.CookingBarrierClient)
+    Application.put_env(:meal_planner_api, :cooking_test_owner, self())
+
+    on_exit(fn ->
+      Application.put_env(:meal_planner_api, :ai_client, previous)
+      Application.delete_env(:meal_planner_api, :cooking_test_owner)
+    end)
+
+    {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+    {:ok, _, socket} =
+      subscribe_and_join(socket, CookingChannel, "cooking:#{account.id}:#{session.session_id}")
+
+    ref =
+      push(socket, "ask_assistant", %{"session_id" => session.session_id, "message" => "How hot?"})
+
+    assert_receive {:cooking_ai, worker, "How hot?", _opts}
+    persist_trial_window!(account, :expired)
+    send(worker, :answer)
+    assert_reply ref, :error, %{reason: :subscription_required}
+    refute_push "assistant_reply", _
+  end
 
   describe "join/3" do
     test "user joins cooking session room", %{account: account, user: user, token: token} do
@@ -174,7 +232,7 @@ defmodule MealPlannerApiWeb.CookingChannelTest do
       end
     end
 
-    test "disabled enforcement allows an expired Account to join (rollout safety, task 4.1)",
+    test "cooking rejects expired Accounts even when legacy rollout enforcement is disabled",
          %{account: account, token: token} do
       _ = persist_trial_window!(account, :expired)
 
@@ -186,7 +244,8 @@ defmodule MealPlannerApiWeb.CookingChannelTest do
 
         topic = "cooking:#{account.id}:rollout_disabled_session"
 
-        assert {:ok, _reply, _socket} = subscribe_and_join(socket, CookingChannel, topic)
+        assert {:error, %{reason: "subscription_required"}} =
+                 subscribe_and_join(socket, CookingChannel, topic)
       after
         Application.put_env(
           :meal_planner_api,
@@ -310,6 +369,7 @@ defmodule MealPlannerApiWeb.CookingChannelTest do
 
       membership_a = Enum.find(user.memberships, &(&1.account.name == "Cook Meal Cross A"))
       membership_b = Enum.find(user.memberships, &(&1.account.name == "Cook Meal Cross B"))
+      persist_trial_window!(membership_a.account, :eligible)
 
       {:ok, recipe} =
         Catalog.create_recipe(%{

@@ -8,6 +8,7 @@ defmodule MealPlannerApi.Persistence.Catalog.Recipe do
   @valid_slots MapSet.new(["breakfast", "lunch", "snack", "dinner"])
 
   schema "recipes" do
+    field(:superseded_by_id, :binary_id)
     field(:name, :string)
     field(:description, :string)
     field(:prep_time_minutes, :integer)
