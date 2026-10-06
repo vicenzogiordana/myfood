@@ -23,6 +23,43 @@ defmodule MealPlannerApi.Services.RecipeVersions do
     end
   end
 
+  @doc "Freezes unique recipe IDs with the publication lock, then batch-loads their versions."
+  def freeze_many(recipe_ids) when is_list(recipe_ids) do
+    uuids =
+      recipe_ids
+      |> Enum.flat_map(fn id ->
+        case Ecto.UUID.dump(id) do
+          {:ok, uuid} -> [uuid]
+          :error -> []
+        end
+      end)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    case uuids do
+      [] ->
+        %{}
+
+      _ ->
+        # Reuse the database publication boundary in stable lock order. Load in
+        # a separate statement so newly inserted versions are visible as well.
+        %{rows: rows} =
+          Repo.query!(
+            """
+            SELECT freeze_recipe_version(recipe_id)
+            FROM (SELECT unnest($1::uuid[]) AS recipe_id ORDER BY recipe_id) AS candidates
+            """,
+            [uuids]
+          )
+
+        version_ids = for [id] <- rows, not is_nil(id), do: Ecto.UUID.load!(id)
+
+        from(v in RecipeVersion, where: v.id in ^version_ids)
+        |> Repo.all()
+        |> Map.new(&{&1.recipe_id, &1})
+    end
+  end
+
   def correct(recipe_id, attrs) when is_map(attrs) do
     Repo.transaction(fn ->
       recipe =

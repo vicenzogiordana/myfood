@@ -95,7 +95,7 @@ defmodule MealPlannerApi.Services.PlanningCandidateBuilder do
   end
 
   defp build_candidates_by_slot(recipes, inventory) do
-    versions = Map.new(recipes, fn recipe -> {recipe.id, RecipeVersions.freeze(recipe.id)} end)
+    versions = recipes |> Enum.map(& &1.id) |> RecipeVersions.freeze_many()
 
     recipes
     |> Enum.sort_by(&{&1.slot, &1.id, &1.name})
