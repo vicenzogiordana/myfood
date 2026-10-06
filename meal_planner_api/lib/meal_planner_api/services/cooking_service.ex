@@ -15,6 +15,7 @@ defmodule MealPlannerApi.Services.CookingService do
   alias MealPlannerApi.Data.{InventoryRepo, PlanningRepo}
   alias MealPlannerApi.Persistence.Identity
   alias MealPlannerApi.Persistence.Planning
+  alias MealPlannerApi.Repo
 
   @type step_status :: :started | :paused | :completed | :error
 
@@ -54,13 +55,11 @@ defmodule MealPlannerApi.Services.CookingService do
   @spec finish_session(map(), binary()) :: {:ok, map()} | {:error, term()}
   def finish_session(current_user, session_id) when is_binary(session_id) do
     with {:ok, ids} <- Identity.ensure_persistent_identity(current_user),
-         session when not is_nil(session) <-
-           PlanningRepo.get_cooking_session_for_account(ids.account_id, session_id),
-         {:ok, result} <- persist_finish(ids, session) do
+         {:ok, result} <- persist_finish(ids, session_id) do
       {:ok,
        %{
-         session_id: session.id,
-         scheduled_meal_id: session.scheduled_meal_id,
+         session_id: result.session.id,
+         scheduled_meal_id: result.session.scheduled_meal_id,
          status: "completed",
          inventory_mutations: result.inventory_mutations
        }}
@@ -209,53 +208,61 @@ defmodule MealPlannerApi.Services.CookingService do
     end
   end
 
-  defp persist_finish(ids, session) do
-    recipe_ingredients =
-      (session.scheduled_meal &&
-         session.scheduled_meal.recipe &&
-         session.scheduled_meal.recipe.recipe_ingredients) ||
-        []
+  defp persist_finish(ids, session_id) do
+    Repo.transaction(fn ->
+      session =
+        PlanningRepo.lock_cooking_session_for_account(ids.account_id, session_id) ||
+          Repo.rollback(:session_not_found)
 
-    # Mark session and scheduled meal as completed
-    session_data =
-      PlanningRepo.get_cooking_session!(session.id)
+      if session.status == :completed do
+        %{session: session, inventory_mutations: 0}
+      else
+        meal =
+          PlanningRepo.lock_cooking_meal_for_account(ids.account_id, session.scheduled_meal_id) ||
+            Repo.rollback(:scheduled_meal_not_found)
 
-    # Update session status
-    session_data
-    |> Ecto.Changeset.change(%{status: :completed, completed_at: DateTime.utc_now()})
-    |> MealPlannerApi.Repo.update()
+        count = if meal.is_cooked, do: 0, else: deduct_ingredients(ids, session, meal)
 
-    # Update scheduled meal is_cooked flag
-    if session.scheduled_meal do
-      session.scheduled_meal
-      |> Ecto.Changeset.change(%{is_cooked: true})
-      |> MealPlannerApi.Repo.update()
-    end
+        with {:ok, _meal} <- PlanningRepo.update_scheduled_meal(meal, %{is_cooked: true}),
+             {:ok, completed} <-
+               PlanningRepo.update_cooking_session(session, %{
+                 status: :completed,
+                 completed_at: DateTime.utc_now()
+               }) do
+          %{session: completed, inventory_mutations: count}
+        else
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end
+    end)
+  end
 
-    # Apply inventory deductions for all recipe ingredients
-    mutation_results =
-      Enum.map(recipe_ingredients, fn ingredient ->
-        InventoryRepo.apply_delta(%{
-          account_id: ids.account_id,
-          ingredient_id: ingredient.ingredient_id,
-          unit: ingredient.unit,
-          source_kind: :planned,
-          delta: -ingredient.quantity_milli,
-          source_user_id: ids.user_id,
-          source_cooking_session_id: session.id,
-          trigger_type: :cooking,
-          operation: :subtract,
-          metadata: %{scheduled_meal_id: session.scheduled_meal_id}
-        })
-      end)
+  defp deduct_ingredients(ids, session, meal) do
+    ingredients = (meal.recipe && meal.recipe.recipe_ingredients) || []
 
-    success_count = Enum.count(mutation_results, &match?({:ok, _}, &1))
+    # All cooking transactions acquire ingredient locks in the same order.
+    # Nested inventory transactions share this transaction, including their audit writes.
+    ingredients
+    |> Enum.sort_by(&{&1.ingredient_id, &1.unit})
+    |> Enum.each(fn ingredient ->
+      case InventoryRepo.apply_delta(%{
+             account_id: ids.account_id,
+             ingredient_id: ingredient.ingredient_id,
+             unit: ingredient.unit,
+             source_kind: :planned,
+             delta: -ingredient.quantity_milli,
+             source_user_id: ids.user_id,
+             source_cooking_session_id: session.id,
+             trigger_type: :cooking,
+             operation: :subtract,
+             metadata: %{scheduled_meal_id: session.scheduled_meal_id}
+           }) do
+        {:ok, _result} -> :ok
+        {:error, _reason} -> Repo.rollback(:inventory_mutation_failed)
+      end
+    end)
 
-    if Enum.any?(mutation_results, &match?({:error, _}, &1)) do
-      {:error, :inventory_mutation_failed}
-    else
-      {:ok, %{inventory_mutations: success_count}}
-    end
+    length(ingredients)
   end
 
   defp belongs_to_recipe?(session, recipe_step_id) do

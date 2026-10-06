@@ -26,6 +26,9 @@ defmodule MealPlannerApiWeb.ShoppingController do
     ingredient_id = Map.get(payload, "ingredient_id")
 
     cond do
+      payload["in_cart"] == false ->
+        respond(conn, MealPlannerApi.Cart.remove(user, payload["session_id"], payload["items"]))
+
       is_list(item_ids) and length(item_ids) > 0 ->
         # Mark specific items by item_ids
         case ShoppingService.mark_in_cart(user, item_ids) do
@@ -83,6 +86,15 @@ defmodule MealPlannerApiWeb.ShoppingController do
     end
   end
 
+  def renew_cart(conn, %{"session_id" => id}),
+    do: respond(conn, MealPlannerApi.Cart.renew(scoped_user(conn), id))
+
+  def cancel_cart(conn, %{"session_id" => id}),
+    do: respond(conn, MealPlannerApi.Cart.cancel(scoped_user(conn), id))
+
+  defp respond(conn, {:ok, data}), do: json(conn, %{data: data})
+  defp respond(conn, {:error, reason}), do: render_error(conn, reason)
+
   def confirm_checkout(conn, payload) do
     user = scoped_user(conn)
 
@@ -102,10 +114,10 @@ defmodule MealPlannerApiWeb.ShoppingController do
         start_date = parse_date_param(payload["start_date"])
         end_date = parse_date_param(payload["end_date"])
 
-        case ShoppingService.create_checkout_from_range(user, start_date, end_date, checkout_type) do
-          {:ok, response} -> json(conn, %{data: response})
-          {:error, reason} -> render_error(conn, reason)
-        end
+        respond(
+          conn,
+          ShoppingService.create_checkout_from_range(user, start_date, end_date, checkout_type)
+        )
 
       true ->
         render_error(conn, :invalid_payload)

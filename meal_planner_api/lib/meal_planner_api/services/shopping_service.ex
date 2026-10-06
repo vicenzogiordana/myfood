@@ -9,7 +9,6 @@ defmodule MealPlannerApi.Services.ShoppingService do
   import Ecto.Query, warn: false
   alias MealPlannerApi.Data.ShoppingRepo
   alias MealPlannerApi.Data.RecipeRepo
-  alias MealPlannerApi.Data.InventoryRepo
   alias MealPlannerApi.Persistence.Identity
   alias MealPlannerApi.Persistence.Shopping
   alias MealPlannerApi.Repo
@@ -23,6 +22,7 @@ defmodule MealPlannerApi.Services.ShoppingService do
     case Identity.ensure_persistent_identity(user) do
       {:ok, identity} ->
         account_id = identity.account_id
+        {:ok, _} = MealPlannerApi.Cart.expire_account(account_id)
         from_date = parse_date(Map.get(params, "from_date"), Date.utc_today())
         end_date = parse_date(Map.get(params, "to_date"), Date.add(from_date, 6))
         include_archived = params |> Map.get("include_archived", "false") |> parse_bool_param()
@@ -45,27 +45,21 @@ defmodule MealPlannerApi.Services.ShoppingService do
             []
           end
 
-        # Get inventory with ingredient preloaded for lookup
-        inventory = InventoryRepo.list_inventory_with_ingredient(account_id)
-
         # Group items by ingredient_id, aggregating quantities and prices
         all_items = items ++ in_cart ++ archived
 
         grouped =
-          Enum.group_by(all_items, & &1.ingredient_id)
+          Enum.group_by(all_items, &{&1.ingredient_id, &1.unit})
           |> Enum.map(fn {_ingredient_id, grouped_items} ->
             first = hd(grouped_items)
 
             needed_qty =
               Enum.reduce(grouped_items, 0, fn i, acc -> acc + (i.quantity_milli || 0) end)
 
-            inv_item = Enum.find(inventory, &(&1.ingredient_id == first.ingredient_id))
-            inventory_qty = if inv_item, do: inv_item.quantity_milli || 0, else: 0
-            missing_qty = max(0, needed_qty - inventory_qty)
-
             serialize_shopping_item(first)
-            |> Map.put(:total_quantity_milli, missing_qty)
+            |> Map.put(:total_quantity_milli, needed_qty)
             |> Map.put(:item_count, length(grouped_items))
+            |> Map.put(:lines, Enum.map(grouped_items, &serialize_shopping_item/1))
           end)
 
         {:ok,
@@ -114,34 +108,40 @@ defmodule MealPlannerApi.Services.ShoppingService do
       from(m in MealPlannerApi.Persistence.Planning.ScheduledMeal,
         where: m.account_id == ^account_id,
         where: m.date >= ^from_date,
-        where: m.date <= ^to_date
+        where: m.date <= ^to_date,
+        where: m.is_cooked == false,
+        order_by: [asc: m.date, asc: m.id]
       )
       |> Repo.all()
       |> Repo.preload(recipe: :recipe_ingredients)
 
-    Enum.each(scheduled_meals, fn meal ->
-      Enum.each(meal.recipe.recipe_ingredients || [], fn ri ->
-        existing =
-          from(i in MealPlannerApi.Persistence.Shopping.ShoppingItem,
-            where: i.account_id == ^account_id,
-            where: i.ingredient_id == ^ri.ingredient_id,
-            where: i.scheduled_meal_id == ^meal.id,
-            where: i.planned_date == ^meal.date
-          )
-          |> Repo.one()
-
-        if is_nil(existing) do
-          Shopping.create_shopping_item(%{
-            account_id: account_id,
-            scheduled_meal_id: meal.id,
-            planned_date: meal.date,
-            ingredient_id: ri.ingredient_id,
-            quantity_milli: ri.quantity_milli,
-            unit: ri.unit,
-            status: :pending
-          })
-        end
+    pool =
+      MealPlannerApi.Services.InventoryService.list_for_account(account_id)
+      |> Enum.reduce(%{}, fn item, pool ->
+        Map.update(
+          pool,
+          {item.ingredient_id, item.unit},
+          item.quantity_milli,
+          &(&1 + item.quantity_milli)
+        )
       end)
+
+    MealPlannerApi.Services.ShoppingRebuilder.compute_net_shortages(scheduled_meals, pool)
+    |> Enum.each(fn line ->
+      existing =
+        from(i in MealPlannerApi.Persistence.Shopping.ShoppingItem,
+          where: i.account_id == ^account_id,
+          where: i.ingredient_id == ^line.ingredient_id and i.unit == ^line.unit,
+          where: i.scheduled_meal_id == ^line.scheduled_meal_id,
+          where: i.planned_date == ^line.planned_date
+        )
+        |> Repo.exists?()
+
+      if not existing do
+        Shopping.create_shopping_item(
+          Map.merge(line, %{account_id: account_id, status: :pending})
+        )
+      end
     end)
   rescue
     _ -> :ok
@@ -179,63 +179,27 @@ defmodule MealPlannerApi.Services.ShoppingService do
 
   @spec mark_in_cart(map(), [pos_integer()]) :: {:ok, map()} | {:error, term()}
   def mark_in_cart(user, item_ids) do
-    case Identity.ensure_persistent_identity(user) do
-      {:ok, _identity} ->
-        result =
-          from(i in MealPlannerApi.Persistence.Shopping.ShoppingItem,
-            where: i.id in ^item_ids
-          )
-          |> Repo.update_all(set: [status: :in_cart])
-
-        marked_count = elem(result, 0)
-        {:ok, %{status: "in_cart", updated_rows: marked_count}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  rescue
-    _ -> {:ok, %{status: "in_cart", updated_rows: 0}}
+    MealPlannerApi.Cart.reserve(user, item_ids)
   end
 
   @spec mark_ingredient_in_cart(map(), binary(), Date.t(), Date.t()) ::
           {:ok, map()} | {:error, term()}
   def mark_ingredient_in_cart(user, ingredient_id, from_date, end_date) do
-    case Identity.ensure_persistent_identity(user) do
-      {:ok, identity} ->
-        result =
-          from(i in MealPlannerApi.Persistence.Shopping.ShoppingItem,
-            where: i.account_id == ^identity.account_id,
-            where: i.ingredient_id == ^ingredient_id,
-            where: i.planned_date >= ^from_date,
-            where: i.planned_date <= ^end_date,
-            where: i.status == :pending
-          )
-          |> Repo.update_all(set: [status: :in_cart])
-
-        marked_count = elem(result, 0)
-        {:ok, %{status: "in_cart", updated_rows: marked_count}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  rescue
-    _ -> {:ok, %{status: "in_cart", updated_rows: 0}}
+    MealPlannerApi.Cart.reserve_ingredient(user, ingredient_id, from_date, end_date)
   end
 
   @spec assign_supermarket(map(), pos_integer(), pos_integer()) :: {:ok, map()} | {:error, term()}
   def assign_supermarket(user, item_id, supermarket_id) do
     case Identity.ensure_persistent_identity(user) do
-      {:ok, _identity} ->
-        item = ShoppingRepo.toggle_shopping_item_checked(item_id)
-
-        case item do
-          {:ok, updated_item} ->
-            case ShoppingRepo.update_shopping_item(updated_item, %{supermarket_id: supermarket_id}) do
+      {:ok, identity} ->
+        case Shopping.list_items_by_ids(identity.account_id, [item_id]) do
+          [item] ->
+            case Shopping.update_shopping_item(item, %{assigned_supermarket_id: supermarket_id}) do
               {:ok, final_item} -> {:ok, serialize_shopping_item(final_item)}
               {:error, reason} -> {:error, reason}
             end
 
-          {:error, _} ->
+          [] ->
             {:error, :item_not_found}
         end
 
@@ -316,155 +280,18 @@ defmodule MealPlannerApi.Services.ShoppingService do
 
   @spec confirm_checkout(map(), pos_integer(), map()) :: {:ok, map()} | {:error, term()}
   def confirm_checkout(user, session_id, payload) do
-    case Identity.ensure_persistent_identity(user) do
-      {:ok, identity} ->
-        session = ShoppingRepo.get_checkout_session_for_account(identity.account_id, session_id)
-
-        case session do
-          nil ->
-            {:error, :session_not_found}
-
-          _ ->
-            actual_total = Map.get(payload, "actual_total_cents", 0)
-
-            result =
-              Repo.transaction(fn ->
-                # Update session status
-                {:ok, updated} =
-                  ShoppingRepo.update_checkout_session(session, %{
-                    status: :completed,
-                    actual_total_cents: actual_total,
-                    completed_at: DateTime.utc_now(),
-                    delivered_at: DateTime.utc_now()
-                  })
-
-                # Get checked-out items via list_items_by_session
-                items =
-                  Shopping.list_items_by_session(identity.account_id, session_id)
-                  |> Enum.filter(fn item -> item.status == :checked_out end)
-
-                # Move items to inventory
-                moved_count = move_items_to_inventory(items)
-
-                # Attach moved_to_inventory_count to session struct
-                Map.put(updated, :moved_to_inventory_count, moved_count)
-              end)
-
-            case result do
-              {:ok, updated_session} ->
-                {:ok, serialize_checkout_session(updated_session)}
-
-              {:error, _} ->
-                {:error, :transaction_failed}
-            end
-        end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    MealPlannerApi.Cart.purchase(user, session_id, payload)
   end
 
   # Date-range based checkout: create session from items in range
   @spec create_checkout_from_range(map(), Date.t(), Date.t(), String.t()) ::
           {:ok, map()} | {:error, term()}
-  def create_checkout_from_range(user, start_date, end_date, checkout_type) do
-    with {:ok, identity} <- Identity.ensure_persistent_identity(user) do
-      # Get items in date range (start_date <= planned_date <= end_date)
-      items =
-        Shopping.list_items_for_account(identity.account_id)
-        |> Enum.filter(fn item ->
-          item.planned_date != nil and
-            Date.compare(item.planned_date, start_date) in [:gt, :eq] and
-            Date.compare(item.planned_date, end_date) in [:lt, :eq]
-        end)
-
-      if items == [], do: {:error, :no_items_in_range}
-
-      # Calculate estimated total
-      estimated_total =
-        items
-        |> Enum.reject(&is_nil(&1.estimated_price_cents))
-        |> Enum.reduce(0, fn item, acc -> acc + item.estimated_price_cents end)
-
-      # Create checkout session
-      checkout_type_atom = if checkout_type == "online", do: :online, else: :physical
-
-      {:ok, session} =
-        ShoppingRepo.create_checkout_session(%{
-          account_id: identity.account_id,
-          status: :completed,
-          checkout_type: checkout_type_atom,
-          total_cents: estimated_total,
-          confirmed_at: DateTime.utc_now(),
-          started_at: DateTime.utc_now()
-        })
-
-      # Mark items as checked out
-      Enum.each(items, fn item ->
-        ShoppingRepo.update_shopping_item(item, %{
-          status: :checked_out
-        })
-      end)
-
-      # Move to inventory
-      moved_count = move_items_to_inventory(items)
-
-      {:ok,
-       %{
-         checkout_session_id: session.id,
-         status: "completed",
-         checkout_type: checkout_type,
-         moved_to_inventory_count: moved_count,
-         item_count: length(items),
-         estimated_total_cents: estimated_total
-       }}
-    end
-  end
+  def create_checkout_from_range(_user, _start_date, _end_date, _checkout_type),
+    do: {:error, :reservation_required}
 
   @spec confirm_delivery(map(), pos_integer()) :: {:ok, map()} | {:error, term()}
   def confirm_delivery(user, checkout_session_id) do
-    with {:ok, identity} <- Identity.ensure_persistent_identity(user) do
-      session =
-        ShoppingRepo.get_checkout_session_for_account(identity.account_id, checkout_session_id)
-
-      case session do
-        nil ->
-          {:error, :session_not_found}
-
-        _ ->
-          # Get items that were checked out during the physical checkout
-          items =
-            Shopping.list_items_for_account(identity.account_id)
-            |> Enum.filter(fn item ->
-              item.status == :checked_out
-            end)
-
-          moved_count = move_items_to_inventory(items)
-
-          {:ok,
-           Map.merge(serialize_checkout_session(session), %{
-             moved_to_inventory_count: moved_count
-           })}
-      end
-    end
-  end
-
-  defp move_items_to_inventory([]), do: 0
-
-  defp move_items_to_inventory(items) do
-    Enum.reduce(items, 0, fn item, acc ->
-      case InventoryRepo.create_inventory_item(%{
-             account_id: item.account_id,
-             ingredient_id: item.ingredient_id,
-             quantity_milli: item.quantity_milli,
-             unit: item.unit,
-             source_kind: :planned,
-             last_mutation_at: DateTime.utc_now()
-           }) do
-        {:ok, _} -> acc + 1
-        {:error, _} -> acc
-      end
-    end)
+    MealPlannerApi.Cart.delivery(user, checkout_session_id)
   end
 
   # -------------------------------------------------------------------------
@@ -583,6 +410,10 @@ defmodule MealPlannerApi.Services.ShoppingService do
       quantity_milli: i.quantity_milli,
       unit: Atom.to_string(i.unit),
       status: Atom.to_string(i.status),
+      checkout_session_id: i.checkout_session_id,
+      reservation_token: i.reservation_token,
+      reserved_by_user_id: reservation_field(i, :reserved_by_user_id),
+      lease_expires_at: reservation_field(i, :lease_expires_at),
       estimated_price_cents: i.estimated_price_cents,
       supermarket_id: i.assigned_supermarket_id,
       supermarket_name: supermarket_map && supermarket_map.name,
@@ -590,19 +421,14 @@ defmodule MealPlannerApi.Services.ShoppingService do
     }
   end
 
-  defp serialize_checkout_session(s) do
-    %{
-      id: s.id,
-      status: Atom.to_string(s.status),
-      estimated_total_cents: s.total_cents || 0,
-      actual_total_cents: s.total_cents || 0,
-      started_at: iso_datetime(s.inserted_at),
-      completed_at: iso_datetime(s.confirmed_at),
-      delivered_at: iso_datetime(s.invalidated_at),
-      moved_to_inventory_count: Map.get(s, :moved_to_inventory_count, 0),
-      total_items: Map.get(s, :total_items, 0)
-    }
+  defp reservation_field(
+         %{status: :in_cart, checkout_session: %Shopping.CheckoutSession{} = cart},
+         field
+       ) do
+    Map.get(cart, field)
   end
+
+  defp reservation_field(_, _), do: nil
 
   defp serialize_supermarket(m) do
     %{
@@ -612,8 +438,4 @@ defmodule MealPlannerApi.Services.ShoppingService do
       is_preferred: m.is_preferred
     }
   end
-
-  defp iso_datetime(nil), do: nil
-  defp iso_datetime(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
-  defp iso_datetime(%Date{} = d), do: Date.to_iso8601(d)
 end

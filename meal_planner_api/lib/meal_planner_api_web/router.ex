@@ -195,6 +195,8 @@ defmodule MealPlannerApiWeb.Router do
 
     get("/shopping-list", ShoppingController, :index)
     post("/shopping-items/mark-cart", ShoppingController, :mark_cart)
+    post("/cart/:session_id/activity", ShoppingController, :renew_cart)
+    delete("/cart/:session_id", ShoppingController, :cancel_cart)
     post("/shopping-items/assign-supermarket", ShoppingController, :assign_supermarket)
     post("/checkout/confirm", ShoppingController, :confirm_checkout)
 

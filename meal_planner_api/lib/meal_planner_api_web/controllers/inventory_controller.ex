@@ -23,7 +23,7 @@ defmodule MealPlannerApiWeb.InventoryController do
     user = scoped_user(conn)
 
     case InventoryService.add_extra_item(user, payload) do
-      {:ok, payload} -> json(conn, %{data: payload})
+      {:ok, payload} -> inventory_changed(conn, payload)
       {:error, reason} -> render_error(conn, reason)
     end
   end
@@ -32,7 +32,7 @@ defmodule MealPlannerApiWeb.InventoryController do
     user = scoped_user(conn)
 
     case InventoryService.adjust_item_quantity(user, item_id, payload) do
-      {:ok, payload} -> json(conn, %{data: payload})
+      {:ok, payload} -> inventory_changed(conn, payload)
       {:error, reason} -> render_error(conn, reason)
     end
   end
@@ -41,7 +41,7 @@ defmodule MealPlannerApiWeb.InventoryController do
     user = scoped_user(conn)
 
     case InventoryService.dispose_item(user, item_id, payload) do
-      {:ok, payload} -> json(conn, %{data: payload})
+      {:ok, payload} -> inventory_changed(conn, payload)
       {:error, reason} -> render_error(conn, reason)
     end
   end
@@ -59,7 +59,7 @@ defmodule MealPlannerApiWeb.InventoryController do
     user = scoped_user(conn)
 
     case InventoryService.voice_apply(user, payload) do
-      {:ok, data} -> json(conn, %{data: data})
+      {:ok, data} -> inventory_changed(conn, data)
       {:error, reason} -> render_error(conn, reason)
     end
   end
@@ -78,6 +78,14 @@ defmodule MealPlannerApiWeb.InventoryController do
     conn
     |> Guardian.Plug.current_resource()
     |> AccountScopeHelpers.scope_user_to_membership(conn.assigns.current_membership)
+  end
+
+  defp inventory_changed(conn, data) do
+    MealPlannerApi.Cart.notify(conn.assigns.current_membership.account_id, "inventory_changed", %{
+      refresh: true
+    })
+
+    json(conn, %{data: data})
   end
 
   defp render_error(conn, reason) do

@@ -5,6 +5,7 @@ defmodule MealPlannerApi.Inventory do
 
   import Ecto.Query, warn: false
 
+  alias MealPlannerApi.Inventory.LotFreshness
   alias MealPlannerApi.Repo
   alias MealPlannerApi.Persistence.Inventory.InventoryItem
   alias MealPlannerApi.Persistence.Planning.ScheduledMeal
@@ -52,12 +53,16 @@ defmodule MealPlannerApi.Inventory do
   defp item_name(_), do: nil
 
   defp load_physical_inventory(account_id) do
+    today = Date.utc_today()
+
     from(i in InventoryItem,
       where: i.account_id == ^account_id and i.quantity_milli > 0,
       preload: [:ingredient],
-      order_by: [asc: i.ingredient_id]
+      order_by: [asc: i.ingredient_id, asc: i.inserted_at, asc: i.id]
     )
     |> Repo.all()
+    |> Enum.filter(&LotFreshness.usable?(&1, today))
+    |> Enum.sort_by(&{&1.ingredient_id, LotFreshness.fefo_sort_key(&1, today)})
   end
 
   defp load_reserved_future_quantities(account_id, exclude_range) do

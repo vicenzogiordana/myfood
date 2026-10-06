@@ -471,6 +471,8 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
       |> put_req_header("authorization", "Bearer " <> token)
       |> post("/api/checkout/confirm", %{
         "checkout_type" => "physical",
+        "session_id" => mark_body["data"]["session_id"],
+        "items" => Enum.map(mark_body["data"]["reservations"], &Map.put(&1, "total_cents", 5000)),
         "start_date" => Date.to_iso8601(start_date),
         "end_date" => Date.to_iso8601(end_date)
       })
@@ -565,11 +567,8 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
     body = json_response(list_conn, 200)
     items = body["data"]["items"]
 
-    assert length(items) == 1
-    grouped = hd(items)
-    assert grouped["ingredient_id"] == ingredient.id
     # 400g needed, 500g in inventory = no purchase needed (surplus)
-    assert grouped["total_quantity_milli"] == 0
+    assert items == []
   end
 
   test "past unpurchased rows are auto-pruned", %{conn: conn} do
@@ -642,7 +641,9 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
     assert Enum.any?(items, &(&1.status == :archived))
   end
 
-  test "online checkout waits for delivery before inventory mutation", %{conn: conn} do
+  test "online purchase confirmation adds inventory immediately under the approved contract", %{
+    conn: conn
+  } do
     token = issue_token(conn, %{"user_id" => "u_online", "account_id" => "acct_online"})
     start_date = Date.utc_today()
     end_date = Date.add(start_date, 6)
@@ -692,7 +693,7 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
         is_cooked: false
       })
 
-    {:ok, _item} =
+    {:ok, item} =
       Shopping.create_shopping_item(%{
         account_id: account_id,
         scheduled_meal_id: meal.id,
@@ -700,22 +701,31 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
         ingredient_id: ingredient.id,
         quantity_milli: 300,
         unit: :g,
-        status: :in_cart,
+        status: :pending,
         estimated_price_cents: 2000
       })
+
+    cart =
+      build_conn()
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> post("/api/shopping-items/mark-cart", %{"item_ids" => [item.id]})
+      |> json_response(200)
+      |> Map.fetch!("data")
 
     checkout_conn =
       build_conn()
       |> put_req_header("authorization", "Bearer " <> token)
       |> post("/api/checkout/confirm", %{
         "checkout_type" => "online",
+        "session_id" => cart["session_id"],
+        "items" => Enum.map(cart["reservations"], &Map.put(&1, "total_cents", 2000)),
         "start_date" => Date.to_iso8601(start_date),
         "end_date" => Date.to_iso8601(end_date)
       })
 
     checkout_body = json_response(checkout_conn, 200)
 
-    # Physical checkout is immediate - completes and moves to inventory
+    # Purchase confirmation is the only stock boundary, regardless of purchase mode.
     assert checkout_body["data"]["status"] == "completed"
     assert checkout_body["data"]["moved_to_inventory_count"] == 1
 

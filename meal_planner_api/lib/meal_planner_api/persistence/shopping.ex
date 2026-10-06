@@ -88,7 +88,7 @@ defmodule MealPlannerApi.Persistence.Shopping do
         i.account_id == ^account_id and i.status == :in_cart and i.planned_date >= ^from_date and
           i.planned_date <= ^to_date,
       order_by: [asc: i.planned_date],
-      preload: [:assigned_supermarket, :ingredient]
+      preload: [:assigned_supermarket, :ingredient, :checkout_session]
     )
     |> Repo.all()
   end
