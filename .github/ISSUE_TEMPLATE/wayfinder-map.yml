@@ -1,0 +1,45 @@
+name: Wayfinder map
+description: Chart a destination and the decisions needed to reach it.
+labels: ["wayfinder:map"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A map is an index, not a backlog or a store of decision details.
+        Keep open decisions as native child issues and use native blocking relationships.
+        Planning does not authorize production implementation or automatic human decisions.
+  - type: textarea
+    id: destination
+    attributes:
+      label: Destination
+      description: Describe in one or two lines what reaching the end of this map means.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: State the domain, skills to consult, standing preferences, and human participation requirements.
+    validations:
+      required: true
+  - type: textarea
+    id: decisions-so-far
+    attributes:
+      label: Decisions so far
+      description: Leave empty initially. Later, link each resolved child by title with a one-line gist; keep details in the child.
+    validations:
+      required: false
+  - type: textarea
+    id: not-yet-specified
+    attributes:
+      label: Not yet specified
+      description: Record in-scope questions not yet precise enough to ticket, not known questions that are merely blocked.
+    validations:
+      required: false
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: Identify work beyond the destination that must not graduate into this map's tickets.
+    validations:
+      required: false

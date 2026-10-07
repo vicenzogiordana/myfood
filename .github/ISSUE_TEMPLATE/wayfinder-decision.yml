@@ -1,0 +1,33 @@
+name: Wayfinder decision
+description: Frame one bounded question or prerequisite for a Wayfinder map.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Attach this issue as a native child of its map and use native blocking relationships.
+        Research gathers external evidence without human participation (AFK).
+        Prototypes and grilling require live human participation (HITL).
+        Tasks are prerequisites that unblock a decision, not implementation backlog items.
+        Record the answer in a resolution comment, not in the question.
+        Selecting a type does not apply a label. The matching wayfinder:<type> label
+        must be applied separately under the repository's workflow authorization policy.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: State one decision, investigation, or prerequisite that fits a single session, including its scope and evidence needed.
+    validations:
+      required: true
+  - type: dropdown
+    id: decision-type
+    attributes:
+      label: Decision type
+      description: Choose the work needed to resolve this question; no answer or approval is implied.
+      multiple: false
+      options:
+        - research
+        - prototype
+        - grilling
+        - task
+    validations:
+      required: true
