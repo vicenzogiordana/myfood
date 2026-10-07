@@ -6,3 +6,12 @@
 
 # Python bytecode cache
 __pycache__/
+
+# Local CodeGraph index
+.codegraph/
+
+# Local pi-lens tooling state
+.pi-lens/
+
+# Local convenience symlink to meal_planner_api/openspec
+/openspec
