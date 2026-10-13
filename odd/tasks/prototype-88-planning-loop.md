@@ -73,6 +73,12 @@ The prototype skill forbids tests for throwaway code and there is no pre-existin
 - Observed checks (writer report, 2026-10-13): `mix compile --warnings-as-errors` exit 0; `mix format --check-formatted` on prototype files exit 0; `mix prototype.planning_loop --scripted simple` exit 0 with a valid 21-meal plan at $151.90 of $160.00; `mix prototype.planning_loop --scripted allergen` exit 0 with the pinned `d_pad_thai` refused, a question to the human, then a valid plan at $137.20 of $170.00; live mode without a key exits 1 with a clear message and no network call.
 - Parent spot check: `mix prototype.planning_loop --scripted allergen` re-run, exit 0, same outcome.
 - Review assessment for `main..1be7eb6`: risk `medium`, `review_due` true (`slice_budget_reached`).
+- Native review of `main..f9a7ede` (lineage `review-fb7bf45cf39e7b99`): consent granted by the human, approved, acknowledged. Five advisory findings, none blocking.
+- Two advisory findings fixed at the human's request by the same writer: `f3edc18` reserves the worst-case cost in the ledger before each model call and settles it afterwards, so the ceiling can only over-count; `241ac71` adds `--scripted invalid` and makes the validator report malformed entries instead of raising.
+- Observed checks after the fixes (writer report): compile and format exit 0; `--scripted simple`, `--scripted allergen` and `--scripted invalid` exit 0; live mode without a key exits 1. `--scripted invalid` shows three rejected proposals (allergen, over budget, unfilled slot with a malformed entry) and the status line stays rejected after the model's false claim. Parent spot check: `--scripted invalid` re-run, exit 0, same outcome.
+- Offline demonstration of the reservation: an unsettled reservation is counted as spent by the next ceiling check, including from a second OS process.
+- Advisory findings left open: a raise inside the model call kills the chat instead of returning a stopped outcome; the optimizer bridge raises on unexpected protocol replies.
+- Writer decisions to keep in mind: a 4xx response releases its reservation because it is not billed; `PROTOTYPE_SPEND_LEDGER_PATH` can point the ledger at another file, which would bypass accumulated spend and is not documented in the README.
 - Not exercised: the live OpenAI path. No key was available and no spend was made.
 
 ## Findings so far
