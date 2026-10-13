@@ -58,11 +58,20 @@ Do not put it in a tracked file. Optional overrides:
 
 ## Spend ceiling
 
-Usage reported by the API is accumulated across all runs in
-`PROTOTYPE_WIPE_ME_spend_ledger.json` in this folder (git-ignored). Before each
-live call the client refuses to call when the ledger is at the ceiling, or when
-the worst case of the next call would cross it. Deleting the file resets the
-counter, so only delete it when the prototype is over.
+Spend is accumulated across all runs in `PROTOTYPE_WIPE_ME_spend_ledger.json`
+in this folder (git-ignored). The ledger may over-count but never under-count:
+
+- Before each live call, the worst-case cost of that call is written to the
+  file as a reservation. The call is refused when spend is at the ceiling or
+  when the reservation would cross it.
+- After a complete response, the reservation is replaced by the cost of the
+  usage the API reported. A 4xx rejection drops the reservation.
+- A call that times out, is killed, fails in transit, returns 5xx or dies with
+  the process keeps its reservation, which counts as spent from then on, also
+  in later runs. The spend line shows it as `reservas sin conciliar`.
+
+Deleting the file resets the counter, so only delete it when the prototype is
+over.
 
 ## What is real and what is fake
 

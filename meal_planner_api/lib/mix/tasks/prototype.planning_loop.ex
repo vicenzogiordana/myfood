@@ -51,15 +51,13 @@ defmodule Mix.Tasks.Prototype.PlanningLoop do
     end
 
     {:ok, _apps} = Application.ensure_all_started(:req)
-    ledger = SpendLedger.read()
+    spend = SpendLedger.summary()
 
     say(
       "#{@bold}Prototipo #88: bucle de planificación#{@reset} #{@dim}(descartable, datos ficticios)#{@reset}"
     )
 
-    say(
-      "Modelo: #{OpenAIModel.model_name()} · gasto acumulado: USD #{SpendLedger.fmt(ledger["usd"])} de USD #{SpendLedger.fmt(SpendLedger.cap_usd())}"
-    )
+    say("Modelo: #{OpenAIModel.model_name()} · gasto acumulado: #{spend_text(spend)}")
 
     household = pick_household()
     say("Escribí tu pedido. #{@dim}/salir para terminar.#{@reset}")
@@ -235,7 +233,7 @@ defmodule Mix.Tasks.Prototype.PlanningLoop do
   defp print_event({:usage, usage, spend}) do
     say(
       "#{@dim}  tokens: entrada #{usage.input_tokens} (en caché #{usage.cached_input_tokens}), salida #{usage.output_tokens} · " <>
-        "esta llamada USD #{SpendLedger.fmt(spend.call_usd)} · acumulado USD #{SpendLedger.fmt(spend.total_usd)} de USD #{SpendLedger.fmt(spend.cap_usd)}#{@reset}"
+        "esta llamada USD #{SpendLedger.fmt(spend.call_usd)} · acumulado #{spend_text(spend)}#{@reset}"
     )
   end
 
@@ -302,6 +300,19 @@ defmodule Mix.Tasks.Prototype.PlanningLoop do
 
       say("    #{@bold}#{day}#{@reset}  #{row}")
     end
+  end
+
+  # Unreconciled reservations are worst-case amounts of calls that never
+  # reported usage; they count as spent.
+  defp spend_text(spend) do
+    reserved =
+      if spend.reserved_usd > 0 do
+        " (incluye USD #{SpendLedger.fmt(spend.reserved_usd)} de reservas sin conciliar)"
+      else
+        ""
+      end
+
+    "USD #{SpendLedger.fmt(spend.total_usd)} de USD #{SpendLedger.fmt(spend.cap_usd)}#{reserved}"
   end
 
   defp money(cents), do: "$#{:erlang.float_to_binary(cents / 100, decimals: 2)}"

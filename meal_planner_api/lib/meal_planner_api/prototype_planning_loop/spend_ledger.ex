@@ -1,8 +1,15 @@
 # Throwaway prototype for issue #88 (bounded planning loop). Not production code.
 defmodule MealPlannerApi.PrototypePlanningLoop.SpendLedger do
   @moduledoc """
-  Accumulates API-reported usage across all runs in a local throwaway JSON
-  file next to this module, and enforces the spend ceiling.
+  Accumulates API spend across all runs in a local throwaway JSON file next to
+  this module, and enforces the spend ceiling.
+
+  The ledger may over-count but never under-count. Before a live call its
+  worst-case cost is written as a reservation (`reserve/1`); after a complete
+  response the reservation is replaced by the cost of the reported usage
+  (`settle/2`). A call that is killed, times out or dies with its process never
+  settles, so its reservation stays in the file and counts as spent, in this
+  run and in every later one.
   """
 
   @file_name "PROTOTYPE_WIPE_ME_spend_ledger.json"
@@ -13,7 +20,17 @@ defmodule MealPlannerApi.PrototypePlanningLoop.SpendLedger do
   @cached_input_usd 0.10
   @output_usd 10.0
 
-  def path, do: Path.join(__DIR__, @file_name)
+  @empty %{
+    "calls" => 0,
+    "input_tokens" => 0,
+    "cached_input_tokens" => 0,
+    "output_tokens" => 0,
+    "usd" => 0.0,
+    "reserved_usd" => 0.0
+  }
+
+  @doc "Ledger file. `PROTOTYPE_SPEND_LEDGER_PATH` points it elsewhere for offline checks."
+  def path, do: System.get_env("PROTOTYPE_SPEND_LEDGER_PATH") || Path.join(__DIR__, @file_name)
 
   @doc "Ceiling in USD. `PROTOTYPE_SPEND_CAP_USD` may only lower it."
   def cap_usd do
@@ -26,20 +43,12 @@ defmodule MealPlannerApi.PrototypePlanningLoop.SpendLedger do
   end
 
   def read do
-    empty = %{
-      "calls" => 0,
-      "input_tokens" => 0,
-      "cached_input_tokens" => 0,
-      "output_tokens" => 0,
-      "usd" => 0.0
-    }
-
     with {:ok, body} <- File.read(path()),
          {:ok, %{} = ledger} <- Jason.decode(body) do
-      Map.merge(empty, ledger)
+      Map.merge(@empty, ledger)
     else
       {:error, :enoent} ->
-        empty
+        @empty
 
       # An unreadable ledger must not look like zero spend.
       other ->
@@ -47,27 +56,72 @@ defmodule MealPlannerApi.PrototypePlanningLoop.SpendLedger do
     end
   end
 
+  @doc "Spend that counts against the ceiling: settled cost plus open reservations."
+  def spent_usd(ledger \\ read()), do: ledger["usd"] + ledger["reserved_usd"]
+
   @doc """
-  `:ok` when a call whose worst case costs `worst_case_usd` still fits under
-  the ceiling, otherwise `{:error, message}`. Being at or over the ceiling
-  always refuses.
+  Reserves `worst_case_usd` for one call and persists it before the call is
+  made. Refuses with `{:error, message}` when spend is at or over the ceiling,
+  or when this call's worst case would cross it.
   """
-  def check(worst_case_usd) do
-    spent = read()["usd"]
+  def reserve(worst_case_usd) do
+    ledger = read()
+    spent = spent_usd(ledger)
     cap = cap_usd()
 
     cond do
       spent >= cap ->
         {:error,
-         "spend ceiling reached: USD #{fmt(spent)} spent of USD #{fmt(cap)}; no further model calls"}
+         "spend ceiling reached: USD #{fmt(spent)} spent of USD #{fmt(cap)}#{unreconciled_note(ledger)}; no further model calls"}
 
       spent + worst_case_usd > cap ->
         {:error,
-         "spend ceiling would be exceeded: USD #{fmt(spent)} spent, next call could cost up to USD #{fmt(worst_case_usd)}, ceiling USD #{fmt(cap)}; no further model calls"}
+         "spend ceiling would be exceeded: USD #{fmt(spent)} spent#{unreconciled_note(ledger)}, next call could cost up to USD #{fmt(worst_case_usd)}, ceiling USD #{fmt(cap)}; no further model calls"}
 
       true ->
+        write(%{ledger | "reserved_usd" => ledger["reserved_usd"] + worst_case_usd})
         :ok
     end
+  end
+
+  @doc """
+  Replaces a reservation with the actual cost of `usage` and returns the spend
+  summary. Only called after a complete response with reported usage.
+  """
+  def settle(worst_case_usd, usage) do
+    ledger = read()
+
+    summary(
+      write(%{
+        "calls" => ledger["calls"] + 1,
+        "input_tokens" => ledger["input_tokens"] + usage.input_tokens,
+        "cached_input_tokens" => ledger["cached_input_tokens"] + usage.cached_input_tokens,
+        "output_tokens" => ledger["output_tokens"] + usage.output_tokens,
+        "usd" => ledger["usd"] + cost_usd(usage),
+        "reserved_usd" => max(ledger["reserved_usd"] - worst_case_usd, 0.0)
+      }),
+      cost_usd(usage)
+    )
+  end
+
+  @doc """
+  Drops a reservation without recording cost. Only for a call the provider
+  provably did not process (it answered with a 4xx rejection).
+  """
+  def release(worst_case_usd) do
+    ledger = read()
+    write(%{ledger | "reserved_usd" => max(ledger["reserved_usd"] - worst_case_usd, 0.0)})
+    :ok
+  end
+
+  def summary(ledger \\ read(), call_usd \\ 0.0) do
+    %{
+      call_usd: call_usd,
+      total_usd: spent_usd(ledger),
+      reserved_usd: ledger["reserved_usd"],
+      cap_usd: cap_usd(),
+      calls: ledger["calls"]
+    }
   end
 
   def cost_usd(usage) do
@@ -82,27 +136,16 @@ defmodule MealPlannerApi.PrototypePlanningLoop.SpendLedger do
     (input_tokens * @input_usd + max_output_tokens * @output_usd) / 1_000_000
   end
 
-  @doc "Adds one call's usage to the file and returns the spend summary."
-  def record(usage) do
-    ledger = read()
+  def fmt(usd), do: :erlang.float_to_binary(usd * 1.0, decimals: 4)
 
-    updated = %{
-      "calls" => ledger["calls"] + 1,
-      "input_tokens" => ledger["input_tokens"] + usage.input_tokens,
-      "cached_input_tokens" => ledger["cached_input_tokens"] + usage.cached_input_tokens,
-      "output_tokens" => ledger["output_tokens"] + usage.output_tokens,
-      "usd" => ledger["usd"] + cost_usd(usage)
-    }
-
-    File.write!(path(), Jason.encode!(updated, pretty: true))
-
-    %{
-      call_usd: cost_usd(usage),
-      total_usd: updated["usd"],
-      cap_usd: cap_usd(),
-      calls: updated["calls"]
-    }
+  defp unreconciled_note(%{"reserved_usd" => reserved}) when reserved > 0 do
+    " (including USD #{fmt(reserved)} of unreconciled reservations)"
   end
 
-  def fmt(usd), do: :erlang.float_to_binary(usd * 1.0, decimals: 4)
+  defp unreconciled_note(_ledger), do: ""
+
+  defp write(ledger) do
+    File.write!(path(), Jason.encode!(ledger, pretty: true))
+    ledger
+  end
 end
