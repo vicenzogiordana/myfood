@@ -52,14 +52,14 @@ The prototype skill forbids tests for throwaway code and there is no pre-existin
 
 ## Delivery strategy
 
-`exception-ok`. The branch is disposable and no pull request is opened, so the 400-line delivery budget does not slice it. Forecast: about 600 authored lines.
+`exception-ok`. The branch is disposable and no pull request is opened, so the 400-line delivery budget does not slice it. Forecast: about 600 authored lines. Actual after T1 and T2: 1586 added lines across 13 files.
 
 ## Tasks
 
-- [ ] **T1 Engine.** Fictitious fixtures, tool set (recipe lookup, price lookup, optimizer call, proposal validation, ask-the-human), OpenAI Responses client, bounded loop, persistent spend ledger with the USD 5 ceiling, scripted-model dry run.
+- [x] **T1 Engine.** Fictitious fixtures, tool set (recipe lookup, price lookup, optimizer call, proposal validation, ask-the-human), OpenAI Responses client, bounded loop, persistent spend ledger with the USD 5 ceiling, scripted-model dry run.
   - Route: delegated direct (writer trigger: more than two non-trivial files; preparation trigger: reading the optimizer seam).
   - Checks: `mix compile --warnings-as-errors`; `mix format --check-formatted` on prototype files; scripted dry runs for both cases exit 0 and print a validated plan (case 1) and a conflict question (case 2).
-- [ ] **T2 Terminal chat.** One mix task that starts the chat, lets the human pick a household, shows each step live (tool called, optimizer result, validation verdict, spend so far) and a README with the run command and the question being answered.
+- [x] **T2 Terminal chat.** One mix task that starts the chat, lets the human pick a household, shows each step live (tool called, optimizer result, validation verdict, spend so far) and a README with the run command and the question being answered.
   - Route: delegated direct, same writer as T1.
   - Checks: the mix task starts in scripted mode without a key; without a key in live mode it exits with a clear message and no network call.
 - [ ] **T3 Live trial.** The human sets the key and runs both cases against `gpt-6.1-sol`. Record observations, spend, and the human's reaction.
@@ -69,8 +69,24 @@ The prototype skill forbids tests for throwaway code and there is no pre-existin
 
 ## Progress
 
-Nothing implemented yet.
+- T1 done in commit `004ad08`, T2 done in commit `1be7eb6`, both by one delegated writer.
+- Observed checks (writer report, 2026-10-13): `mix compile --warnings-as-errors` exit 0; `mix format --check-formatted` on prototype files exit 0; `mix prototype.planning_loop --scripted simple` exit 0 with a valid 21-meal plan at $151.90 of $160.00; `mix prototype.planning_loop --scripted allergen` exit 0 with the pinned `d_pad_thai` refused, a question to the human, then a valid plan at $137.20 of $170.00; live mode without a key exits 1 with a clear message and no network call.
+- Parent spot check: `mix prototype.planning_loop --scripted allergen` re-run, exit 0, same outcome.
+- Review assessment for `main..1be7eb6`: risk `medium`, `review_due` true (`slice_budget_reached`).
+- Not exercised: the live OpenAI path. No key was available and no spend was made.
+
+## Findings so far
+
+- The solver interpreter is the repository-root `.venv/bin/python` (ortools 9.15); the backend default `python3` has no ortools.
+- `OptimizerPortRunner.open_port/1` runs the solver from a mix task without the Repo. `OptimizerServer` was not reused: it is a named singleton that falls back silently to a non-solver when its circuit opens.
+- `optimizador.py` has no variety constraint and cannot pin a meal to a day, so every day of a plan is identical and pins are applied after solving.
+- A scripted model reply claimed a plan was validated right after a rejection, so the chat shows a code-owned status line under every reply.
+- Allergen recipes are removed from candidates and allergen pins are refused inside `run_optimizer`, so the model may learn of the conflict from the tool rather than detect it itself.
+
+## Unconfirmed assumptions in the live path
+
+The shape of the Responses API `usage` object, `max_output_tokens` as a request field, the top-level response `status`, and `strict: true` schemas with nullable enums for `gpt-6.1-sol`. A wrong assumption shows as an HTTP 400 on the first live call or as zero tokens in the ledger.
 
 ## Next step
 
-T1 and T2 through one bounded writer.
+T3: the human sets `OPENAI_API_KEY` locally and runs `mix prototype.planning_loop` from `meal_planner_api/`.
