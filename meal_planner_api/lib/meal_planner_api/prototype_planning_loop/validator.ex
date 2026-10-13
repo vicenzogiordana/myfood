@@ -10,10 +10,16 @@ defmodule MealPlannerApi.PrototypePlanningLoop.Validator do
   alias MealPlannerApi.PrototypePlanningLoop.Fixtures
 
   @doc """
-  `meals` is a list of maps with string keys `"day"`, `"slot"`, `"recipe_id"`.
+  Each meal is expected to be a map with string keys `"day"`, `"slot"`, `"recipe_id"`.
+  The returned `meals` holds only the well-formed entries.
   Returns a verdict map; `valid` is the only field that grants validity.
   """
-  def validate(household, meals) when is_list(meals) do
+  def validate(household, entries) when is_list(entries) do
+    # `entries` is model-supplied: anything that is not a map is a violation,
+    # never a crash, and never counts towards filling a slot.
+    {meals, malformed} = Enum.split_with(entries, &is_map/1)
+    malformed = Enum.map(malformed, &%{rule: "malformed_meal", entry: inspect(&1, limit: 5)})
+
     expected = for day <- Fixtures.days(), slot <- Fixtures.slots(), do: {day, slot}
     cells = Enum.frequencies_by(meals, &{&1["day"], &1["slot"]})
 
@@ -44,7 +50,7 @@ defmodule MealPlannerApi.PrototypePlanningLoop.Validator do
         []
       end
 
-    violations = coverage ++ per_meal ++ budget
+    violations = malformed ++ coverage ++ per_meal ++ budget
 
     %{
       valid: violations == [],

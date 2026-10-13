@@ -35,9 +35,15 @@ No network, no spend (scripted model, real solver and validator):
 ```sh
 mix prototype.planning_loop --scripted simple
 mix prototype.planning_loop --scripted allergen
+mix prototype.planning_loop --scripted invalid
 ```
 
-Both exit 0 on the expected outcome and non-zero otherwise.
+All three exit 0 on the expected outcome and non-zero otherwise. `invalid`
+proves the check outside the model: the scripted model skips the optimizer,
+submits three bad plans for Casa Boreal (a member's allergen, over budget, an
+unfilled slot plus a malformed entry) and then claims the plan is valid. Each
+must be rejected by the validator with the right cause, and the status line
+must contradict the claim.
 
 ## Setting the key
 

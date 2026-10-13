@@ -151,34 +151,37 @@ defmodule MealPlannerApi.PrototypePlanningLoop.Tools do
   # A pin is refused before the solver runs when it is malformed or carries an
   # allergen of a member. The model is expected to take this to the human.
   defp pin_problems(household, pinned) do
-    Enum.flat_map(pinned, fn pin ->
-      recipe = Fixtures.recipe(pin["recipe_id"])
-
-      cond do
-        is_nil(recipe) ->
-          [%{problem: "unknown_recipe", recipe_id: pin["recipe_id"]}]
-
-        recipe.slot != pin["slot"] or pin["day"] not in Fixtures.days() ->
-          [
-            %{
-              problem: "recipe_not_for_day_or_slot",
-              recipe_id: recipe.id,
-              recipe_slot: recipe.slot
-            }
-          ]
-
-        true ->
-          for conflict <- Fixtures.allergen_conflicts(household, recipe) do
-            %{
-              problem: "allergen",
-              recipe_id: recipe.id,
-              recipe_name: recipe.name,
-              member: conflict.member,
-              allergen: conflict.allergen
-            }
-          end
-      end
+    Enum.flat_map(pinned, fn
+      pin when is_map(pin) -> pin_problems_for(household, pin, Fixtures.recipe(pin["recipe_id"]))
+      other -> [%{problem: "malformed_pin", entry: inspect(other, limit: 5)}]
     end)
+  end
+
+  defp pin_problems_for(household, pin, recipe) do
+    cond do
+      is_nil(recipe) ->
+        [%{problem: "unknown_recipe", recipe_id: pin["recipe_id"]}]
+
+      recipe.slot != pin["slot"] or pin["day"] not in Fixtures.days() ->
+        [
+          %{
+            problem: "recipe_not_for_day_or_slot",
+            recipe_id: recipe.id,
+            recipe_slot: recipe.slot
+          }
+        ]
+
+      true ->
+        for conflict <- Fixtures.allergen_conflicts(household, recipe) do
+          %{
+            problem: "allergen",
+            recipe_id: recipe.id,
+            recipe_name: recipe.name,
+            member: conflict.member,
+            allergen: conflict.allergen
+          }
+        end
+    end
   end
 
   defp solve(household, pinned, excluded) do

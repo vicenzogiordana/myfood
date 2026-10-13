@@ -9,6 +9,7 @@ defmodule Mix.Tasks.Prototype.PlanningLoop do
       mix prototype.planning_loop                      # live, needs OPENAI_API_KEY
       mix prototype.planning_loop --scripted simple    # no network, no spend
       mix prototype.planning_loop --scripted allergen  # no network, no spend
+      mix prototype.planning_loop --scripted invalid   # no network, no spend
 
   See `lib/meal_planner_api/prototype_planning_loop/README.md`.
   """
@@ -35,8 +36,8 @@ defmodule Mix.Tasks.Prototype.PlanningLoop do
 
     case opts[:scripted] do
       nil -> live()
-      scripted when scripted in ["simple", "allergen"] -> scripted(scripted)
-      other -> fail("Caso desconocido: #{other}. Usá --scripted simple o --scripted allergen.")
+      scripted when scripted in ["simple", "allergen", "invalid"] -> scripted(scripted)
+      other -> fail("Caso desconocido: #{other}. Usá --scripted simple, allergen o invalid.")
     end
   end
 
@@ -124,6 +125,7 @@ defmodule Mix.Tasks.Prototype.PlanningLoop do
 
   defp scripted(name) do
     household_id = if name == "simple", do: "aurora", else: "boreal"
+    # A leftover ledger override must not matter here: scripted runs never spend.
 
     say(
       "#{@bold}Caso guionado: #{name}#{@reset} #{@dim}(modelo guionado, sin red ni gasto; hogar #{household_id})#{@reset}"
@@ -138,7 +140,7 @@ defmodule Mix.Tasks.Prototype.PlanningLoop do
 
     session = Loop.new(household_id, {ScriptedModel, ScriptedModel.new(name)}, on_event)
 
-    {outcomes, _session} =
+    {outcomes, session} =
       Enum.map_reduce(ScriptedModel.human_lines(name), session, fn line, session ->
         say("\n#{@bold}vos>#{@reset} #{line}")
         {outcome, session} = Loop.run(session, line)
@@ -146,7 +148,7 @@ defmodule Mix.Tasks.Prototype.PlanningLoop do
         {outcome, session}
       end)
 
-    case check(name, outcomes, drain_events()) do
+    case check(name, outcomes, drain_events(), session) do
       :ok -> say("\n#{@bold}RESULTADO ESPERADO: OK#{@reset}")
       {:error, reason} -> fail("\nRESULTADO INESPERADO: #{reason}")
     end
@@ -160,7 +162,7 @@ defmodule Mix.Tasks.Prototype.PlanningLoop do
     end
   end
 
-  defp check("simple", outcomes, events) do
+  defp check("simple", outcomes, events, _session) do
     cond do
       not match?([{:reply, _}], outcomes) -> {:error, "the turn did not end in a reply"}
       not valid_full_plan?(events) -> {:error, "no validated 7-day plan"}
@@ -168,7 +170,7 @@ defmodule Mix.Tasks.Prototype.PlanningLoop do
     end
   end
 
-  defp check("allergen", outcomes, events) do
+  defp check("allergen", outcomes, events, _session) do
     # Every plan the tools produced or the model proposed, valid or not.
     planned = Enum.flat_map(events, &plan_meals/1)
 
@@ -181,6 +183,44 @@ defmodule Mix.Tasks.Prototype.PlanningLoop do
 
       not valid_full_plan?(events) ->
         {:error, "no validated 7-day plan after the answer"}
+
+      true ->
+        :ok
+    end
+  end
+
+  # The scripted model submits three bad plans and then claims a valid one.
+  # Expected: three INVALID verdicts naming the right cause, nothing shown as
+  # valid, and the code-owned status line contradicting the model's claim.
+  defp check("invalid", outcomes, events, session) do
+    verdicts = for {:validation, verdict} <- events, do: verdict
+
+    rules =
+      Enum.map(verdicts, fn verdict ->
+        verdict.violations |> Enum.map(& &1.rule) |> Enum.uniq()
+      end)
+
+    cond do
+      Enum.any?(verdicts, & &1.valid) ->
+        {:error, "a bad plan was shown as valid"}
+
+      not match?([["allergen"], ["over_budget"], _], rules) ->
+        {:error, "wrong causes for the allergen or over-budget plan: #{inspect(rules)}"}
+
+      Enum.sort(Enum.at(rules, 2)) != ["malformed_meal", "slot_unfilled"] ->
+        {:error, "wrong causes for the unfilled plan: #{inspect(rules)}"}
+
+      not match?(
+        [%{recipe_id: "d_pad_thai", member: "Bruno", allergen: "peanut"}],
+        verdicts |> Enum.at(0) |> Map.fetch!(:violations)
+      ) ->
+        {:error, "the allergen verdict does not name the recipe and member"}
+
+      not match?([{:reply, _claim}], outcomes) ->
+        {:error, "the turn did not end in the model's claim"}
+
+      status_text(session) != status_text(%{latest_verdict: %{valid: false}}) ->
+        {:error, "the status line does not say the last proposal was rejected"}
 
       true ->
         :ok
@@ -211,14 +251,15 @@ defmodule Mix.Tasks.Prototype.PlanningLoop do
       {:stopped, reason} -> say("\n#{@bold}DETENIDO:#{@reset} #{reason}")
     end
 
-    status =
-      case session.latest_verdict do
-        nil -> "todavía no hay ninguna propuesta"
-        %{valid: true} -> "la última propuesta es VÁLIDA"
-        %{valid: false} -> "la última propuesta fue RECHAZADA; no hay plan válido vigente"
-      end
+    say("#{@dim}[estado según el código] #{status_text(session)}#{@reset}")
+  end
 
-    say("#{@dim}[estado según el código] #{status}#{@reset}")
+  defp status_text(session) do
+    case session.latest_verdict do
+      nil -> "todavía no hay ninguna propuesta"
+      %{valid: true} -> "la última propuesta es VÁLIDA"
+      %{valid: false} -> "la última propuesta fue RECHAZADA; no hay plan válido vigente"
+    end
   end
 
   defp print_event({:model_turn, n, %{text: text, tool_calls: count}}) do
@@ -239,7 +280,7 @@ defmodule Mix.Tasks.Prototype.PlanningLoop do
 
   defp print_event({:tool_call, "present_proposal", arguments}) do
     say(
-      "  #{@bold}herramienta#{@reset} present_proposal con #{length(List.wrap(arguments["meals"]))} comidas"
+      "  #{@bold}herramienta#{@reset} present_proposal con #{length(List.wrap(arguments["meals"]))} entradas"
     )
   end
 

@@ -1,13 +1,15 @@
 # Throwaway prototype for issue #88 (bounded planning loop). Not production code.
 defmodule MealPlannerApi.PrototypePlanningLoop.ScriptedModel do
   @moduledoc """
-  Replays a fixed sequence of tool calls for the two prototype cases, so the
+  Replays a fixed sequence of tool calls for each scripted prototype case, so the
   loop, tools, real optimizer and validator run with no network and no spend.
   State is the list of remaining steps; each step builds its output items from
   the input it receives.
   """
 
   @behaviour MealPlannerApi.PrototypePlanningLoop.Model
+
+  alias MealPlannerApi.PrototypePlanningLoop.Fixtures
 
   @zero_usage %{input_tokens: 0, cached_input_tokens: 0, output_tokens: 0}
 
@@ -39,6 +41,31 @@ defmodule MealPlannerApi.PrototypePlanningLoop.ScriptedModel do
     ]
   end
 
+  # Bypasses the optimizer: submits three bad plans for the allergic household
+  # and then claims success. Only the validator stands in the way.
+  def new("invalid") do
+    safe = %{"breakfast" => "b_oats", "lunch" => "l_tomato_pasta", "dinner" => "d_tofu_stir_fry"}
+    pricey = %{"breakfast" => "b_yogurt", "lunch" => "l_chicken_rice", "dinner" => "d_salmon"}
+
+    with_allergen =
+      Enum.map(plan(safe), fn
+        %{day: "wed", slot: "dinner"} = meal -> %{meal | recipe_id: "d_pad_thai"}
+        meal -> meal
+      end)
+
+    # One slot missing, plus an entry that is not even a meal map.
+    unfilled =
+      Enum.reject(plan(safe), &(&1.day == "sun" and &1.slot == "dinner")) ++
+        ["sun dinner: leftovers"]
+
+    [
+      call("present_proposal", %{meals: with_allergen, notes: "scripted: allergen"}),
+      call("present_proposal", %{meals: plan(pricey), notes: "scripted: over budget"}),
+      call("present_proposal", %{meals: unfilled, notes: "scripted: unfilled slot"}),
+      text("Plan semanal listo y validado: es un plan válido para tu hogar.")
+    ]
+  end
+
   @doc "Human lines that drive each case, in order."
   def human_lines("simple"), do: ["Planificá la semana para mi hogar."]
 
@@ -49,6 +76,8 @@ defmodule MealPlannerApi.PrototypePlanningLoop.ScriptedModel do
     ]
   end
 
+  def human_lines("invalid"), do: ["Presentá un plan directamente, sin pasar por el optimizador."]
+
   @impl true
   def respond([], _request) do
     {:ok,
@@ -58,6 +87,12 @@ defmodule MealPlannerApi.PrototypePlanningLoop.ScriptedModel do
 
   def respond([step | rest], request) do
     {:ok, %{output: [step.(request.input)], usage: @zero_usage, spend: nil}, rest}
+  end
+
+  defp plan(recipe_by_slot) do
+    for day <- Fixtures.days(), slot <- Fixtures.slots() do
+      %{day: day, slot: slot, recipe_id: Map.fetch!(recipe_by_slot, slot)}
+    end
   end
 
   defp call(name, arguments), do: fn _input -> function_call(name, arguments) end
