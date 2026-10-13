@@ -62,7 +62,7 @@ The prototype skill forbids tests for throwaway code and there is no pre-existin
 - [x] **T2 Terminal chat.** One mix task that starts the chat, lets the human pick a household, shows each step live (tool called, optimizer result, validation verdict, spend so far) and a README with the run command and the question being answered.
   - Route: delegated direct, same writer as T1.
   - Checks: the mix task starts in scripted mode without a key; without a key in live mode it exits with a clear message and no network call.
-- [ ] **T3 Live trial.** The human sets the key and runs both cases against `gpt-6.1-sol`. Record observations, spend, and the human's reaction.
+- [x] **T3 Live trial.** The human sets the key and runs both cases against `gpt-6.1-sol`. Record observations, spend, and the human's reaction.
   - Route: inline, human-driven.
   - Checks: observed transcripts for both cases; spend below the ceiling.
 - [ ] **T4 Resolution.** With explicit authorization, post findings on #88 with a link to this branch and update map #80.
@@ -79,7 +79,24 @@ The prototype skill forbids tests for throwaway code and there is no pre-existin
 - Offline demonstration of the reservation: an unsettled reservation is counted as spent by the next ceiling check, including from a second OS process.
 - Advisory findings left open: a raise inside the model call kills the chat instead of returning a stopped outcome; the optimizer bridge raises on unexpected protocol replies.
 - Writer decisions to keep in mind: a 4xx response releases its reservation because it is not billed; `PROTOTYPE_SPEND_LEDGER_PATH` can point the ledger at another file, which would bypass accumulated spend and is not documented in the README.
-- Not exercised: the live OpenAI path. No key was available and no spend was made.
+- Second native review, required by the stop hook over the whole branch against `main` (lineage `review-e3e92599d43b5bab`): consent granted by the human, approved, acknowledged. Seven advisory findings, none blocking: unlocked non-atomic ledger writes can under-count with two concurrent runs; a raise inside the model call kills the chat; the optimizer bridge raises on unexpected protocol replies; turn bound, deadline, timeout and ledger refusals have no repeatable check; a response truncated at the output limit shows as an empty reply; wrong-typed tool arguments can raise in recipe search and price lookup; an unparsable or negative spend cap falls back to USD 5 silently.
+- T3 live trial run by the human on 2026-10-13 against `gpt-6.1-sol`. Total spend USD 0.0331 of 5. The key was exported in the shell (`read -s OPENAI_API_KEY && export OPENAI_API_KEY`), because `direnv` is not installed and `.envrc.local` is only read by it.
+
+## Live trial observations
+
+| Case | Household | Observed |
+|---|---|---|
+| Simple weekly plan | Casa Aurora | Three model turns: optimizer, proposal, reply. Validator VALID, $151.90 of $160.00, USD 0.0101. The agent went straight to the optimizer and accepted seven identical days without comment. |
+| "I want variety" | Casa Aurora | Four turns: recipe search, optimizer with three exclusions (infeasible), retry with one exclusion (solved, $159.75), then the agent judged the result still repetitive, did not present it, and asked the human with concrete options. |
+| "Alternate all those options" | Casa Aurora | The agent pinned all 21 cells; the optimizer tool answered infeasible. The agent reported that the optimizer does not say which constraint fails and proposed a relaxation. The infeasible verdict was false, see findings. |
+| Pinned allergen recipe | Casa Boreal | Two turns: recipe search, then a question stating the pad thai contains peanut and Bruno is allergic. No proposal made. |
+| Human insists on the allergen | Casa Boreal | One turn: the agent refused again and asked to replace the dish. It never attempted the pin. |
+
+The four unconfirmed Responses API assumptions held in practice: no HTTP 400, usage and cached tokens reported on every call. The ledger carried spend across runs.
+
+## Human reaction (2026-10-13)
+
+"Very good." The human wants the production agent to use the product scraper: asking "I like Luchetti pasta, how much is it?", getting real prices, and then setting it as a preferred brand, so that every plan recipe needing pasta uses that product and its price. This is a requirement for production, not for this prototype, which keeps fictitious data and no internet. The scraper is the sibling project `ratoneando-go`; the backend client is `integrations/go_scraper_client.ex`, used today only by `mix price_sync.run`. Open for a later decision: whether a brand preference is private to a member or shared by the household.
 
 ## Findings so far
 
@@ -88,11 +105,14 @@ The prototype skill forbids tests for throwaway code and there is no pre-existin
 - `optimizador.py` has no variety constraint and cannot pin a meal to a day, so every day of a plan is identical and pins are applied after solving.
 - A scripted model reply claimed a plan was validated right after a rejection, so the chat shows a code-owned status line under every reply.
 - Allergen recipes are removed from candidates and allergen pins are refused inside `run_optimizer`, so the model may learn of the conflict from the tool rather than detect it itself.
-
-## Unconfirmed assumptions in the live path
-
-The shape of the Responses API `usage` object, `max_output_tokens` as a request field, the top-level response `status`, and `strict: true` schemas with nullable enums for `gpt-6.1-sol`. A wrong assumption shows as an HTTP 400 on the first live call or as zero tokens in the ledger.
+- In the live trial the model detected the allergen conflict from recipe data on its own and held it under pressure, so the code-level refusal was exercised only in the scripted invalid run.
+- The Elixir-native loop was sufficient for every case tried. Nothing observed called for plan B (Pi adapted).
+- The agent's planning quality is capped by the solver, not the loop: no variety constraint, no per-day pinning, and an opaque infeasibility cause.
+- The prototype's pin shortcut (`tools.ex`, `solve/3`) returns a false infeasible for heavily pinned plans: it subtracts each pin's extra cost from the weekly budget and still asks the solver to fill every cell with the reduced budget. Not fixed. A tool that reports a false "no solution" misleads an otherwise well-behaved agent.
+- Initiative depends on the prompt: the agent evaluated and refined only after the human complained.
+- The approved-absence exception agreed in #84 is not implemented; the agent only offers to replace the dish.
+- The code-owned status line can read as stale: after a refused attempt it still reports the earlier proposal as valid.
 
 ## Next step
 
-T3: the human sets `OPENAI_API_KEY` locally and runs `mix prototype.planning_loop` from `meal_planner_api/`.
+T4: post the findings on #88 with a link to this branch, close #88, and add the decision line to map #80. Authorized by the human on 2026-10-13.
