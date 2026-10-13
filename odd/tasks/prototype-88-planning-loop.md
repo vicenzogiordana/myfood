@@ -65,7 +65,7 @@ The prototype skill forbids tests for throwaway code and there is no pre-existin
 - [x] **T3 Live trial.** The human sets the key and runs both cases against `gpt-6.1-sol`. Record observations, spend, and the human's reaction.
   - Route: inline, human-driven.
   - Checks: observed transcripts for both cases; spend below the ceiling.
-- [ ] **T4 Resolution.** With explicit authorization, post findings on #88 with a link to this branch and update map #80.
+- [x] **T4 Resolution.** With explicit authorization, post findings on #88 with a link to this branch and update map #80.
 
 ## Progress
 
@@ -113,6 +113,10 @@ The four unconfirmed Responses API assumptions held in practice: no HTTP 400, us
 - The approved-absence exception agreed in #84 is not implemented; the agent only offers to replace the dish.
 - The code-owned status line can read as stale: after a refused attempt it still reports the earlier proposal as valid.
 
+## Resolution
+
+Published on 2026-10-13 with the human's authorization: [resolution comment on #88](https://github.com/vicenzogiordana/myfood/issues/88#issuecomment-6156585900), #88 closed as completed, one decision line added to map #80, and this branch pushed without a pull request.
+
 ## Next step
 
-T4: post the findings on #88 with a link to this branch, close #88, and add the decision line to map #80. Authorized by the human on 2026-10-13.
+None for this prototype. A second round (cancellation, retries, crash and restart, a cheaper model, the remaining tasks from #87) and the solver limits are separate, not yet authorized work.
