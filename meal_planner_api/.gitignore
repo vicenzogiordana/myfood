@@ -28,3 +28,6 @@ meal_planner_api-*.tar
 # Local environment files (keep secrets out of git).
 .envrc.local
 
+
+# Issue #88 throwaway prototype: local spend ledger.
+/lib/meal_planner_api/prototype_planning_loop/PROTOTYPE_WIPE_ME_spend_ledger.json
