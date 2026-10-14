@@ -19,7 +19,7 @@ A User with an active membership in a Household. A User's private dietary profil
 _Avoid_: Participant, account user
 
 **Owner**:
-The Member who administers a Household's membership and subscription: invites and removes Members, and may cancel another Member's planning chat. Owners have no other planning powers.
+The Member who administers a Household's membership and subscription: invites and removes Members, and may cancel another Member's Planning Session. Owners have no other planning powers.
 _Avoid_: Admin, head of household
 
 ### Dietary rules
