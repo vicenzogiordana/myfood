@@ -225,5 +225,9 @@ defmodule MealPlannerApiWeb.Router do
     delete("/memberships/:user_id", MembershipController, :delete)
     post("/invites", InviteController, :create)
     post("/leave", AccountLifecycleController, :leave)
+
+    # Household settings — Nutrition Goal (issue #95). Any active Member.
+    get("/settings/nutrition-goal", HouseholdNutritionGoalController, :show)
+    put("/settings/nutrition-goal", HouseholdNutritionGoalController, :update)
   end
 end
