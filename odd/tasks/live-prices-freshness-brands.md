@@ -76,8 +76,9 @@ are rejected as unusable, never assumed.
 - [x] T2 Brand and Product queries in `lookup_prices` (route: inline).
   Commit: the `feat(planning-agent): query prices by brand and Product`
   commit on this branch.
-- [ ] T3 Household Brand Preferences in settings and the Household context
-  (route: inline).
+- [x] T3 Household Brand Preferences in settings and the Household context
+  (route: inline). Commit: the `feat(settings): add Household Brand
+  Preferences` commit on this branch.
 - [ ] T4 Session Brands in the Workspace, brand-steered Purchase, disclosed
   substitutions and budget alternatives (route: inline).
 
@@ -98,7 +99,10 @@ are rejected as unusable, never assumed.
 - T2: RED observed for 6 brand and Product query session tests; GREEN after
   brand and product filters (freshness judged on the matching offers).
   Planning agent suite: 160 passed.
+- T3: RED observed for 7 controller tests and 2 session tests (missing
+  module and routes); GREEN after the table, context, controller and the
+  Household context line in the instructions.
 
 ## Next step
 
-T3.
+T4.
