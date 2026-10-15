@@ -78,6 +78,22 @@ report no outcome kind. Spec #93 and the #86 contract require all of that.
   suites 123 passed. `mix precommit` (partition 108): exit 0, 1074 passed,
   25 skipped.
 
+## Review round 1 (Jorge el Curioso)
+
+- Finding (medium): a `present_proposal` result rejected by the validator
+  (`"status" => "invalid"`) was classified `complete`, so it counted as
+  verifiable progress and streamed `tool_finished` with outcome `complete`.
+- Fix (22ad2e2): `Tools.outcome/1` maps `"status" => "invalid"` to
+  `failure`. Route: inline (one-clause fix plus two session tests).
+- RED: the invalid-proposal session test saw outcome `complete`; the new
+  "presenting a rejected plan again and again is not progress" test reached a
+  fifth model request (the first rejection counted as evidence). GREEN after
+  the fix: no_progress stops after the optimizer run plus three rejected
+  presentations (4 model requests). Repeated presentations use the same
+  rejected draft: a different draft needs a new optimizer run, which is
+  legitimate evidence. Full suite (partition 108): 1086 passed, 25 skipped;
+  `mix precommit` exit 0.
+
 ## Next step
 
 Native review gate (Jorge el Curioso) on the PR. Follow-ups outside #108:
