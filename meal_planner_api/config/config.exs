@@ -33,7 +33,10 @@ config :meal_planner_api,
 # their numeric values are a human decision.
 config :meal_planner_api, :planning_agent,
   model: {MealPlannerApi.PlanningAgent.Model.OpenAIResponses, []},
-  optimizer: {MealPlannerApi.PlanningAgent.Optimizer.Port, []}
+  optimizer: {MealPlannerApi.PlanningAgent.Optimizer.Port, []},
+  # Live price lookups over HTTP (base URL: the :go_scraper_url env). In prod
+  # config/runtime.exs sets it from GO_SCRAPER_URL, or Unavailable without it.
+  price_scraper: {MealPlannerApi.PlanningAgent.PriceScraper.Http, []}
 
 config :meal_planner_api,
   social_verifier: MealPlannerApi.Auth.SocialVerifier,

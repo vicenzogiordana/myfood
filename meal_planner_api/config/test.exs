@@ -50,6 +50,7 @@ config :meal_planner_api, MealPlannerApi.Mailer, adapter: Bamboo.LocalAdapter
 config :meal_planner_api, :planning_agent,
   model: {MealPlannerApi.PlanningAgent.Model.Scripted, []},
   optimizer: {MealPlannerApi.PlanningAgent.Optimizer.Unavailable, []},
+  price_scraper: {MealPlannerApi.PlanningAgent.PriceScraper.Unavailable, []},
   # Generous so tests that start many sessions are not limited; the limit
   # itself is covered by tests that pass `:session_start_limit`.
   session_start_limit: {1_000, 60}

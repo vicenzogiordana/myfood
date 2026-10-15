@@ -56,7 +56,7 @@ defmodule MealPlannerApi.PlanningAgent.CallBounds do
   @transient %{
     model: [:timeout, :provider_unavailable, :provider_timeout, :provider_busy],
     solver: [],
-    read: [:timeout, :search_failed]
+    read: [:timeout, :search_failed, :scraper_unreachable]
   }
 
   @doc "The default policies, with `overrides` merged per kind."
