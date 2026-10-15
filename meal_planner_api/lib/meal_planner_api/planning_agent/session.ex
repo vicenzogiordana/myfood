@@ -253,6 +253,11 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       retry budgets (see `MealPlannerApi.PlanningAgent.CallBounds`)
     * `:recipe_search` — `{module, opts}` replacing the recipe search read
       tool (`module.search(household, filters, opts)`), for tests
+    * `:price_scraper` — `{module, opts}` implementing
+      `MealPlannerApi.PlanningAgent.PriceScraper` for live price lookups
+      (default from config)
+    * `:clock` — a 0-arity function returning the current `DateTime`, used
+      to age prices (default: `DateTime.utc_now/0`)
     * `:confirmation_store` — `{module, opts}` replacing the confirmation
       store (see `MealPlannerApi.PlanningAgent.Confirmation`), for tests
     * `:reconcile_ms`, `:poll_ms` — how long and how often a lost
@@ -311,6 +316,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       deadline_ms: Keyword.get(opts, :deadline_ms, @default_deadline_ms),
       call_policies: Keyword.get(opts, :call_policies, %{}),
       recipe_search: Keyword.get(opts, :recipe_search),
+      price_scraper: Keyword.get_lazy(opts, :price_scraper, fn -> config(:price_scraper) end),
+      clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
       confirmation_store: Keyword.get_lazy(opts, :confirmation_store, &Confirmation.store/0),
       confirmation_opts: Keyword.take(opts, [:reconcile_ms, :poll_ms]),
       grace_ms: Keyword.get(opts, :grace_ms, @default_grace_ms),
@@ -724,6 +731,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       deadline_ms: args.deadline_ms,
       call_policies: CallBounds.policies(args.call_policies),
       recipe_search: args.recipe_search,
+      price_scraper: args.price_scraper,
+      clock: args.clock,
       confirmation_store: args.confirmation_store,
       confirmation_opts: args.confirmation_opts,
       # Read by the running turn without a message round trip: no retry
@@ -1186,6 +1195,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       range: state.range,
       slots: state.slots,
       household: household,
+      clock: state.clock,
       recipe_drafts: state.workspace.recipe_drafts,
       absence_exceptions: state.workspace.absence_exceptions
     }
@@ -1411,6 +1421,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         household: state.household,
         optimizer: state.optimizer,
         recipe_search: state.recipe_search,
+        price_scraper: state.price_scraper,
+        clock: state.clock,
         workspace: state.workspace
       }
     }

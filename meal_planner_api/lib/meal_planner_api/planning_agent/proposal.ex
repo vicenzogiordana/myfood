@@ -22,12 +22,15 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
   Builds a Proposal for `meals` (validated, each with `:date`, `:slot`,
   `:recipe_id`, `:name`, `:origin` and `:draft`) in the session context
   `ctx`. Every meal shows its Recipe Origin, and a Recipe Draft is marked as
-  one so the Member sees it is AI-created and not yet saved. Returns the
+  one so the Member sees it is AI-created and not yet saved. Prices are
+  aged at the context's `:clock` (default: the current time). Returns the
   Proposal event and the Purchase it carries.
   """
   @spec build([map()], map()) :: {t(), Purchase.t()}
   def build(meals, ctx) do
-    purchase = Purchase.for_meals(meals, ctx.account_id, RecipeDraft.in_context(ctx))
+    purchase =
+      Purchase.for_meals(meals, ctx.account_id, RecipeDraft.in_context(ctx), now: now(ctx))
+
     deviations = budget_deviations(purchase, ctx.household.budget_cents)
 
     proposal = %{
@@ -62,9 +65,28 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
     end)
   end
 
-  @doc "Whether two Proposals show the Member the same content, whatever their identity."
+  @doc """
+  Whether two Proposals show the Member the same content, whatever their
+  identity. The age of a price ticks with the clock and is not content; a
+  price turning stale is, through its freshness and the budget certainty.
+  """
   @spec same_content?(t(), t()) :: boolean()
-  def same_content?(a, b), do: Map.take(a, @content_fields) == Map.take(b, @content_fields)
+  def same_content?(a, b), do: content(a) == content(b)
+
+  defp content(proposal), do: proposal |> Map.take(@content_fields) |> without_ages()
+
+  defp without_ages(map) when is_map(map) and not is_struct(map),
+    do: map |> Map.delete("age_hours") |> Map.new(fn {k, v} -> {k, without_ages(v)} end)
+
+  defp without_ages(list) when is_list(list), do: Enum.map(list, &without_ages/1)
+  defp without_ages(value), do: value
+
+  defp now(ctx) do
+    case Map.get(ctx, :clock) do
+      clock when is_function(clock, 0) -> clock.()
+      _ -> DateTime.utc_now()
+    end
+  end
 
   # The budget is compared against the Purchase total. A budget of zero means
   # the Household has not set one. With missing prices the total is a lower
@@ -96,7 +118,7 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
       "budget_cents" => budget_cents,
       "purchase_total_cents" => purchase.total_cents,
       "within_budget" => within,
-      "uncertain" => not purchase.complete?
+      "uncertain" => uncertain?(purchase)
     }
   end
 
@@ -105,7 +127,10 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
       "budget_cents" => nil,
       "purchase_total_cents" => purchase.total_cents,
       "within_budget" => nil,
-      "uncertain" => not purchase.complete?
+      "uncertain" => uncertain?(purchase)
     }
   end
+
+  # Missing and stale prices both make the Purchase total uncertain.
+  defp uncertain?(purchase), do: not purchase.complete? or Purchase.stale?(purchase)
 end

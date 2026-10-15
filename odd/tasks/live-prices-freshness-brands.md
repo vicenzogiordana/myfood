@@ -60,16 +60,17 @@ are rejected as unusable, never assumed.
 PR #126 was split into four chained PRs to main (strategy
 `stacked-to-main`). Each slice appends its own tasks and evidence here.
 
-1. Price scraper port with an HTTP adapter (this slice). Nothing calls it
-   yet, so agent behaviour does not change.
-2. Refresh stale prices live and report their age.
+1. Price scraper port with an HTTP adapter (#132). Nothing calls it yet,
+   so agent behaviour does not change.
+2. Refresh stale prices live and report their age (this slice). Lookups
+   take Ingredient names only; brand and Product filters come in slice 3.
 3. Brand and Product queries, Household Brand Preferences.
 4. Purchase steered by Session Brands and Brand Preferences.
 
 ## Acceptance criteria
 
-- [ ] Fresh prices (under 24 h) come from the database without a live call
-- [ ] Missing or stale prices trigger a live lookup; failures keep the old
+- [x] Fresh prices (under 24 h) come from the database without a live call
+- [x] Missing or stale prices trigger a live lookup; failures keep the old
   price with its real age and a warning
 - [ ] Brand and Product queries return matching Products with prices
 - [ ] Session Brands live only in the Workspace; Brand Preferences come from
@@ -91,6 +92,26 @@ PR #126 was split into four chained PRs to main (strategy
   `PlanningAgent.FakeScraper`. Commit: the `feat(planning-agent): add the
   price scraper port with an HTTP adapter` commit on
   `feat/issue-101-part-1-price-scraper-client`.
+- [x] S2 Live refresh and price age (slice 2/4, route: inline, one bounded
+  worker landing a slice already written and reviewed in #126, rebuilt from
+  its final head with the brand and Product code left out).
+  `Prices.lookup/2` (names only) reads the database first and refreshes a
+  missing Ingredient, or one with an offer 24 h old or older, through the
+  scraper port, recording the scraper's own observation time; a failed
+  refresh records nothing and adds a `refresh_failed` warning, a refresh
+  that brings only old data adds `still_stale`. Review hardening from #126
+  rounds 1-3 kept: Ingredient cap (`max_ingredients/0`, 50) and offer cap
+  (`max_offers/0`, 200, round-robin from each Ingredient's cheapest with
+  an `offers_truncated` warning), `record/2` returning
+  `{:error, :record_failed}` instead of raising, a 15-minute refresh memo,
+  and a circuit break after `:scraper_timeout`, `:scraper_unreachable` or
+  `:deadline_exceeded`. `lookup_prices` returns prices with `age_hours`
+  and `fresh`, `missing` and `warnings`. Purchase lines carry the age of
+  their price, `stale_prices` lists stale lines and the Proposal budget is
+  `uncertain` when any line is stale. Session options `:price_scraper`
+  and `:clock`. Commit: the `feat(planning-agent): refresh stale prices
+  live and report their age` commit on
+  `feat/issue-101-part-2-live-price-refresh`.
 
 ## Checks
 
@@ -130,6 +151,32 @@ PR #126 was split into four chained PRs to main (strategy
     `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix precommit` 1242
     passed, 25 skipped.
 
+- S2 glue for main (which changed after #126 was cut):
+  - The refresh memo is a `price_refreshes` field of the `Workspace`
+    struct. Main's Session already checkpoints the Workspace after every
+    tool call (`on_workspace`) and snapshots it for restart recovery, so
+    the memo survives a cut turn and a restart without the source branch's
+    separate `report_workspace` checkpoint.
+  - Budget certainty lives in `Proposal.build/2` on main, so the stale
+    check (`Purchase.stale?/1`) is there, and prices are aged at the
+    context's `:clock` (the Session passes it at present and at confirm).
+  - Confirmation rebuilds the Proposal and compares content. A price's
+    `age_hours` ticks with the clock, so `Proposal.same_content?/2` ignores
+    it; a price turning stale still changes the content (its `fresh` flag
+    and the budget's `uncertain`). Test: `LivePricesTest` "a price that
+    only got older is the same Proposal content; one turned stale is not".
+  - The cap test of #126 used a Product query; here it is a name-only
+    lookup of 60 stale Ingredients (exactly 50 refreshed, 50 warnings).
+- S2 evidence: `LivePricesTest` (fresh, stale, missing, refresh memo,
+  present_proposal) 13 passed; `PricesTest` (scraper down, offer cap,
+  Ingredient cap, `record/2`) and `PurchaseToolsTest` (clock pinned so
+  fixture prices are fresh; without it two budget assertions read
+  `uncertain: true`, observed) pass. Full
+  `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1275 passed,
+  25 skipped before the Proposal content test was added;
+  `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix precommit` (compile
+  with warnings as errors, format, full suite) 1276 passed, 25 skipped.
+
 ## Next step
 
-Slice 2/4: refresh stale prices live and report their age.
+Slice 3/4: brand and Product queries, Household Brand Preferences.
