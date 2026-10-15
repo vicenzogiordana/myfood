@@ -100,6 +100,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionStopCancelTest do
 
     {PortOptimizer,
      python_executable: System.find_executable("python3"),
+     max_concurrent_runs: 100,
      script_path: @hanging_optimizer,
      timeout_ms: 60_000,
      on_os_process: fn

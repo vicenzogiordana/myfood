@@ -22,6 +22,13 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
   apply per Planning Session: every attempt of every model call, retries
   included, draws on the same ledger.
 
+  Calls of every Planning Session together are also bounded by a global
+  concurrency cap, `max_concurrent_calls` (issue #118), held in
+  `MealPlannerApi.PlanningAgent.ConcurrencyLimiter`. It is mandatory like
+  the spend caps (`init/1` refuses with `:spend_caps_unconfigured` without
+  it). A call over it is refused with `:provider_busy` before any spend is
+  reserved; that reason is transient, so the call bounds retry it.
+
   Provider failures are typed: `:provider_unauthorized` (401/403),
   `:provider_rejected_request` (other 4xx), `:provider_conflict` (409),
   `:provider_timeout` (transport timeout) and `:provider_unavailable`
@@ -35,6 +42,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
         base_url: "https://api.openai.com/v1",
         spend_cap_micros: nil,                 # micro-USD per Planning Session
         token_cap: nil,                        # cumulative tokens per Planning Session
+        max_concurrent_calls: nil,             # provider calls in flight, all sessions
         input_price_micros_per_mtok: nil,      # micro-USD per million input tokens
         output_price_micros_per_mtok: nil,     # micro-USD per million output tokens
         max_output_tokens: 4_096,
@@ -45,13 +53,14 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
 
   @behaviour MealPlannerApi.PlanningAgent.Model
 
-  alias MealPlannerApi.PlanningAgent.SpendLedger
+  alias MealPlannerApi.PlanningAgent.{ConcurrencyLimiter, SpendLedger}
 
   @defaults [
     model: "gpt-6.1-sol",
     base_url: "https://api.openai.com/v1",
     max_output_tokens: 4_096,
     receive_timeout_ms: 60_000,
+    concurrency_limiter: ConcurrencyLimiter,
     req_options: []
   ]
 
@@ -64,6 +73,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
       |> Map.new()
 
     with {:ok, ledger} <- SpendLedger.new(config[:spend_cap_micros], config[:token_cap]),
+         :ok <- validate_concurrency(config),
          :ok <- validate_pricing(config),
          :ok <- validate_api_key(config) do
       {:ok, %{config: config, ledger: ledger}}
@@ -98,6 +108,16 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
 
   @impl true
   def respond(state, request) do
+    %{concurrency_limiter: limiter, max_concurrent_calls: cap} = state.config
+
+    case ConcurrencyLimiter.run(limiter, :provider_calls, cap, fn -> paid_call(state, request) end) do
+      {:ok, result} -> result
+      {:error, :at_capacity} -> {:error, :provider_busy, state}
+      {:error, :unconfigured} -> {:error, :spend_caps_unconfigured, state}
+    end
+  end
+
+  defp paid_call(state, request) do
     body = body(state.config, request)
     reservation = worst_case(state.config, body)
 
@@ -291,6 +311,13 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
          is_integer(config[:max_output_tokens]) and config[:max_output_tokens] > 0,
        do: :ok,
        else: {:error, :pricing_unconfigured}
+  end
+
+  defp validate_concurrency(config) do
+    case config[:max_concurrent_calls] do
+      cap when is_integer(cap) and cap > 0 -> :ok
+      _ -> {:error, :spend_caps_unconfigured}
+    end
   end
 
   defp validate_api_key(config) do
