@@ -306,8 +306,31 @@ defmodule MealPlannerApi.PlanningAgent.LivePricesTest do
       assert result["missing"] == []
     end
 
-    test "a brand missing from the database is looked up live",
+    test "a brand missing from fresh prices is reported missing without a live call",
          %{household: h, pasta: pasta} do
+      result =
+        run_tool(h, "lookup_prices", %{
+          "ingredients" => [pasta.name],
+          "brand" => "Fictitious Don Vicente"
+        })
+
+      refute_received {:fake_scraper_fetch, _}
+      assert result["prices"] == []
+      assert [%{"reason" => "no_matching_brand"}] = result["missing"]
+      assert result["warnings"] == []
+    end
+
+    test "a brand missing from stale prices is looked up live", %{household: h} do
+      noodles = ingredient!("Fictitious noodles")
+
+      product!(noodles,
+        name: "Fictitious ramen",
+        brand: "Fictitious Luchetti",
+        package: {500_000, :g},
+        price_cents: 900,
+        observed_at: hours_ago(30)
+      )
+
       live =
         FakeScraper.item(
           product: "Fictitious fusilli",
@@ -321,8 +344,8 @@ defmodule MealPlannerApi.PlanningAgent.LivePricesTest do
         run_tool(
           h,
           "lookup_prices",
-          %{"ingredients" => [pasta.name], "brand" => "Fictitious Don Vicente"},
-          responses: %{String.downcase(pasta.name) => {:ok, [live]}}
+          %{"ingredients" => [noodles.name], "brand" => "Fictitious Don Vicente"},
+          responses: %{String.downcase(noodles.name) => {:ok, [live]}}
         )
 
       assert_received {:fake_scraper_fetch, _}
@@ -449,7 +472,7 @@ defmodule MealPlannerApi.PlanningAgent.LivePricesTest do
       ingredients =
         for name <- ["Fictitious beans", "Fictitious corn", "Fictitious peas"] do
           ingredient = ingredient!(name)
-          product!(ingredient, brand: "Fictitious Brand", observed_at: hours_ago(2))
+          product!(ingredient, brand: "Fictitious Brand", observed_at: hours_ago(30))
           ingredient
         end
 

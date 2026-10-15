@@ -121,8 +121,9 @@ PR #126 was split into four chained PRs to main (strategy
   takes `:brand` (case-insensitive exact match on the Product brand) and
   `:product` (case-insensitive substring of the Product name or brand;
   without names it searches every stored Product, wildcards matched
-  literally). Freshness is judged on the matching offers, so a brand the
-  database lacks is looked up live; a brand or Product nobody sells is
+  literally). Freshness is judged on every offer of the Ingredient before
+  the filter (the scrape is keyed by Ingredient name), so a brand missing
+  from fresh prices is not looked up live; a brand or Product nobody sells is
   `missing` with `no_matching_brand` or `no_matching_product`, never
   priced. `Prices.stored_brand/2` validates a brand against stored
   Products. `lookup_prices` gains the optional `brand` and `product`
@@ -228,9 +229,8 @@ PR #126 was split into four chained PRs to main (strategy
     1280 passed, 25 skipped.
 
 - S3 glue for main:
-  - The migration is `202610151400000_create_household_brand_preferences`
-    (15 digits, after main's `202610141095000`); the source branch's
-    14-digit `20261015140000` would sort before main's latest migration.
+  - The migration is `20261015145000_create_household_brand_preferences`
+    (renamed from a 15-digit version in review round 2, see below).
   - Main keeps slice 2's review fixes (future-dated scrape rejection,
     `record/3`, a scrape without a brand keeping the stored one); the
     brand and Product filters were added on top of them.
@@ -261,6 +261,28 @@ PR #126 was split into four chained PRs to main (strategy
   - Focused `PurchaseToolsTest` 16 passed.
     `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1299 passed,
     25 skipped; `mix precommit` 1299 passed, 25 skipped.
+- S3 review round 2 (Jorge el Curioso on PR #134), route: inline, two
+  confirmed findings:
+  - Medium, `Prices.fresh_offers/5`: the refresh decision read the
+    brand/Product-filtered offers, so an Ingredient with fresh offers of
+    another brand counted as unpriced and was scraped live (the scrape is
+    keyed by Ingredient name and cannot fetch a brand). RED: new
+    `PricesTest` "fresh offers of another brand are not refreshed live"
+    called the refresh fun once. GREEN: `needs_refresh?/2` now reads the
+    unfiltered offers and the filter applies after; the result is
+    `no_matching_brand` with no `refresh_failed` warning, and a stale
+    offer of another brand still refreshes (new test). Two `LivePricesTest`
+    cases encoded the old behaviour and were restated: a brand missing from
+    fresh prices is missing without a live call; a brand missing from stale
+    prices is looked up live; the brand-miss memo test uses stale offers.
+  - Low, migration version: `202610151400000` had 15 digits and sorted
+    after every later 14-digit migration. RED: `mix ecto.migrations` listed
+    it last. GREEN: renamed to `20261015145000`; `mix ecto.migrations`
+    lists it between `20261015140000` and `20261015150000`, and
+    `ecto.drop`/`ecto.create`/`ecto.migrate` on the test database succeeds
+    (the project has no `ecto.reset` alias). Pre-existing 15-digit
+    migrations on main (for example `202610141095000`) are out of scope.
+  - Focused `PricesTest` and `LivePricesTest` 37 passed.
 
 ## Next step
 

@@ -311,13 +311,16 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   # ---------------------------------------------------------------------------
 
   # Offers of `ingredients` matching the query, refreshed live where missing
-  # or stale unless the memo holds a recent refresh of them.
+  # or stale unless the memo holds a recent refresh of them. The scrape is
+  # keyed by Ingredient name, so freshness is judged on every offer of the
+  # Ingredient before the brand or Product filter applies.
   defp fresh_offers([], _now, _refresh, _matches?, memo), do: {%{}, [], memo}
 
   defp fresh_offers(ingredients, now, refresh, matches?, memo) do
     ids = Enum.map(ingredients, & &1.id)
-    stored = matching(offers_for(ids, now), matches?)
-    unrefreshed = Enum.filter(ingredients, &needs_refresh?(stored, &1.id))
+    all = offers_for(ids, now)
+    unrefreshed = Enum.filter(ingredients, &needs_refresh?(all, &1.id))
+    stored = matching(all, matches?)
     {memoized, to_refresh} = Enum.split_with(unrefreshed, &Map.has_key?(memo, &1.id))
     {failed, skipped} = refresh_all(to_refresh, refresh, now)
 

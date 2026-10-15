@@ -132,6 +132,56 @@ defmodule MealPlannerApi.PlanningAgent.PricesTest do
     end
   end
 
+  describe "lookup/2 with a brand query" do
+    # The scrape is keyed by Ingredient name, so freshness is judged on every
+    # offer of the Ingredient, never only on the brand asked for.
+    defp counting_refresh do
+      test_pid = self()
+
+      fn name ->
+        send(test_pid, {:refreshed, name})
+        {:ok, []}
+      end
+    end
+
+    defp refreshed_count do
+      {:messages, messages} = Process.info(self(), :messages)
+      Enum.count(messages, &match?({:refreshed, _}, &1))
+    end
+
+    test "fresh offers of another brand are not refreshed live" do
+      ingredient = ingredient!("Fictitious brand fresh #{System.unique_integer([:positive])}")
+      product!(ingredient, brand: "Fictitious Brand A", observed_at: hours_ago(2))
+
+      result =
+        Prices.lookup([ingredient.name],
+          brand: "Fictitious Brand B",
+          now: @now,
+          refresh: counting_refresh()
+        )
+
+      assert refreshed_count() == 0
+      assert result.prices == []
+
+      assert [%{ingredient: name, reason: :no_matching_brand}] = result.missing
+      assert name == ingredient.name
+      refute Enum.any?(result.warnings, &(&1.reason == :refresh_failed))
+    end
+
+    test "stale offers of another brand are still refreshed live" do
+      ingredient = ingredient!("Fictitious brand stale #{System.unique_integer([:positive])}")
+      product!(ingredient, brand: "Fictitious Brand A", observed_at: hours_ago(30))
+
+      Prices.lookup([ingredient.name],
+        brand: "Fictitious Brand B",
+        now: @now,
+        refresh: counting_refresh()
+      )
+
+      assert refreshed_count() == 1
+    end
+  end
+
   describe "lookup/2 with more offers than the cap" do
     test "keeps the cheapest offers of every requested Ingredient and flags the cut" do
       # A plain global take would drop the alphabetically last Ingredients.
