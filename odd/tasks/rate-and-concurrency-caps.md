@@ -46,24 +46,39 @@ Out of scope: aggregate spend ledger, cap on the number of active sessions
 
 ## Acceptance criteria
 
-- [ ] Session start is rate limited per Household
-- [ ] Global concurrency caps on provider calls and optimizer subprocesses are enforced
-- [ ] All new limits are configurable and refuse safely when unconfigured
-- [ ] Malformed cap or price env values do not crash boot and result in `spend_caps_unconfigured`
-- [ ] Tests cover each limit and the malformed-config case
+- [x] Session start is rate limited per Household
+- [x] Global concurrency caps on provider calls and optimizer subprocesses are enforced
+- [x] All new limits are configurable and refuse safely when unconfigured
+- [x] Malformed cap or price env values do not crash boot and result in `spend_caps_unconfigured`
+- [x] Tests cover each limit and the malformed-config case
 
 ## Tasks
 
-- [ ] T1 Session start rate limit per Household (route: inline, single bounded worker)
-- [ ] T2 ConcurrencyLimiter + provider call cap in the OpenAI adapter
-- [ ] T3 Optimizer subprocess cap in the optimizer port
-- [ ] T4 Runtime env parsing hardening + config wiring + docs
+Route for every task: inline in this bounded worker (the worker is itself the
+delegated writer; no further delegation allowed).
+
+- [x] T1 Session start rate limit per Household — `49f5f3b` (RED: 6/6 failing, GREEN: 6 passed)
+- [x] T2 ConcurrencyLimiter + provider call cap in the OpenAI adapter — `c049d16` (RED: 11 failing, GREEN: 47 passed)
+- [x] T3 Optimizer subprocess cap in the optimizer port — `e7bbae8` (RED: 3 failing, GREEN: 22 passed)
+- [x] T4 Runtime env parsing hardening + config wiring + docs — `53ed7a0` (RED: 8/9 failing, GREEN: 9 passed)
 
 ## Checks
 
 - `MYFOOD_TEST_DATABASE=meal_planner_api_test118 mix test`
 - `mix precommit`
 
+## Notes
+
+- A malformed price reads as unset and the adapter keeps its existing typed
+  refusal for missing prices, `pricing_unconfigured`; a malformed cap (spend,
+  token or provider concurrency) refuses with `spend_caps_unconfigured`.
+  Either way paid execution never starts and boot never crashes.
+- The start rate limit counts stored `planning_sessions` rows by `started_at`
+  under the Household advisory lock, so it survives restarts and races.
+
 ## Progress
 
 - Branch `feat/issue-118-rate-and-concurrency-caps`.
+- Verification: `MYFOOD_TEST_DATABASE=meal_planner_api_test118 mix test`
+  1232 passed, 25 skipped; `mix precommit` 1232 passed, 25 skipped.
+- Next step: review of the PR.

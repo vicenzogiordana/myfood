@@ -413,6 +413,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
         api_key: @secret,
         spend_cap_micros: 1_000,
         token_cap: 1_000,
+        max_concurrent_calls: 100,
         input_price_micros_per_mtok: 1,
         output_price_micros_per_mtok: 1
       ]
