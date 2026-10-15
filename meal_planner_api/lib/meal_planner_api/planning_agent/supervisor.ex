@@ -1,8 +1,8 @@
 defmodule MealPlannerApi.PlanningAgent.Supervisor do
   @moduledoc """
-  Supervision tree of the planning agent: the Household registry, the
-  dynamic supervisor of Planning Session processes and the task supervisor
-  running agent turns.
+  Supervision tree of the planning agent: the global concurrency limiter,
+  the Household registry, the dynamic supervisor of Planning Session
+  processes and the task supervisor running agent turns.
   """
 
   use Supervisor
@@ -12,6 +12,7 @@ defmodule MealPlannerApi.PlanningAgent.Supervisor do
   @impl true
   def init(_opts) do
     children = [
+      MealPlannerApi.PlanningAgent.ConcurrencyLimiter,
       {Registry, keys: :unique, name: MealPlannerApi.PlanningAgent.Registry},
       {Task.Supervisor, name: MealPlannerApi.PlanningAgent.TaskSupervisor},
       {DynamicSupervisor,

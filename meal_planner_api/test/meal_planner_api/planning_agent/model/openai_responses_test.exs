@@ -8,6 +8,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponsesTest do
   use ExUnit.Case, async: true
 
   alias MealPlannerApi.PlanningAgent.CallBounds
+  alias MealPlannerApi.PlanningAgent.ConcurrencyLimiter
   alias MealPlannerApi.PlanningAgent.Model.OpenAIResponses
 
   @stub __MODULE__
@@ -37,6 +38,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponsesTest do
         input_price_micros_per_mtok: 1_000_000,
         output_price_micros_per_mtok: 4_000_000,
         max_output_tokens: 1_000,
+        max_concurrent_calls: 100,
         req_options: [plug: {Req.Test, @stub}]
       ],
       overrides
@@ -51,6 +53,35 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponsesTest do
       send(test, {:provider_called, conn, Jason.decode!(raw)})
       Req.Test.json(conn, body)
     end)
+  end
+
+  defp start_limiter! do
+    name = :"limiter_#{System.unique_integer([:positive])}"
+    start_supervised!({ConcurrencyLimiter, name: name})
+    name
+  end
+
+  # Another Planning Session's call holding the only provider slot.
+  defp hold_provider_slot!(limiter) do
+    test = self()
+
+    pid =
+      spawn(fn ->
+        ConcurrencyLimiter.run(limiter, :provider_calls, 1, fn ->
+          send(test, :holding)
+          Process.sleep(:infinity)
+        end)
+      end)
+
+    assert_receive :holding
+    pid
+  end
+
+  defp wait_until_free(limiter) do
+    if ConcurrencyLimiter.in_use(limiter, :provider_calls) > 0 do
+      Process.sleep(5)
+      wait_until_free(limiter)
+    end
   end
 
   defp text_response(text, usage) do
@@ -73,6 +104,13 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponsesTest do
                OpenAIResponses.init(opts(spend_cap_micros: nil, token_cap: nil))
 
       assert {:error, :spend_caps_unconfigured} = OpenAIResponses.init(opts(token_cap: 0))
+    end
+
+    test "refuses to run when the global provider concurrency cap is unset or invalid" do
+      for cap <- [nil, 0, -1, "4"] do
+        assert {:error, :spend_caps_unconfigured} =
+                 OpenAIResponses.init(opts(max_concurrent_calls: cap))
+      end
     end
 
     test "refuses to run when prices are unknown, since spend could not be enforced" do
@@ -337,6 +375,43 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponsesTest do
       # One settlement: 100 input tokens at 1 USD/Mtok + 50 output tokens at
       # 4 USD/Mtok = 300 micro-USD.
       assert %{reserved_micros: 0, spent_micros: 300} = OpenAIResponses.spend(state)
+    end
+
+    test "a call over the global concurrency cap is refused before reserving or calling" do
+      limiter = start_limiter!()
+      holder = hold_provider_slot!(limiter)
+
+      stub_response(text_response("never", %{"input_tokens" => 1, "output_tokens" => 1}))
+
+      {:ok, state} =
+        OpenAIResponses.init(opts(max_concurrent_calls: 1, concurrency_limiter: limiter))
+
+      assert {:error, :provider_busy, state} = OpenAIResponses.respond(state, @request)
+      refute_received {:provider_called, _, _}
+      assert %{spent_micros: 0, reserved_micros: 0} = OpenAIResponses.spend(state)
+
+      # The slot comes back once its holder is gone.
+      Process.exit(holder, :kill)
+      wait_until_free(limiter)
+
+      stub_response(text_response("ok", %{"input_tokens" => 1, "output_tokens" => 1}))
+      assert {:ok, %{text: "ok"}, _state} = OpenAIResponses.respond(state, @request)
+    end
+
+    test "each finished call frees its provider slot" do
+      limiter = start_limiter!()
+      stub_response(text_response("ok", %{"input_tokens" => 1, "output_tokens" => 1}))
+
+      {:ok, state} =
+        OpenAIResponses.init(opts(max_concurrent_calls: 1, concurrency_limiter: limiter))
+
+      assert {:ok, _, state} = OpenAIResponses.respond(state, @request)
+      assert {:ok, _, _state} = OpenAIResponses.respond(state, @request)
+      assert ConcurrencyLimiter.in_use(limiter, :provider_calls) == 0
+    end
+
+    test "a busy provider slot is transient: the call bounds retry it" do
+      assert CallBounds.transient?(:model, :provider_busy)
     end
 
     test "reports the reserved state through the request checkpoint before calling" do

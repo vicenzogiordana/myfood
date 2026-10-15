@@ -65,15 +65,19 @@ if config_env() != :test do
       |> Kernel.in(["true", "1", "yes", "on"])
 end
 
-# Planning agent OpenAI adapter. Every cap and price stays nil unless set, and
-# the adapter refuses paid execution while any of them is missing. The spend
-# cap (micro-USD) and token cap apply per Planning Session.
+# Planning agent OpenAI adapter and aggregate limits. Every cap, price and
+# limit stays nil unless set, and paid execution is refused while any of them
+# is missing. The spend cap (micro-USD) and token cap apply per Planning
+# Session; the concurrency caps are global and the start rate limit applies
+# per Household (issue #118). A malformed value (not a whole integer) reads
+# as unset instead of crashing boot, so the refusal applies.
 if config_env() != :test do
   optional_integer = fn name ->
-    case System.get_env(name) do
-      nil -> nil
-      "" -> nil
-      value -> String.to_integer(String.trim(value))
+    with value when is_binary(value) <- System.get_env(name),
+         {integer, ""} <- Integer.parse(String.trim(value)) do
+      integer
+    else
+      _ -> nil
     end
   end
 
@@ -82,7 +86,23 @@ if config_env() != :test do
     spend_cap_micros: optional_integer.("PLANNING_AGENT_SPEND_CAP_MICROS"),
     token_cap: optional_integer.("PLANNING_AGENT_TOKEN_CAP"),
     input_price_micros_per_mtok: optional_integer.("OPENAI_INPUT_PRICE_MICROS_PER_MTOK"),
-    output_price_micros_per_mtok: optional_integer.("OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK")
+    output_price_micros_per_mtok: optional_integer.("OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK"),
+    max_concurrent_calls: optional_integer.("PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS")
+
+  config :meal_planner_api, MealPlannerApi.PlanningAgent.Optimizer.Port,
+    max_concurrent_runs: optional_integer.("PLANNING_AGENT_MAX_CONCURRENT_OPTIMIZER_RUNS")
+
+  session_start_limit =
+    case {optional_integer.("PLANNING_AGENT_SESSION_STARTS_PER_WINDOW"),
+          optional_integer.("PLANNING_AGENT_SESSION_START_WINDOW_SECONDS")} do
+      {max_starts, window_seconds} when is_integer(max_starts) and is_integer(window_seconds) ->
+        {max_starts, window_seconds}
+
+      _ ->
+        nil
+    end
+
+  config :meal_planner_api, :planning_agent, session_start_limit: session_start_limit
 end
 
 config :meal_planner_api,
