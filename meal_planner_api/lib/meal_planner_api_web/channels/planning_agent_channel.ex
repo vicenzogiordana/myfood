@@ -12,6 +12,11 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
       to lunch and dinner). Replies `%{session_id}` or
       `%{reason: "session_already_active" | "range_already_planned" | ...}`;
       a failure without a typed reason replies `internal_error`.
+    * `resume_session` — the session Member's return after leaving or a
+      server restart, within the absence grace. Replies `%{session_id,
+      proposal}` (the last valid Proposal, or `nil`) or
+      `%{reason: "forbidden" | "no_session" | "session_busy"}` (`session_busy`:
+      the running session did not answer in time; retry later).
     * `give_consent` — records the Member's consent to external AI use.
     * `send_message` — `%{"text"}`; replies `:ok` or
       `%{reason: "consent_required" | "busy" | "invalid_message" | "message_too_long" |
@@ -26,7 +31,8 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
       and last valid Proposal survive. Only the session's Member; replies
       `%{status: "stopped"}` or `%{reason: "forbidden" | "no_active_session"}`.
     * `cancel_session` — Cancel: ends the Household's session and discards its
-      Workspace (its Member or the Owner); replies `%{status: "cancelled"}` or
+      Workspace (its Member or the Owner), also one waiting for recovery after
+      a restart; replies `%{status: "cancelled"}` or
       `%{reason: "forbidden" | "no_active_session"}`.
 
   Outgoing: every session event is pushed as `agent_event` with its `type`
@@ -86,6 +92,25 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
     end
   end
 
+  def handle_in("resume_session", _payload, socket) do
+    membership = socket.assigns.current_membership
+
+    attrs = %{
+      account_id: membership.account_id,
+      user_id: membership.user_id,
+      membership_id: membership.id
+    }
+
+    case Session.resume(attrs, subscriber: self()) do
+      {:ok, %{session_id: session_id, pid: pid, proposal: proposal}} ->
+        {:reply, {:ok, %{session_id: session_id, proposal: proposal}},
+         assign(socket, :session_pid, pid)}
+
+      {:error, reason} ->
+        {:reply, {:error, %{reason: reason_string(reason)}}, socket}
+    end
+  end
+
   def handle_in("give_consent", _payload, socket) do
     with_own_session(socket, fn pid -> Session.record_consent(pid) end)
   end
@@ -129,12 +154,24 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
   end
 
   def handle_in("cancel_session", _payload, socket) do
-    with_household_session(socket, fn pid, actor ->
-      case Session.cancel(pid, actor) do
-        :ok -> {:reply, {:ok, %{status: "cancelled"}}, assign(socket, :session_pid, nil)}
-        {:error, reason} -> {:reply, {:error, %{reason: reason_string(reason)}}, socket}
+    membership = socket.assigns.current_membership
+
+    if Session.whereis(membership.account_id) do
+      with_household_session(socket, fn pid, actor ->
+        cancel_reply(Session.cancel(pid, actor), socket)
+      end)
+    else
+      # No process runs it: a session waiting for recovery after a restart.
+      actor = %{membership_id: membership.id, owner?: membership.role == :owner}
+
+      case Session.cancel_recoverable(membership.account_id, actor) do
+        {:error, reason} when reason in [:no_session, :session_running] ->
+          {:reply, {:error, %{reason: "no_active_session"}}, socket}
+
+        result ->
+          cancel_reply(result, socket)
       end
-    end)
+    end
   end
 
   def handle_in(_event, _payload, socket),
@@ -147,6 +184,12 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
   end
 
   def handle_info(_message, socket), do: {:noreply, socket}
+
+  defp cancel_reply(:ok, socket),
+    do: {:reply, {:ok, %{status: "cancelled"}}, assign(socket, :session_pid, nil)}
+
+  defp cancel_reply({:error, reason}, socket),
+    do: {:reply, {:error, %{reason: reason_string(reason)}}, socket}
 
   # Stop and Cancel act on the Household's session whichever socket opened
   # it; the session itself authorizes the actor.

@@ -388,4 +388,85 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     assert_reply(ref, :error, %{reason: "no_active_session"})
     assert Process.alive?(socket.channel_pid)
   end
+
+  # The socket drops; the session stays for its absence grace.
+  defp drop!(socket) do
+    Process.unlink(socket.channel_pid)
+    ref = Process.monitor(socket.channel_pid)
+    close(socket)
+    assert_receive {:DOWN, ^ref, :process, _, _}
+  end
+
+  test "a Member who reconnects resumes the session and reads its Proposal", %{household: h} do
+    socket = join!(h, h.owner)
+    ref = push(socket, "start_session", @range)
+    assert_reply(ref, :ok, %{session_id: session_id})
+    ref = push(socket, "give_consent", %{})
+    assert_reply(ref, :ok, _)
+    ref = push(socket, "send_message", %{"text" => "Plan dinner"})
+    assert_reply(ref, :ok, _)
+    assert_push("agent_event", %{"type" => "proposal", "proposal_id" => proposal_id})
+    assert_push("agent_event", %{"type" => "turn_completed"})
+
+    drop!(socket)
+
+    socket = join!(h, h.owner)
+    ref = push(socket, "resume_session", %{})
+
+    assert_reply(ref, :ok, %{
+      session_id: ^session_id,
+      proposal: %{"proposal_id" => ^proposal_id, "status" => "valid"}
+    })
+
+    # The resumed socket drives the session again.
+    ref = push(socket, "give_consent", %{})
+    assert_reply(ref, :ok, _)
+    cancel!(socket)
+  end
+
+  test "resuming without a Planning Session is refused", %{household: h} do
+    socket = join!(h, h.owner)
+    ref = push(socket, "resume_session", %{})
+    assert_reply(ref, :error, %{reason: "no_session"})
+  end
+
+  test "resuming a session that does not answer is refused as busy", %{household: h} do
+    socket = join!(h, h.owner)
+    ref = push(socket, "start_session", @range)
+    assert_reply(ref, :ok, _)
+    pid = Session.whereis(h.account_id)
+    _ = Session.current_proposal(pid)
+
+    drop!(socket)
+    :ok = :sys.suspend(pid)
+
+    socket = join!(h, h.owner)
+    ref = push(socket, "resume_session", %{})
+    # The session's default answer timeout is 5 seconds.
+    assert_reply(ref, :error, %{reason: "session_busy"}, 6_000)
+    assert Session.whereis(h.account_id) == pid
+
+    :ok = :sys.resume(pid)
+    cancel!(socket)
+  end
+
+  test "cancel_session frees a slot held by a session waiting for recovery", %{household: h} do
+    member = member!(h)
+    member_socket = join!(h, member)
+    ref = push(member_socket, "start_session", @range)
+    assert_reply(ref, :ok, _)
+
+    # A server restart: no process runs the session any more.
+    pid = Session.whereis(h.account_id)
+    monitor = Process.monitor(pid)
+    :ok = DynamicSupervisor.terminate_child(MealPlannerApi.PlanningAgent.SessionSupervisor, pid)
+    assert_receive {:DOWN, ^monitor, :process, ^pid, _}
+
+    owner_socket = join!(h, h.owner)
+    cancel!(owner_socket)
+
+    ref = push(owner_socket, "start_session", @range)
+    assert_reply(ref, :ok, _)
+    cancel!(owner_socket)
+  end
 end

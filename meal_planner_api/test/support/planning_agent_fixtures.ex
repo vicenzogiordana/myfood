@@ -23,9 +23,10 @@ defmodule MealPlannerApi.PlanningAgentFixtures do
 
   @doc """
   Checks out a shared sandbox owned by a separate process and, on exit, waits
-  for every Planning Session to end (they stop once their subscriber, the test
-  process, is gone) before the connection is released, so session processes
-  never outlive the test's database access.
+  for every Planning Session to end before the connection is released, so
+  session processes never outlive the test's database access. A session
+  outlives its last subscriber for the absence grace, so it is shut down
+  rather than awaited.
   """
   def sandbox_sessions! do
     owner = Ecto.Adapters.SQL.Sandbox.start_owner!(Repo, shared: true)
@@ -34,13 +35,7 @@ defmodule MealPlannerApi.PlanningAgentFixtures do
       sup = MealPlannerApi.PlanningAgent.SessionSupervisor
 
       for {_, pid, _, _} <- DynamicSupervisor.which_children(sup), is_pid(pid) do
-        ref = Process.monitor(pid)
-
-        receive do
-          {:DOWN, ^ref, _, _, _} -> :ok
-        after
-          1_000 -> DynamicSupervisor.terminate_child(sup, pid)
-        end
+        DynamicSupervisor.terminate_child(sup, pid)
       end
 
       Ecto.Adapters.SQL.Sandbox.stop_owner(owner)
@@ -78,6 +73,13 @@ defmodule MealPlannerApi.PlanningAgentFixtures do
       |> Repo.insert!()
 
     member_map(user, membership)
+  end
+
+  @doc "Removes the Member from the Household, as the Owner's removal does."
+  def remove_member!(member) do
+    import Ecto.Query, only: [from: 2]
+    {1, _} = Repo.delete_all(from(m in AccountMembership, where: m.id == ^member.membership_id))
+    :ok
   end
 
   @doc "Session attributes for the given Member."

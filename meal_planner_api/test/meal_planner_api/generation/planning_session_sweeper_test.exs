@@ -68,6 +68,10 @@ defmodule MealPlannerApi.Generation.PlanningSession.SweeperTest do
         content: "hi"
       })
 
+      # An agent session waiting for recovery keeps a Workspace snapshot
+      # (issue #107); an expired grace discards it.
+      :ok = PlanningRepo.save_recovery(account.id, session.id, "fictitious snapshot")
+
       topic = "planning:#{account.id}"
       :ok = Phoenix.PubSub.subscribe(PubSub, topic)
 
@@ -100,6 +104,7 @@ defmodule MealPlannerApi.Generation.PlanningSession.SweeperTest do
         )
 
       assert children_count == 0
+      assert PlanningRepo.fetch_recovery(session_id) == :error
     end
   end
 

@@ -16,7 +16,9 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
   paid usage and counted iterations even when it kills the turn. The
   optional `on_workspace` callback receives the Workspace after every tool
   call, so a Stop keeps what deterministic tools already produced
-  (including a presented Proposal).
+  (including a presented Proposal). The optional `present?` callback is
+  asked before every model call: while the Member is absent no new call
+  starts and the turn ends `{:interrupted, :member_absent}`.
   """
 
   alias MealPlannerApi.PlanningAgent.{Allowance, CallBounds, Tools}
@@ -32,10 +34,15 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
           optional(:checkpoint) => (term() -> any()),
           optional(:report_allowance) => (Allowance.t() -> any()),
           optional(:bounds) => CallBounds.t(),
-          optional(:on_workspace) => (map() -> any())
+          optional(:on_workspace) => (map() -> any()),
+          optional(:present?) => (-> boolean())
         }
 
-  @type outcome :: :completed | {:limit_reached, String.t()} | {:failed, term()}
+  @type outcome ::
+          :completed
+          | {:limit_reached, String.t()}
+          | {:failed, term()}
+          | {:interrupted, :member_absent}
 
   @doc "Runs a turn and returns its outcome with the updated conversation state."
   @spec run(turn()) :: %{
@@ -47,13 +54,19 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
         }
   def run(turn), do: iterate(turn)
 
+  # No new model call starts while the Member is absent; the turn ends
+  # without counting an iteration.
   defp iterate(turn) do
-    case Allowance.start_iteration(turn.allowance) do
-      {:ok, allowance} ->
-        turn |> put_allowance(allowance) |> call_model()
+    if Map.get(turn, :present?, fn -> true end).() do
+      case Allowance.start_iteration(turn.allowance) do
+        {:ok, allowance} ->
+          turn |> put_allowance(allowance) |> call_model()
 
-      {:limit, limit} ->
-        finish(turn, {:limit_reached, limit})
+        {:limit, limit} ->
+          finish(turn, {:limit_reached, limit})
+      end
+    else
+      finish(turn, {:interrupted, :member_absent})
     end
   end
 

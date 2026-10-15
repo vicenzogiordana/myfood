@@ -363,7 +363,10 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
   end
 
   describe "shutdown and lease" do
-    test "a supervisor shutdown releases the Household lock", %{household: h, owner: owner} do
+    # A shutdown is a server restart: the session stays recoverable for its
+    # grace (see SessionRecoveryTest), so its row and slot are kept.
+    test "a supervisor shutdown keeps the Household lock for recovery",
+         %{household: h, owner: owner} do
       {session_id, pid} = start!(h, owner, [])
       ref = Process.monitor(pid)
 
@@ -374,14 +377,8 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
                )
 
       assert_receive {:DOWN, ^ref, :process, ^pid, _}
-      assert_receive {:planning_agent_event, ^session_id, %{"type" => "session_ended"}}
-      assert active_sessions(h) == []
-
-      assert {:ok, _} =
-               Session.start(session_attrs(h, owner, {@monday, @tuesday}),
-                 model: {Scripted, []},
-                 subscriber: self()
-               )
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "session_ended"}}
+      assert [%PlanningSession{id: ^session_id}] = active_sessions(h)
     end
 
     test "a session whose lock row was expired stops on lease renewal",

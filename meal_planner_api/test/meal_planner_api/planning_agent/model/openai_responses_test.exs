@@ -90,6 +90,43 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponsesTest do
     end
   end
 
+  describe "recovery" do
+    test "keeps the spend of the Planning Session, never its credentials" do
+      {:ok, state} = OpenAIResponses.init(opts())
+
+      # A call was in flight when the server stopped: its reservation was
+      # never settled, so its worst case stays spent.
+      {:ok, ledger} =
+        MealPlannerApi.PlanningAgent.SpendLedger.reserve(state.ledger, %{micros: 700, tokens: 70})
+
+      state = %{state | ledger: %{ledger | spent_micros: 300, spent_tokens: 150}}
+
+      saved = OpenAIResponses.recoverable(state)
+      refute inspect(saved, limit: :infinity) =~ "test-key"
+
+      assert {:ok, recovered} = OpenAIResponses.recover(opts(), saved)
+
+      assert OpenAIResponses.spend(recovered) == %{
+               spent_micros: 1_000,
+               spent_tokens: 220,
+               reserved_micros: 0,
+               reserved_tokens: 0
+             }
+
+      assert recovered.config.api_key == "test-key"
+    end
+
+    test "still refuses without configured caps" do
+      {:ok, state} = OpenAIResponses.init(opts())
+
+      assert {:error, :spend_caps_unconfigured} =
+               OpenAIResponses.recover(
+                 opts(spend_cap_micros: nil),
+                 OpenAIResponses.recoverable(state)
+               )
+    end
+  end
+
   describe "respond/2" do
     test "sends one Responses API request and settles spend to actual usage" do
       stub_response(
