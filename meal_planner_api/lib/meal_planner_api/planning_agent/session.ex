@@ -12,25 +12,99 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       Household returns `{:error, :session_already_active}`.
     * `record_consent/1` — the Member's explicit consent to external AI use.
     * `send_message/2` — a Member message; runs one agent turn.
+    * `authorize_continuation/2` — the session Member's explicit
+      authorization to continue after a limit was reached.
     * `cancel/2` — ends the session (session's Member or Household Owner).
+    * `confirm/3` — the session Member's confirmation of the exact displayed
+      Proposal: saves its Planned Meals and appends its Purchase to the
+      Shopping List (see "Confirmation").
+    * `save_recipe/3` — the session Member's explicit save of a dictated
+      Recipe Draft as a user-created Household Recipe (see "Recipe Drafts")
+    * `confirmation_status/2` — the status of a confirmation, queryable after
+      the Planning Session ended.
+    * `approve_deviations/3` — the session Member's Deviation Approval of the
+      exact displayed Proposal (see "Approvals").
+    * `approve_absence_exception/3` — the session Member's Absence Exception
+      for an absent Member (see "Approvals").
     * `whereis/1` — the active session process of a Household, if any.
 
   ## Events
 
   Subscribers receive `{:planning_agent_event, session_id, event}` where
   `event["type"]` is one of `progress`, `assistant_message`, `question`,
-  `proposal`, `optimizer_failed`, `consent_required`, `limit_reached`,
-  `agent_unavailable`, `turn_completed`, `session_cancelled`, `session_ended`.
+  `proposal`, `recipe_draft`, `recipe_saved`, `optimizer_failed`, `consent_required`, `limit_reached`,
+  `agent_unavailable`, `turn_completed`, `run_finished`, `session_cancelled`,
+  `session_ended`, `proposal_confirmed`, `proposal_invalidated`,
+  `confirmation_unresolved`, `deviations_approved`, `absence_exception_approved`.
+
+  Every run (one request, or one authorized continuation) ends with exactly
+  one `run_finished` event whose `outcome` is `complete`, `partial` (stopped
+  by a limit), `failure`, `cancelled` or `unknown` (the turn crashed). Every
+  tool result carries its own outcome kind (see `MealPlannerApi.PlanningAgent.Tools`).
+
+  Streaming carries progress only: every event passes an allowlist of types
+  and fields before it is sent, so raw tool output, tool arguments and model
+  reasoning never reach subscribers.
 
   ## Limits
 
-  Per request: `max_iterations` model calls (default 10) and a global
-  deadline (default 5 minutes) after which the running turn is killed and
-  its late results are discarded.
+    * `max_iterations` agent iterations (model calls, default 10) per
+      Planning Session; a new Member message does not reset them
+    * 3 consecutive attempts without verifiable progress
+      (see `MealPlannerApi.PlanningAgent.Allowance`)
+    * a global deadline per request (default 5 minutes) after which the
+      running turn is killed and its late results are discarded
+    * per-call deadlines and retry budgets
+      (see `MealPlannerApi.PlanningAgent.CallBounds`)
 
-  Per Planning Session: the model adapter's paid-service spend and token
-  caps. The model state is created once at `start/2` and kept across Member
-  messages, so the caps are never reset between requests.
+  Reaching any of the first three stops the run and emits `limit_reached`
+  with `"requires_authorization" => true`. From then on `send_message/2`
+  refuses with `:authorization_required` until the session's Member calls
+  `authorize_continuation/2`, which extends only the reached limit and
+  resumes the request. Counters never reset on their own. The spend and
+  token caps of the model adapter are per Planning Session as well and are
+  never extended by an authorization.
+
+  ## Confirmation
+
+  Only the Member's confirmation saves a plan; no agent tool can. It names
+  the exact displayed Proposal by its `proposal_id`, which is also the
+  confirmation identity (`MealPlannerApi.PlanningAgent.Confirmation`). The
+  Planning Session then ends as committed and releases the Household's slot.
+  A replay of the same confirmation returns the original result, even after
+  the session ended, and never saves twice.
+
+  ## Recipe Drafts
+
+  `create_recipe` keeps Recipe Drafts in the Workspace only
+  (`MealPlannerApi.PlanningAgent.RecipeDraft`); a session that ends
+  unconfirmed discards them. Confirming a Proposal saves the AI-created
+  Drafts it uses as private AI-created Household Recipes. A dictated
+  (user-created) Draft is never planned or saved by the agent: only
+  `save_recipe/3` saves it, as a user-created Household Recipe.
+
+  ## Approvals
+
+  Approvals are human-only actions; the agent can only ask for them, no
+  tool grants them, and a turn can never set or change them in the
+  Workspace.
+
+  A Deviation Approval is one all-or-nothing acceptance of every Deviation
+  of the exact Proposal shown. It is bound to that Proposal's identity and
+  Deviations: any change to the Proposal (a new one from the agent, or one
+  recalculated at confirmation) voids it. A `requires_approval` Proposal is
+  confirmed only with its own approval. Approving never changes the
+  Household's stored budget or Nutrition Goal.
+
+  An Absence Exception lifts one Restriction of one Member, who is absent,
+  for specific meals of the Planning Range. The validator accepts exactly
+  those meals where only that Restriction blocked them, in
+  `present_proposal` and at confirmation. It never edits a profile, lives
+  only in this session's Workspace and so is never inherited when meals are
+  reused.
+
+  The model state is created once at `start/2` and kept across Member
+  messages, so the spend and token caps are never reset between requests.
   """
 
   use GenServer, restart: :temporary
@@ -38,7 +112,21 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   require Logger
 
   alias MealPlannerApi.Data.PlanningRepo
-  alias MealPlannerApi.PlanningAgent.{HouseholdContext, Loop, Workspace}
+
+  alias MealPlannerApi.PlanningAgent.{
+    Allowance,
+    CallBounds,
+    Confirmation,
+    HouseholdContext,
+    Loop,
+    Proposal,
+    ProposalValidator,
+    RecipeDraft,
+    Workspace
+  }
+
+  alias MealPlannerApi.Planning.RecipeOrigin
+  alias MealPlannerApi.Repo
 
   @registry MealPlannerApi.PlanningAgent.Registry
   @supervisor MealPlannerApi.PlanningAgent.SessionSupervisor
@@ -53,6 +141,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   # re-encoded on every model call.
   @max_message_bytes 4_000
   @known_slots ~w(breakfast lunch snack dinner)
+  # A confirmation may reconcile a lost acknowledgement for up to 30 s.
+  @confirm_call_timeout 60_000
 
   @type attrs :: %{
           account_id: Ecto.UUID.t(),
@@ -76,7 +166,15 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       (default from `config :meal_planner_api, :planning_agent`)
     * `:optimizer` — `{module, opts}` implementing `MealPlannerApi.PlanningAgent.Optimizer`
     * `:subscriber` — pid receiving events (more can join with `subscribe/2`)
-    * `:max_iterations`, `:deadline_ms` — per-request limits
+    * `:max_iterations`, `:deadline_ms` — execution limits
+    * `:call_policies` — per-kind overrides of the per-call deadlines and
+      retry budgets (see `MealPlannerApi.PlanningAgent.CallBounds`)
+    * `:recipe_search` — `{module, opts}` replacing the recipe search read
+      tool (`module.search(household, filters, opts)`), for tests
+    * `:confirmation_store` — `{module, opts}` replacing the confirmation
+      store (see `MealPlannerApi.PlanningAgent.Confirmation`), for tests
+    * `:reconcile_ms`, `:poll_ms` — how long and how often a lost
+      confirmation acknowledgement is reconciled (default 30 s and 1 s)
   """
   @spec start(attrs(), keyword()) ::
           {:ok, %{session_id: Ecto.UUID.t(), pid: pid()}}
@@ -102,7 +200,11 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         optimizer: Keyword.get_lazy(opts, :optimizer, fn -> config(:optimizer) end),
         subscriber: Keyword.get(opts, :subscriber),
         max_iterations: Keyword.get(opts, :max_iterations, @default_max_iterations),
-        deadline_ms: Keyword.get(opts, :deadline_ms, @default_deadline_ms)
+        deadline_ms: Keyword.get(opts, :deadline_ms, @default_deadline_ms),
+        call_policies: Keyword.get(opts, :call_policies, %{}),
+        recipe_search: Keyword.get(opts, :recipe_search),
+        confirmation_store: Keyword.get_lazy(opts, :confirmation_store, &Confirmation.store/0),
+        confirmation_opts: Keyword.take(opts, [:reconcile_ms, :poll_ms])
       }
 
       case DynamicSupervisor.start_child(@supervisor, {__MODULE__, init_args}) do
@@ -130,8 +232,25 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   refused with `:message_too_long` and never stored.
   """
   @spec send_message(GenServer.server(), String.t()) ::
-          :ok | {:error, :consent_required | :busy | :invalid_message | :message_too_long}
+          :ok
+          | {:error,
+             :consent_required
+             | :busy
+             | :invalid_message
+             | :message_too_long
+             | :authorization_required}
   def send_message(session, text), do: GenServer.call(session, {:send_message, text})
+
+  @doc """
+  The session Member's explicit authorization to continue after a limit was
+  reached: extends that limit only and resumes the request. Refuses with
+  `:forbidden` for anyone else (the Owner included) and with
+  `:no_limit_reached` when no limit is pending.
+  """
+  @spec authorize_continuation(GenServer.server(), Ecto.UUID.t()) ::
+          :ok | {:error, :forbidden | :no_limit_reached}
+  def authorize_continuation(session, membership_id),
+    do: GenServer.call(session, {:authorize_continuation, membership_id})
 
   @doc "The largest Member message, in bytes, a session accepts."
   @spec max_message_bytes() :: pos_integer()
@@ -148,6 +267,132 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   @spec cancel(GenServer.server(), %{membership_id: Ecto.UUID.t(), owner?: boolean()}) ::
           :ok | {:error, :forbidden}
   def cancel(session, actor), do: GenServer.call(session, {:cancel, actor})
+
+  @doc """
+  The session Member's confirmation of the Proposal `proposal_id` in the
+  Household `account_id`.
+
+  Returns `{:ok, summary}` when the confirmation is saved, or was already
+  saved (a replay, also after the Planning Session ended). Otherwise
+  nothing is saved:
+
+    * `:forbidden` — not the session's Member
+    * `:busy` — the agent is working; the shown Proposal may be replaced
+    * `:stale_proposal` — not the current Proposal; the Member is shown it
+      again
+    * `:session_not_active` — the Planning Session ended meanwhile
+
+  `:unresolved` means the outcome could not be verified within the
+  reconciliation window; it is never a failure, and
+  `confirmation_status/2` reports the outcome once readable.
+  """
+  @spec confirm(Ecto.UUID.t(), Ecto.UUID.t(), String.t()) ::
+          {:ok, Confirmation.summary()}
+          | {:error,
+             :forbidden
+             | :busy
+             | :stale_proposal
+             | :session_not_active
+             | :unresolved
+             | term()}
+  def confirm(account_id, membership_id, proposal_id) do
+    case whereis(account_id) do
+      nil ->
+        replayed(account_id, proposal_id)
+
+      pid ->
+        try do
+          GenServer.call(pid, {:confirm, membership_id, proposal_id}, @confirm_call_timeout)
+        catch
+          # The session ended meanwhile, for instance after this very
+          # confirmation committed.
+          :exit, {reason, _} when reason in [:noproc, :normal] ->
+            replayed(account_id, proposal_id)
+        end
+    end
+  end
+
+  @doc """
+  The session Member's explicit save of the dictated Recipe Draft
+  `recipe_id`: it becomes a user-created Household Recipe with the same id
+  and leaves the Workspace. Refuses with `:forbidden` for anyone else,
+  `:busy` while the agent is working, `:not_found` when no such Draft is in
+  the Workspace, and `:not_dictated` for an AI-created Draft, which only a
+  confirmation saves.
+  """
+  @spec save_recipe(GenServer.server(), Ecto.UUID.t(), String.t()) ::
+          {:ok, %{recipe_id: Ecto.UUID.t(), name: String.t(), origin: String.t()}}
+          | {:error, :forbidden | :busy | :not_found | :not_dictated | :invalid_recipe}
+  def save_recipe(session, membership_id, recipe_id),
+    do: GenServer.call(session, {:save_recipe, membership_id, recipe_id})
+
+  @doc """
+  The status of the confirmation `proposal_id` in the Household:
+  `{:confirmed, summary}`, `:not_found`, or `:unknown` while it cannot be read.
+  """
+  @spec confirmation_status(Ecto.UUID.t(), String.t()) ::
+          {:confirmed, Confirmation.summary()} | :not_found | :unknown
+  def confirmation_status(account_id, proposal_id),
+    do: Confirmation.lookup(Confirmation.store(), account_id, proposal_id)
+
+  @doc """
+  The session Member's Deviation Approval of the Proposal `proposal_id` in
+  the Household `account_id`: accepts every Deviation of that exact
+  Proposal, all or nothing. Refuses with:
+
+    * `:forbidden` — not the session's Member
+    * `:busy` — the agent is working; the shown Proposal may be replaced
+    * `:stale_proposal` — not the current Proposal; the Member is shown it
+      again
+    * `:no_deviations` — the Proposal is valid and needs no approval
+    * `:session_not_active` — no Planning Session is running
+  """
+  @spec approve_deviations(Ecto.UUID.t(), Ecto.UUID.t(), String.t()) ::
+          :ok
+          | {:error, :forbidden | :busy | :stale_proposal | :no_deviations | :session_not_active}
+  def approve_deviations(account_id, membership_id, proposal_id),
+    do: human_action(account_id, {:approve_deviations, membership_id, proposal_id})
+
+  @doc """
+  The session Member's Absence Exception in the Household `account_id`:
+  `%{member_id: user_id, restriction: restriction, meals: [{date, slot}]}`
+  lifts `restriction` (`{:diet, diet}` or `{:allergy, tag}`, as in
+  `MealPlannerApi.Planning.Restrictions`) of the absent Member `user_id` for
+  exactly `meals`. Refuses with:
+
+    * `:forbidden` — not the session's Member
+    * `:busy` — the agent is working
+    * `:invalid_absence_exception` — not a Restriction that Member holds, or
+      meals outside the Planning Range and its slots
+    * `:session_not_active` — no Planning Session is running
+  """
+  @spec approve_absence_exception(Ecto.UUID.t(), Ecto.UUID.t(), map()) ::
+          :ok
+          | {:error, :forbidden | :busy | :invalid_absence_exception | :session_not_active}
+  def approve_absence_exception(account_id, membership_id, exception),
+    do: human_action(account_id, {:approve_absence_exception, membership_id, exception})
+
+  defp human_action(account_id, message) do
+    case whereis(account_id) do
+      nil ->
+        {:error, :session_not_active}
+
+      pid ->
+        try do
+          GenServer.call(pid, message)
+        catch
+          :exit, {reason, _} when reason in [:noproc, :normal] -> {:error, :session_not_active}
+        end
+    end
+  end
+
+  defp replayed(account_id, proposal_id) do
+    case confirmation_status(account_id, proposal_id) do
+      {:confirmed, summary} -> {:ok, summary}
+      :not_found -> {:error, :stale_proposal}
+      :unknown -> {:error, :unresolved}
+    end
+  end
 
   @doc "Returns the session id and owning membership of a running session."
   @spec info(GenServer.server()) :: %{session_id: Ecto.UUID.t(), membership_id: Ecto.UUID.t()}
@@ -195,8 +440,16 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       subscribers: %{},
       task: nil,
       deadline_ref: nil,
-      max_iterations: args.max_iterations,
-      deadline_ms: args.deadline_ms
+      allowance: Allowance.new(args.max_iterations),
+      pending_limit: nil,
+      deadline_ms: args.deadline_ms,
+      call_policies: CallBounds.policies(args.call_policies),
+      recipe_search: args.recipe_search,
+      confirmation_store: args.confirmation_store,
+      confirmation_opts: args.confirmation_opts,
+      # Read by the running turn without a message round trip: no retry
+      # starts while no Member is connected.
+      presence: :atomics.new(1, [])
     }
 
     state = if args.subscriber, do: add_subscriber(state, args.subscriber), else: state
@@ -227,8 +480,26 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       state.task != nil ->
         {:reply, {:error, :busy}, state}
 
+      state.pending_limit != nil ->
+        {:reply, {:error, :authorization_required}, state}
+
       true ->
         state = %{state | messages: state.messages ++ [%{role: :user, content: text}]}
+        {:reply, :ok, start_turn(state)}
+    end
+  end
+
+  def handle_call({:authorize_continuation, membership_id}, _from, state) do
+    cond do
+      membership_id != state.membership_id ->
+        {:reply, {:error, :forbidden}, state}
+
+      state.pending_limit == nil ->
+        {:reply, {:error, :no_limit_reached}, state}
+
+      true ->
+        allowance = Allowance.authorize(state.allowance, state.pending_limit)
+        state = %{state | allowance: allowance, pending_limit: nil}
         {:reply, :ok, start_turn(state)}
     end
   end
@@ -240,7 +511,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   def handle_call({:cancel, %{membership_id: actor, owner?: owner?}}, _from, state) do
     if actor == state.membership_id or owner? == true do
-      state = stop_turn(state)
+      state = cancel_run(state)
 
       # When the store refuses the cancel, session_id is kept so terminate/2
       # falls back to expire_session and the Household is not left blocked
@@ -262,6 +533,112 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     end
   end
 
+  def handle_call({:confirm, membership_id, _proposal_id}, _from, state)
+      when membership_id != state.membership_id,
+      do: {:reply, {:error, :forbidden}, state}
+
+  def handle_call({:confirm, _membership_id, proposal_id}, _from, state) do
+    case Confirmation.lookup(state.confirmation_store, state.account_id, proposal_id) do
+      {:confirmed, summary} ->
+        if own_proposal?(state, proposal_id),
+          do: confirmed(state, proposal_id, summary),
+          else: {:reply, {:ok, summary}, state}
+
+      _not_confirmed ->
+        confirm_current(state, proposal_id)
+    end
+  end
+
+  def handle_call({:save_recipe, membership_id, _recipe_id}, _from, state)
+      when membership_id != state.membership_id,
+      do: {:reply, {:error, :forbidden}, state}
+
+  def handle_call({:save_recipe, _membership_id, _recipe_id}, _from, %{task: %Task{}} = state),
+    do: {:reply, {:error, :busy}, state}
+
+  def handle_call({:save_recipe, _membership_id, recipe_id}, _from, state) do
+    case Map.fetch(state.workspace.recipe_drafts, recipe_id) do
+      :error ->
+        {:reply, {:error, :not_found}, state}
+
+      {:ok, %{source: :user_created} = draft} ->
+        save_dictated(state, draft)
+
+      {:ok, _ai_created} ->
+        {:reply, {:error, :not_dictated}, state}
+    end
+  end
+
+  def handle_call({:approve_deviations, membership_id, _proposal_id}, _from, state)
+      when membership_id != state.membership_id,
+      do: {:reply, {:error, :forbidden}, state}
+
+  def handle_call(
+        {:approve_deviations, _membership_id, _proposal_id},
+        _from,
+        %{task: %Task{}} = state
+      ),
+      do: {:reply, {:error, :busy}, state}
+
+  def handle_call({:approve_deviations, _membership_id, proposal_id}, _from, state) do
+    case state.workspace.proposal do
+      %{"proposal_id" => ^proposal_id, "status" => "requires_approval"} = shown ->
+        approval = %{proposal_id: proposal_id, deviations: shown["deviations"]}
+
+        emit(state, %{
+          "type" => "deviations_approved",
+          "proposal_id" => proposal_id,
+          "deviations" => shown["deviations"]
+        })
+
+        {:reply, :ok, put_in(state.workspace.deviation_approval, approval)}
+
+      %{"proposal_id" => ^proposal_id} ->
+        {:reply, {:error, :no_deviations}, state}
+
+      current ->
+        if current, do: emit(state, current)
+        {:reply, {:error, :stale_proposal}, state}
+    end
+  end
+
+  def handle_call({:approve_absence_exception, membership_id, _exception}, _from, state)
+      when membership_id != state.membership_id,
+      do: {:reply, {:error, :forbidden}, state}
+
+  def handle_call(
+        {:approve_absence_exception, _membership_id, _exception},
+        _from,
+        %{task: %Task{}} = state
+      ),
+      do: {:reply, {:error, :busy}, state}
+
+  def handle_call({:approve_absence_exception, _membership_id, exception}, _from, state) do
+    case absence_exception(state, exception) do
+      {:ok, exception} ->
+        meals =
+          Enum.map(exception.meals, fn {date, slot} ->
+            %{"date" => Date.to_iso8601(date), "slot" => slot}
+          end)
+
+        # Generic: neither the event nor the agent learns whose Restriction
+        # it is or which one.
+        emit(state, %{"type" => "absence_exception_approved", "meals" => meals})
+        notice = %{role: :user, content: absence_notice(meals)}
+
+        state = %{
+          state
+          | workspace: Map.update!(state.workspace, :absence_exceptions, &(&1 ++ [exception])),
+            messages: state.messages ++ [notice]
+        }
+
+        {:reply, :ok, state}
+
+      :error ->
+        {:reply, {:error, :invalid_absence_exception}, state}
+    end
+  end
+
   @impl true
   def handle_info({:agent_event, ref, event}, %{task: %Task{ref: ref}} = state) do
     emit(state, event)
@@ -278,6 +655,12 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   def handle_info({:model_state, _stale_ref, _model_state}, state), do: {:noreply, state}
 
+  # Allowance checkpoints keep counted iterations of a turn that is killed.
+  def handle_info({:allowance, ref, allowance}, %{task: %Task{ref: ref}} = state),
+    do: {:noreply, %{state | allowance: allowance}}
+
+  def handle_info({:allowance, _stale_ref, _allowance}, state), do: {:noreply, state}
+
   def handle_info({ref, result}, %{task: %Task{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
 
@@ -285,17 +668,16 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       clear_turn(state)
       | model_state: result.model_state,
         messages: result.messages,
-        workspace: result.workspace
+        workspace: adopt_workspace(state.workspace, result.workspace),
+        allowance: result.allowance
     }
 
-    if result.outcome == :completed, do: emit(state, %{"type" => "turn_completed"})
-    {:noreply, state}
+    {:noreply, finish_run(state, result.outcome)}
   end
 
   def handle_info({:deadline, ref}, %{task: %Task{ref: ref}} = state) do
     state = stop_turn(state)
-    emit(state, %{"type" => "limit_reached", "limit" => "time"})
-    {:noreply, state}
+    {:noreply, finish_run(state, {:limit_reached, "time"})}
   end
 
   def handle_info({:deadline, _stale}, state), do: {:noreply, state}
@@ -304,12 +686,15 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     Logger.error("planning agent turn crashed: #{inspect(reason)}")
     state = clear_turn(state)
     emit(state, %{"type" => "agent_unavailable", "reason" => "internal_error"})
+    emit(state, %{"type" => "run_finished", "outcome" => "unknown"})
     {:noreply, state}
   end
 
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
     case Map.pop(state.subscribers, pid) do
       {^ref, subscribers} when map_size(subscribers) == 0 ->
+        :atomics.put(state.presence, 1, 0)
+
         # Grace and recovery belong to a later slice of #93: for now the
         # Planning Session ends when its last subscriber is gone.
         {:stop, :normal, %{state | subscribers: subscribers}}
@@ -333,7 +718,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       # does not expire the row a second time.
       {:error, :not_active} ->
         Logger.warning("planning agent session lost its lock; stopping")
-        state = stop_turn(state)
+        state = cancel_run(state)
         emit(state, %{"type" => "session_ended"})
         {:stop, :normal, %{state | session_id: nil}}
     end
@@ -343,7 +728,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   @impl true
   def terminate(_reason, state) do
-    _ = stop_turn(state)
+    _ = cancel_run(state)
 
     if state.session_id do
       _ = PlanningRepo.expire_session(state.account_id, state.session_id)
@@ -374,6 +759,244 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   defp redact_message(message), do: message
 
   # ===========================================================================
+  # Confirmation
+  # ===========================================================================
+
+  # A confirmed Proposal ends this session only when it is this session's
+  # own current one (a lost acknowledgement retried in the same process). A
+  # replay of a Proposal from an earlier, already ended session of the
+  # Household is answered with its summary and leaves this session running.
+  defp own_proposal?(%{workspace: %{proposal: %{"proposal_id" => id}}}, id), do: true
+  defp own_proposal?(_state, _proposal_id), do: false
+
+  defp confirm_current(%{task: %Task{}} = state, _proposal_id),
+    do: {:reply, {:error, :busy}, state}
+
+  defp confirm_current(%{workspace: %{proposal: %{"proposal_id" => id} = shown}} = state, id) do
+    commit(state, shown)
+  end
+
+  # Not the Proposal on display: the Member is shown the current one again.
+  defp confirm_current(state, _proposal_id) do
+    if state.workspace.proposal, do: emit(state, state.workspace.proposal)
+    {:reply, {:error, :stale_proposal}, state}
+  end
+
+  # Restrictions, the Projected Pantry, prices and the budget are read
+  # again: concurrent changes by other Members are caught here.
+  defp commit(state, shown) do
+    household = HouseholdContext.load(state.account_id, state.user_id)
+
+    state = %{
+      state
+      | household: household,
+        instructions: HouseholdContext.instructions(household, state.range, state.slots)
+    }
+
+    ctx = %{
+      account_id: state.account_id,
+      range: state.range,
+      slots: state.slots,
+      household: household,
+      recipe_drafts: state.workspace.recipe_drafts,
+      absence_exceptions: state.workspace.absence_exceptions
+    }
+
+    with {:valid, meals} <- ProposalValidator.validate(Proposal.meals(shown), ctx),
+         {current, purchase} = Proposal.build(meals, ctx),
+         true <- Proposal.same_content?(current, shown) || {:stale, current},
+         :ok <- approved(state.workspace, shown) do
+      save(state, shown, purchase)
+    else
+      {:invalid, violations} ->
+        {:reply, {:error, :revalidation_conflict},
+         revalidation_conflict(state, shown, violations)}
+
+      # Only the affected parts changed: the same meals are shown again,
+      # recalculated, as a new Proposal the Member is asked to confirm.
+      {:stale, current} ->
+        emit(state, current)
+        state = %{state | workspace: show(state.workspace, current)}
+        {:reply, {:error, :stale_proposal}, state}
+
+      {:error, :approval_required} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  # A Proposal with Deviations is confirmed only with the Deviation Approval
+  # of that exact Proposal: same identity, same Deviations.
+  defp approved(_workspace, %{"status" => "valid"}), do: :ok
+
+  defp approved(
+         %{deviation_approval: %{proposal_id: id, deviations: deviations}},
+         %{"proposal_id" => id, "deviations" => deviations}
+       ),
+       do: :ok
+
+  defp approved(_workspace, _shown), do: {:error, :approval_required}
+
+  # Approvals are human-owned: the Workspace a turn returns never sets or
+  # changes them.
+  @human_owned [:deviation_approval, :absence_exceptions]
+
+  defp adopt_workspace(current, from_turn) do
+    from_turn
+    |> Map.merge(Map.take(current, @human_owned))
+    |> void_stale_approval()
+  end
+
+  defp show(workspace, proposal), do: void_stale_approval(%{workspace | proposal: proposal})
+
+  # Any change to the shown Proposal voids its Deviation Approval.
+  defp void_stale_approval(
+         %{deviation_approval: %{proposal_id: id}, proposal: %{"proposal_id" => id}} = workspace
+       ),
+       do: workspace
+
+  defp void_stale_approval(workspace), do: %{workspace | deviation_approval: nil}
+
+  # Recipe Drafts the Proposal uses are saved with it as AI-created
+  # Household Recipes; unused Drafts are discarded with the Workspace.
+  defp save(state, shown, purchase) do
+    meals = Proposal.meals(shown)
+
+    recipes =
+      meals
+      |> Enum.map(& &1.recipe_id)
+      |> Enum.uniq()
+      |> Enum.flat_map(&List.wrap(state.workspace.recipe_drafts[&1]))
+
+    attrs = %{
+      confirmation_id: shown["proposal_id"],
+      account_id: state.account_id,
+      session_id: state.session_id,
+      membership_id: state.membership_id,
+      user_id: state.user_id,
+      range: state.range,
+      meals: meals,
+      recipes: recipes,
+      purchase: purchase
+    }
+
+    case Confirmation.run(state.confirmation_store, attrs, state.confirmation_opts) do
+      {:ok, summary} ->
+        confirmed(state, shown["proposal_id"], summary)
+
+      {:error, :unresolved} ->
+        emit(state, %{"type" => "confirmation_unresolved", "proposal_id" => shown["proposal_id"]})
+        {:reply, {:error, :unresolved}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  # The shown Proposal no longer passes validation: it is voided and the
+  # agent is sent the violations to build a corrected one, which needs the
+  # Member's confirmation again. With a reached limit pending, the Member
+  # decides first whether the agent continues.
+  defp revalidation_conflict(state, shown, violations) do
+    emit(state, %{
+      "type" => "proposal_invalidated",
+      "proposal_id" => shown["proposal_id"],
+      "reason" => "revalidation_conflict",
+      "violations" => violations
+    })
+
+    state = %{state | workspace: show(Workspace.void_proposal(state.workspace), nil)}
+
+    if state.consent? and state.pending_limit == nil do
+      notice = %{role: :user, content: conflict_notice(violations)}
+      start_turn(%{state | messages: state.messages ++ [notice]})
+    else
+      state
+    end
+  end
+
+  # An Absence Exception names one Restriction of one Member that Member
+  # holds, for meals of the Planning Range and its slots.
+  defp absence_exception(state, %{member_id: member_id, restriction: restriction, meals: meals})
+       when is_list(meals) and meals != [] do
+    member = Enum.find(state.household.members, &(&1.id == member_id))
+    holds? = member != nil and restriction in member.restrictions
+
+    if holds? and Enum.all?(meals, &in_range?(state, &1)) and Enum.uniq(meals) == meals,
+      do: {:ok, %{member_id: member_id, restriction: restriction, meals: meals}},
+      else: :error
+  end
+
+  defp absence_exception(_state, _exception), do: :error
+
+  defp in_range?(%{range: {from_date, to_date}, slots: slots}, {%Date{} = date, slot}),
+    do:
+      Date.compare(date, from_date) != :lt and Date.compare(date, to_date) != :gt and
+        slot in slots
+
+  defp in_range?(_state, _meal), do: false
+
+  # Code-authored: the Member approved it, so the agent can present again.
+  defp absence_notice(meals) do
+    "[Absence Exception approved by the Member] One household Restriction is lifted for " <>
+      "these meals only: " <>
+      Jason.encode!(meals) <>
+      ". present_proposal now accepts them where only that Restriction blocked them."
+  end
+
+  # Code-authored: the Member asked to confirm and code found the
+  # violations. Violations are generic and never name a Member.
+  defp conflict_notice(violations) do
+    "[Confirmation blocked by code] The Member tried to confirm the shown Proposal, but " <>
+      "revalidation found violations: " <>
+      Jason.encode!(violations) <>
+      ". Nothing was saved. Build a corrected plan and present it with present_proposal."
+  end
+
+  # The Planning Session is committed with the confirmation: it ends without
+  # expiring its row, and the Household's slot is free.
+  defp confirmed(state, proposal_id, summary) do
+    emit(state, %{
+      "type" => "proposal_confirmed",
+      "proposal_id" => proposal_id,
+      "meals_count" => summary.meals_count,
+      "shopping_lines_count" => summary.shopping_lines_count
+    })
+
+    emit(state, %{"type" => "session_ended"})
+    {:stop, :normal, {:ok, summary}, %{state | session_id: nil}}
+  end
+
+  defp save_dictated(state, draft) do
+    Repo.transaction(fn ->
+      case RecipeDraft.persist(Repo, draft, state.account_id, state.user_id) do
+        {:ok, recipe} -> recipe
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+    |> case do
+      {:ok, recipe} ->
+        saved = %{
+          recipe_id: recipe.id,
+          name: recipe.name,
+          origin: RecipeOrigin.label(recipe.source)
+        }
+
+        emit(state, %{
+          "type" => "recipe_saved",
+          "recipe_id" => saved.recipe_id,
+          "name" => saved.name,
+          "origin" => saved.origin
+        })
+
+        state = update_in(state.workspace.recipe_drafts, &Map.delete(&1, draft.id))
+        {:reply, {:ok, saved}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  # ===========================================================================
   # Turn management
   # ===========================================================================
 
@@ -381,12 +1004,16 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     session = self()
     holder = make_ref()
 
+    deadline_at = System.monotonic_time(:millisecond) + state.deadline_ms
+    presence = state.presence
+    policies = state.call_policies
+
     turn = %{
       model: state.model,
       model_state: state.model_state,
       instructions: state.instructions,
       messages: state.messages,
-      max_iterations: state.max_iterations,
+      allowance: state.allowance,
       tool_context: %{
         account_id: state.account_id,
         session_id: state.session_id,
@@ -394,6 +1021,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         slots: state.slots,
         household: state.household,
         optimizer: state.optimizer,
+        recipe_search: state.recipe_search,
         workspace: state.workspace
       }
     }
@@ -403,12 +1031,31 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         ref = receive(do: ({^holder, ref} -> ref))
         emit_fun = fn event -> send(session, {:agent_event, ref, event}) end
         checkpoint = fn model_state -> send(session, {:model_state, ref, seal(model_state)}) end
-        tool_context = Map.put(turn.tool_context, :emit, emit_fun)
+        report_allowance = fn allowance -> send(session, {:allowance, ref, allowance}) end
+
+        bounds =
+          CallBounds.new(
+            policies: policies,
+            deadline_at: deadline_at,
+            present?: fn -> :atomics.get(presence, 1) == 1 end,
+            on_retry: fn kind, attempt, _reason ->
+              emit_fun.(%{
+                "type" => "progress",
+                "step" => "retrying",
+                "call" => Atom.to_string(kind),
+                "attempt" => attempt
+              })
+            end
+          )
+
+        tool_context = turn.tool_context |> Map.put(:emit, emit_fun) |> Map.put(:bounds, bounds)
 
         result =
           %{turn | tool_context: tool_context, model_state: unseal(turn.model_state)}
           |> Map.put(:emit, emit_fun)
+          |> Map.put(:bounds, bounds)
           |> Map.put(:checkpoint, checkpoint)
+          |> Map.put(:report_allowance, report_allowance)
           |> Loop.run()
 
         %{result | model_state: seal(result.model_state)}
@@ -419,22 +1066,57 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     %{state | task: task, deadline_ref: deadline_ref}
   end
 
-  defp stop_turn(%{task: nil} = state), do: state
-
   defp stop_turn(%{task: task} = state) do
     _ = Task.shutdown(task, :brutal_kill)
     # The task is dead, so every checkpoint it sent is already queued: adopt
-    # the latest one so the killed turn's paid usage stays counted.
-    clear_turn(%{state | model_state: latest_checkpoint(task.ref, state.model_state)})
+    # the latest ones so the killed turn's paid usage and iterations stay
+    # counted.
+    clear_turn(%{
+      state
+      | model_state: latest_checkpoint(:model_state, task.ref, state.model_state),
+        allowance: latest_checkpoint(:allowance, task.ref, state.allowance)
+    })
   end
 
-  defp latest_checkpoint(ref, model_state) do
+  defp latest_checkpoint(tag, ref, value) do
     receive do
-      {:model_state, ^ref, newer} -> latest_checkpoint(ref, newer)
+      {^tag, ^ref, newer} -> latest_checkpoint(tag, ref, newer)
     after
-      0 -> model_state
+      0 -> value
     end
   end
+
+  # A running turn interrupted by Cancel, a lost lock or shutdown.
+  defp cancel_run(%{task: nil} = state), do: state
+
+  defp cancel_run(state) do
+    state = stop_turn(state)
+    emit(state, %{"type" => "run_finished", "outcome" => "cancelled"})
+    state
+  end
+
+  # The run's terminal events come from its outcome. A reached limit stops
+  # execution until the Member authorizes continuing.
+  defp finish_run(state, :completed) do
+    emit(state, %{"type" => "turn_completed"})
+    emit(state, %{"type" => "run_finished", "outcome" => "complete"})
+    state
+  end
+
+  defp finish_run(state, {:limit_reached, limit}) do
+    emit(state, %{"type" => "limit_reached", "limit" => limit, "requires_authorization" => true})
+    emit(state, %{"type" => "run_finished", "outcome" => "partial"})
+    %{state | pending_limit: limit}
+  end
+
+  defp finish_run(state, {:failed, reason}) do
+    emit(state, %{"type" => "agent_unavailable", "reason" => reason_string(reason)})
+    emit(state, %{"type" => "run_finished", "outcome" => "failure"})
+    state
+  end
+
+  defp reason_string(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_string(_reason), do: "provider_error"
 
   defp clear_turn(state) do
     if state.deadline_ref, do: Process.cancel_timer(state.deadline_ref)
@@ -456,15 +1138,58 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     if Map.has_key?(state.subscribers, pid) do
       state
     else
+      :atomics.put(state.presence, 1, 1)
       %{state | subscribers: Map.put(state.subscribers, pid, Process.monitor(pid))}
     end
   end
 
   defp emit(state, event) do
-    Enum.each(Map.keys(state.subscribers), fn pid ->
-      send(pid, {:planning_agent_event, state.session_id, event})
+    case sanitize(event) do
+      nil ->
+        Logger.warning("planning agent dropped an event outside the allowlist")
+
+      event ->
+        Enum.each(Map.keys(state.subscribers), fn pid ->
+          send(pid, {:planning_agent_event, state.session_id, event})
+        end)
+    end
+  end
+
+  @event_fields %{
+    "progress" => ~w(step call attempt tool outcome),
+    "assistant_message" => ~w(text),
+    "question" => ~w(text),
+    "proposal" => ~w(proposal_id status meals purchase consumed_cost budget deviations),
+    "recipe_draft" =>
+      ~w(recipe_id name origin draft servings slots ingredients steps nutrition cost),
+    "optimizer_failed" => ~w(reason),
+    "consent_required" => [],
+    "limit_reached" => ~w(limit requires_authorization),
+    "agent_unavailable" => ~w(reason),
+    "turn_completed" => [],
+    "run_finished" => ~w(outcome),
+    "session_cancelled" => [],
+    "session_ended" => [],
+    "recipe_saved" => ~w(recipe_id name origin),
+    "proposal_confirmed" => ~w(proposal_id meals_count shopping_lines_count),
+    "proposal_invalidated" => ~w(proposal_id reason violations),
+    "confirmation_unresolved" => ~w(proposal_id),
+    "deviations_approved" => ~w(proposal_id deviations),
+    "absence_exception_approved" => ~w(meals)
+  }
+  @meal_fields ~w(date slot recipe_id name origin draft)
+
+  # Streaming carries progress only: known event types with known fields.
+  # Anything else, such as raw tool output or model reasoning, is dropped.
+  defp sanitize(%{"type" => type} = event) when is_map_key(@event_fields, type) do
+    event
+    |> Map.take(["type" | Map.fetch!(@event_fields, type)])
+    |> Map.replace_lazy("meals", fn meals ->
+      Enum.map(List.wrap(meals), &Map.take(&1, @meal_fields))
     end)
   end
+
+  defp sanitize(_event), do: nil
 
   defp schedule_lease_renewal, do: Process.send_after(self(), :renew_lease, @lease_renew_ms)
 

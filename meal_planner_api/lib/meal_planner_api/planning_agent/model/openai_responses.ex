@@ -16,8 +16,14 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
 
   The caps bound the whole Planning Session: `init/1` runs once when the
   session starts and the ledger travels in the model state across every
-  Member message. The numeric caps are a human decision and are not set by
-  default.
+  Member message; every attempt of every model call, retries included,
+  draws on the same ledger. The numeric caps are a human decision and are
+  not set by default.
+
+  Provider failures are typed: `:provider_unauthorized` (401/403),
+  `:provider_rejected_request` (other 4xx), `:provider_conflict` (409),
+  `:provider_timeout` (transport timeout) and `:provider_unavailable`
+  (408, 429, 5xx, other transport errors). Only the last two are transient.
 
   ## Configuration
 
@@ -83,8 +89,9 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
             {usage, actual} =
               case usage(response) do
                 {:ok, usage} -> {usage, cost(state.config, usage)}
-                # Usage is unknown: the worst case stays spent.
-                :unknown -> {%{input_tokens: 0, output_tokens: 0}, reservation}
+                # Usage is unknown: reported as unknown (never as zero) and
+                # the worst case stays spent.
+                :unknown -> {nil, reservation}
               end
 
             state = %{state | ledger: SpendLedger.settle(state.ledger, reservation, actual)}
@@ -163,16 +170,25 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
       {:ok, %Req.Response{status: 200, body: %{} = response}} ->
         {:ok, response}
 
-      {:ok, %Req.Response{status: status}} when status in [401, 403] ->
-        {:error, :provider_unauthorized}
+      {:ok, %Req.Response{status: status}} ->
+        {:error, status_reason(status)}
 
-      {:ok, %Req.Response{}} ->
-        {:error, :provider_unavailable}
+      {:error, %Req.TransportError{reason: :timeout}} ->
+        {:error, :provider_timeout}
 
       {:error, _exception} ->
         {:error, :provider_unavailable}
     end
   end
+
+  # Only `:provider_unavailable` and `:provider_timeout` are transient (see
+  # `MealPlannerApi.PlanningAgent.CallBounds`). Permission, invalid request
+  # and conflict answers are never retried automatically.
+  defp status_reason(status) when status in [401, 403], do: :provider_unauthorized
+  defp status_reason(409), do: :provider_conflict
+  defp status_reason(status) when status in [408, 429], do: :provider_unavailable
+  defp status_reason(status) when status in 400..499, do: :provider_rejected_request
+  defp status_reason(_status), do: :provider_unavailable
 
   # ---------------------------------------------------------------------------
   # Response

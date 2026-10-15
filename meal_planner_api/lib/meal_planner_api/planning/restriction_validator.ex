@@ -21,6 +21,9 @@ defmodule MealPlannerApi.Planning.RestrictionValidator do
       other keys (for example dislikes) are ignored
     * `opts[:absence_exceptions]` - approved Absence Exceptions,
       `[%{member_id: term(), restriction: restriction, meals: [{date, slot}]}]`
+    * `opts[:tags_by_recipe]` - reviewed tags of recipes that are not stored
+      (Recipe Drafts), `%{recipe_id => %{ingredient_id => MapSet.t(tag)}}`;
+      they take precedence over the catalog for those recipe ids
   """
 
   alias MealPlannerApi.Persistence.Catalog
@@ -57,7 +60,12 @@ defmodule MealPlannerApi.Planning.RestrictionValidator do
   @spec validate([meal()], [member()], keyword()) :: :ok | {:error, [conflict()]}
   def validate(meals, members, opts \\ []) when is_list(meals) and is_list(members) do
     exceptions = opts |> Keyword.get(:absence_exceptions, []) |> lifted_set()
-    tags_by_recipe = meals |> Enum.map(& &1.recipe_id) |> Catalog.reviewed_tags_by_recipe()
+
+    tags_by_recipe =
+      meals
+      |> Enum.map(& &1.recipe_id)
+      |> Catalog.reviewed_tags_by_recipe()
+      |> Map.merge(Keyword.get(opts, :tags_by_recipe, %{}))
 
     meals
     |> Enum.flat_map(fn meal ->

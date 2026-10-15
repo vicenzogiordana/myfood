@@ -120,4 +120,19 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.PortTest do
     assert {:error, :optimizer_unavailable, %{}} =
              PortOptimizer.solve(payload("solve"), opts(python_executable: "/nonexistent/python"))
   end
+
+  defmodule ClosedPortRunner do
+    @moduledoc false
+    # A subprocess that is already gone when the first frame is written.
+    def open_port(_opts) do
+      port = Port.open({:spawn_executable, System.find_executable("true")}, [:binary])
+      Port.close(port)
+      {:ok, port}
+    end
+  end
+
+  test "a subprocess gone before the handshake is reported as crashed" do
+    assert {:error, :optimizer_crashed, %{}} =
+             PortOptimizer.solve(payload("solve"), opts(port_runner: ClosedPortRunner))
+  end
 end

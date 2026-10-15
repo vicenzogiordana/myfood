@@ -13,6 +13,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
   import Ecto.Query
 
   alias MealPlannerApi.Persistence.Catalog.{Ingredient, IngredientTag, Recipe, RecipeIngredient}
+  alias MealPlannerApi.Planning.RecipeOrigin
   alias MealPlannerApi.Repo
 
   @default_limit 20
@@ -29,6 +30,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
   @type recipe :: %{
           id: Ecto.UUID.t(),
           name: String.t(),
+          origin: String.t(),
           slots: [String.t()],
           ingredients: [String.t()],
           calories_per_serving: integer() | nil,
@@ -54,7 +56,6 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
       |> filter_text(filters[:query])
       |> filter_ingredient(filters[:ingredient])
       |> exclude_ids(filters[:exclude_recipe_ids])
-      |> exclude_restricted(household)
       |> order_by([r], asc: r.name, asc: r.id)
       |> limit(^limit)
       |> preload(recipe_ingredients: :ingredient)
@@ -81,7 +82,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
         {:ok, %{}}
 
       ids ->
-        by_ids = household |> visible() |> where([r], r.id in ^ids)
+        by_ids = household |> current() |> where([r], r.id in ^ids)
         safe = by_ids |> exclude_restricted(household) |> select([r], r.id) |> Repo.all()
         safe = MapSet.new(safe)
 
@@ -101,7 +102,36 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
       {:error, :search_failed}
   end
 
-  defp visible(household) do
+  @doc """
+  One recipe visible to the Household, with its ingredients, quantities,
+  steps and nutrition completeness, for `get_recipe`. A recipe of another
+  Household, a superseded one, or one breaking a Restriction is not found.
+  """
+  @spec get(map(), String.t()) :: {:ok, map()} | {:error, :not_found | :search_failed}
+  def get(household, recipe_id) do
+    with {:ok, id} <- Ecto.UUID.cast(recipe_id),
+         %Recipe{} = recipe <-
+           household
+           |> visible()
+           |> where([r], r.id == ^id)
+           |> preload([:recipe_steps, recipe_ingredients: :ingredient])
+           |> Repo.one() do
+      {:ok, detail(recipe)}
+    else
+      _ -> {:error, :not_found}
+    end
+  rescue
+    _error in [DBConnection.ConnectionError, Postgrex.Error, Ecto.QueryError] ->
+      {:error, :search_failed}
+  end
+
+  # Catalog Recipes and the Household's own, current and Restriction-safe.
+  defp visible(household), do: household |> current() |> exclude_restricted(household)
+
+  # Catalog Recipes and the Household's own, current, whatever their
+  # Restrictions: `lookup/2` must tell a Restriction conflict from a missing
+  # recipe.
+  defp current(household) do
     from(r in Recipe, as: :recipe)
     |> where([r], is_nil(r.account_id) or r.account_id == ^household.account_id)
     |> where([r], is_nil(r.superseded_by_id))
@@ -224,12 +254,53 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
     %{
       id: recipe.id,
       name: recipe.name,
+      origin: RecipeOrigin.label(recipe.source),
       slots: recipe.suitable_for_slots,
       ingredients: recipe.recipe_ingredients |> Enum.map(& &1.ingredient.name) |> Enum.sort(),
       calories_per_serving: recipe.calories_per_serving,
       protein_g_per_serving: number(recipe.protein_g_per_serving),
       carbs_g_per_serving: number(recipe.carbs_g_per_serving),
       fat_g_per_serving: number(recipe.fat_g_per_serving)
+    }
+  end
+
+  @nutrition_fields [
+    {"calories", :calories_per_serving},
+    {"protein_g", :protein_g_per_serving},
+    {"carbs_g", :carbs_g_per_serving},
+    {"fat_g", :fat_g_per_serving}
+  ]
+
+  defp detail(recipe) do
+    per_serving =
+      Map.new(@nutrition_fields, fn {key, field} -> {key, number(Map.get(recipe, field))} end)
+
+    missing = for {key, _} <- @nutrition_fields, is_nil(per_serving[key]), do: key
+
+    %{
+      "recipe_id" => recipe.id,
+      "name" => recipe.name,
+      "origin" => RecipeOrigin.label(recipe.source),
+      "draft" => false,
+      "servings" => recipe.servings,
+      "slots" => recipe.suitable_for_slots,
+      "ingredients" =>
+        recipe.recipe_ingredients
+        |> Enum.sort_by(&{&1.ingredient.name, &1.unit})
+        |> Enum.map(fn ri ->
+          %{
+            "ingredient" => ri.ingredient.name,
+            "quantity_milli" => ri.quantity_milli,
+            "unit" => Atom.to_string(ri.unit)
+          }
+        end),
+      "steps" =>
+        recipe.recipe_steps |> Enum.sort_by(& &1.step_number) |> Enum.map(& &1.instructions),
+      "nutrition" => %{
+        "per_serving" => per_serving,
+        "complete" => missing == [],
+        "missing" => missing
+      }
     }
   end
 

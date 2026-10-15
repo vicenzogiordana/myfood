@@ -13,6 +13,9 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
     * `released` — `{date, slot}` meals of the last Proposal that the next
       `run_optimizer` may change; every other meal stays fixed
     * `variety_cap` — the session's variety cap
+    * `recipe_drafts` — Recipe Drafts by id (`MealPlannerApi.PlanningAgent.RecipeDraft`)
+    * `deviation_approval` / `absence_exceptions` — human-owned approvals,
+      set only by the Member through `MealPlannerApi.PlanningAgent.Session`
 
   `edit/3` applies one edit or refuses it with a reason; approvals are human
   actions and can never be set here.
@@ -34,7 +37,10 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
             pins: %{},
             excluded: MapSet.new(),
             released: MapSet.new(),
-            variety_cap: 2
+            variety_cap: 2,
+            recipe_drafts: %{},
+            deviation_approval: nil,
+            absence_exceptions: []
 
   @type key :: {Date.t(), String.t()}
   @type t :: %__MODULE__{
@@ -44,7 +50,10 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
           pins: %{key() => %{recipe_id: Ecto.UUID.t(), name: String.t()}},
           excluded: MapSet.t(Ecto.UUID.t()),
           released: MapSet.t(key()),
-          variety_cap: pos_integer()
+          variety_cap: pos_integer(),
+          recipe_drafts: %{Ecto.UUID.t() => term()},
+          deviation_approval: map() | nil,
+          absence_exceptions: [map()]
         }
 
   @type ctx :: %{
@@ -146,6 +155,14 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
     end)
     |> Enum.sort_by(&{Date.to_iso8601(&1.date), &1.slot})
   end
+
+  @doc """
+  Voids the shown Proposal (it failed revalidation): its meals stop being
+  the base of the next re-optimization, so nothing but the Pins stays fixed.
+  """
+  @spec void_proposal(t()) :: t()
+  def void_proposal(%__MODULE__{} = ws),
+    do: %{ws | proposal: nil, proposed: [], released: MapSet.new()}
 
   @doc """
   Records a valid Proposal: its meals become the base of the next

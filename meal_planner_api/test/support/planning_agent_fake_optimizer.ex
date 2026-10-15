@@ -2,7 +2,8 @@ defmodule MealPlannerApi.PlanningAgent.FakeOptimizer do
   @moduledoc """
   Hand-written optimizer fake for planning agent tests.
 
-  Options: `:notify` receives `{:optimizer_payload, payload}`; `:result` is a
+  Options: `:notify` receives `{:optimizer_payload, payload}`; `:notify_opts`
+  receives `{:optimizer_opts, opts}`, the options the call was made with; `:result` is a
   1-arity function from the payload to the optimizer result. Without
   `:result` it picks the first candidate of every day and slot.
   """
@@ -12,6 +13,7 @@ defmodule MealPlannerApi.PlanningAgent.FakeOptimizer do
   @impl true
   def solve(payload, opts) do
     if pid = Keyword.get(opts, :notify), do: send(pid, {:optimizer_payload, payload})
+    if pid = Keyword.get(opts, :notify_opts), do: send(pid, {:optimizer_opts, opts})
     Keyword.get(opts, :result, &first_candidates/1).(payload)
   end
 

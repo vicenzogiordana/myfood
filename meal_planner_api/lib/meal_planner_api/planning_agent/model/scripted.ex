@@ -33,6 +33,9 @@ defmodule MealPlannerApi.PlanningAgent.Model.Scripted do
   def respond(%{script: [step | rest]} = state, request) do
     notify(state, request)
     state = %{state | script: rest, calls: state.calls + 1}
+    # Like a dispatched paid call, the consumed step is reported before it
+    # resolves, so a step killed at its deadline is not replayed.
+    checkpoint(request, state)
 
     case resolve(step, request) do
       {:text, text} ->
@@ -62,4 +65,9 @@ defmodule MealPlannerApi.PlanningAgent.Model.Scripted do
     do: send(pid, {:scripted_model_request, request})
 
   defp notify(_state, _request), do: :ok
+
+  defp checkpoint(%{checkpoint: checkpoint}, state) when is_function(checkpoint, 1),
+    do: checkpoint.(state)
+
+  defp checkpoint(_request, _state), do: :ok
 end

@@ -45,7 +45,8 @@ defmodule MealPlannerApi.PlanningAgent.Model do
           optional(:checkpoint) => (term() -> any())
         }
   @type usage :: %{input_tokens: non_neg_integer(), output_tokens: non_neg_integer()}
-  @type response :: %{text: String.t() | nil, tool_calls: [tool_call()], usage: usage()}
+  # `usage` is nil when the provider did not report it: missing, not zero.
+  @type response :: %{text: String.t() | nil, tool_calls: [tool_call()], usage: usage() | nil}
 
   @doc """
   Builds the adapter state for one Planning Session. A paid adapter must
