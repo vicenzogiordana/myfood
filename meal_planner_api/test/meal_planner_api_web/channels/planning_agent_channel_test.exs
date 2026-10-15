@@ -430,6 +430,26 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     assert_reply(ref, :error, %{reason: "no_session"})
   end
 
+  test "resuming a session that does not answer is refused as busy", %{household: h} do
+    socket = join!(h, h.owner)
+    ref = push(socket, "start_session", @range)
+    assert_reply(ref, :ok, _)
+    pid = Session.whereis(h.account_id)
+    _ = Session.current_proposal(pid)
+
+    drop!(socket)
+    :ok = :sys.suspend(pid)
+
+    socket = join!(h, h.owner)
+    ref = push(socket, "resume_session", %{})
+    # The session's default answer timeout is 5 seconds.
+    assert_reply(ref, :error, %{reason: "session_busy"}, 6_000)
+    assert Session.whereis(h.account_id) == pid
+
+    :ok = :sys.resume(pid)
+    cancel!(socket)
+  end
+
   test "cancel_session frees a slot held by a session waiting for recovery", %{household: h} do
     member = member!(h)
     member_socket = join!(h, member)

@@ -487,10 +487,12 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       Member of the Household
     * `:no_session` — no Planning Session to return to (it ended, or its
       grace expired)
+    * `:session_busy` — the running session did not answer within
+      `opts[:rejoin_timeout]` (5 seconds by default); it is left running
   """
   @spec resume(map(), keyword()) ::
           {:ok, %{session_id: Ecto.UUID.t(), pid: pid(), proposal: map() | nil}}
-          | {:error, :forbidden | :no_session | term()}
+          | {:error, :forbidden | :no_session | :session_busy | term()}
   def resume(attrs, opts \\ []) do
     subscriber = Keyword.get(opts, :subscriber)
 
@@ -502,16 +504,23 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         pid ->
           # The process may stop meanwhile; a restart-like stop leaves the
           # session recoverable.
-          with {:error, :no_session} <- rejoin(pid, attrs, subscriber),
+          with {:error, :no_session} <- rejoin(pid, attrs, subscriber, rejoin_timeout(opts)),
                do: recover(attrs, opts)
       end
     end
   end
 
-  defp rejoin(pid, attrs, subscriber) do
-    GenServer.call(pid, {:resume, attrs.membership_id, subscriber})
+  defp rejoin_timeout(opts), do: Keyword.get(opts, :rejoin_timeout, 5_000)
+
+  # A session that does not answer in time is still alive: the return is
+  # refused as busy and never recovers it, which would run it twice. Any
+  # other stop during the call (a restart, or a crash that kept its
+  # snapshot) leaves the session to recovery.
+  defp rejoin(pid, attrs, subscriber, timeout) do
+    GenServer.call(pid, {:resume, attrs.membership_id, subscriber}, timeout)
   catch
-    :exit, {reason, _} when reason in [:noproc, :normal, :shutdown] -> {:error, :no_session}
+    :exit, {:timeout, _} -> {:error, :session_busy}
+    :exit, _reason -> {:error, :no_session}
   end
 
   # No process runs the session (the server restarted): it is restored from
@@ -547,7 +556,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         {:error, _reason} ->
           case whereis(attrs.account_id) do
             nil -> {:error, :no_session}
-            pid -> rejoin(pid, attrs, Keyword.get(opts, :subscriber))
+            pid -> rejoin(pid, attrs, Keyword.get(opts, :subscriber), rejoin_timeout(opts))
           end
       end
     end

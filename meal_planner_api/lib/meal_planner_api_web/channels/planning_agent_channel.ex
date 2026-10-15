@@ -15,7 +15,8 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
     * `resume_session` — the session Member's return after leaving or a
       server restart, within the absence grace. Replies `%{session_id,
       proposal}` (the last valid Proposal, or `nil`) or
-      `%{reason: "forbidden" | "no_session"}`.
+      `%{reason: "forbidden" | "no_session" | "session_busy"}` (`session_busy`:
+      the running session did not answer in time; retry later).
     * `give_consent` — records the Member's consent to external AI use.
     * `send_message` — `%{"text"}`; replies `:ok` or
       `%{reason: "consent_required" | "busy" | "invalid_message" | "message_too_long" |

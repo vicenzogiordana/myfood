@@ -267,6 +267,51 @@ defmodule MealPlannerApi.PlanningAgent.SessionRecoveryTest do
     end
   end
 
+  describe "a return that races the running session" do
+    # The return's call is queued on a suspended session, which then stops
+    # abnormally while the call waits for its reply.
+    test "falls back to recovery when the session crashes during the return",
+         %{household: h, member: member} do
+      socket = socket!()
+      {session_id, pid} = start!(h, member, @proposal_script, subscriber: socket)
+      proposal_id = propose!(pid, session_id)
+      settle(pid)
+
+      :ok = :sys.suspend(pid)
+      returning = Task.async(fn -> resume(h, member) end)
+      wait_for_queued_call(pid)
+      crash!(pid)
+
+      assert {:ok, %{session_id: ^session_id, proposal: %{"proposal_id" => ^proposal_id}}} =
+               Task.await(returning)
+    end
+
+    test "refuses as busy, without recovering, when the session does not answer",
+         %{household: h, member: member} do
+      {session_id, pid} = start!(h, member, [], subscriber: self())
+      settle(pid)
+
+      :ok = :sys.suspend(pid)
+
+      assert {:error, :session_busy} = resume(h, member, [], rejoin_timeout: 50)
+      assert Session.whereis(h.account_id) == pid
+      assert %PlanningSession{status: :active} = session_row(session_id)
+
+      :ok = :sys.resume(pid)
+    end
+  end
+
+  defp wait_for_queued_call(pid) do
+    case Process.info(pid, :message_queue_len) do
+      {:message_queue_len, 0} ->
+        Process.sleep(5)
+        wait_for_queued_call(pid)
+
+      _ ->
+        :ok
+    end
+  end
+
   describe "access to a recovered session" do
     test "a Member removed from the Household cannot resume it", %{household: h, member: member} do
       socket = socket!()
