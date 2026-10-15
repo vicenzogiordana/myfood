@@ -1,0 +1,185 @@
+defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponsesTest do
+  @moduledoc """
+  The OpenAI Responses adapter against a stubbed HTTP endpoint: mandatory
+  spend and token caps, worst-case reservation before every call, settlement
+  to actual usage after it.
+  """
+
+  use ExUnit.Case, async: true
+
+  alias MealPlannerApi.PlanningAgent.Model.OpenAIResponses
+
+  @stub __MODULE__
+
+  @request %{
+    instructions: "You are the culinary planning agent.",
+    messages: [
+      %{role: :user, content: "Plan something light"},
+      %{role: :tool_call, id: "call_1", name: "search_recipes", arguments: %{"query" => "soup"}},
+      %{role: :tool_result, id: "call_1", name: "search_recipes", content: %{"recipes" => []}}
+    ],
+    tools: [
+      %{
+        name: "search_recipes",
+        description: "Search recipes",
+        parameters: %{"type" => "object", "properties" => %{}}
+      }
+    ]
+  }
+
+  defp opts(overrides \\ []) do
+    Keyword.merge(
+      [
+        api_key: "test-key",
+        spend_cap_micros: 1_000_000,
+        token_cap: 1_000_000,
+        input_price_micros_per_mtok: 1_000_000,
+        output_price_micros_per_mtok: 4_000_000,
+        max_output_tokens: 1_000,
+        req_options: [plug: {Req.Test, @stub}]
+      ],
+      overrides
+    )
+  end
+
+  defp stub_response(body) do
+    test = self()
+
+    Req.Test.stub(@stub, fn conn ->
+      {:ok, raw, conn} = Plug.Conn.read_body(conn)
+      send(test, {:provider_called, conn, Jason.decode!(raw)})
+      Req.Test.json(conn, body)
+    end)
+  end
+
+  defp text_response(text, usage) do
+    %{
+      "output" => [
+        %{"type" => "message", "content" => [%{"type" => "output_text", "text" => text}]}
+      ],
+      "usage" => usage
+    }
+  end
+
+  describe "init/1" do
+    test "refuses to run when the spend cap or the token cap is unset" do
+      assert {:error, :spend_caps_unconfigured} =
+               OpenAIResponses.init(opts(spend_cap_micros: nil))
+
+      assert {:error, :spend_caps_unconfigured} = OpenAIResponses.init(opts(token_cap: nil))
+
+      assert {:error, :spend_caps_unconfigured} =
+               OpenAIResponses.init(opts(spend_cap_micros: nil, token_cap: nil))
+
+      assert {:error, :spend_caps_unconfigured} = OpenAIResponses.init(opts(token_cap: 0))
+    end
+
+    test "refuses to run when prices are unknown, since spend could not be enforced" do
+      assert {:error, :pricing_unconfigured} =
+               OpenAIResponses.init(opts(output_price_micros_per_mtok: nil))
+    end
+
+    test "refuses to run without an API key" do
+      assert {:error, :provider_unconfigured} = OpenAIResponses.init(opts(api_key: nil))
+    end
+
+    test "defaults to the single launch model" do
+      {:ok, state} = OpenAIResponses.init(opts())
+      assert state.config.model == "gpt-6.1-sol"
+    end
+  end
+
+  describe "respond/2" do
+    test "sends one Responses API request and settles spend to actual usage" do
+      stub_response(
+        text_response("Here you go.", %{"input_tokens" => 100, "output_tokens" => 50})
+      )
+
+      {:ok, state} = OpenAIResponses.init(opts())
+
+      assert {:ok, %{text: "Here you go.", tool_calls: [], usage: usage}, state} =
+               OpenAIResponses.respond(state, @request)
+
+      assert usage == %{input_tokens: 100, output_tokens: 50}
+
+      assert_received {:provider_called, conn, body}
+      assert conn.request_path == "/v1/responses"
+      assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer test-key"]
+      assert body["model"] == "gpt-6.1-sol"
+      assert body["instructions"] == @request.instructions
+      assert body["max_output_tokens"] == 1_000
+      assert body["store"] == false
+
+      assert [
+               %{"role" => "user", "content" => "Plan something light"},
+               %{"type" => "function_call", "call_id" => "call_1", "name" => "search_recipes"} =
+                 call,
+               %{"type" => "function_call_output", "call_id" => "call_1", "output" => output}
+             ] = body["input"]
+
+      assert Jason.decode!(call["arguments"]) == %{"query" => "soup"}
+      assert Jason.decode!(output) == %{"recipes" => []}
+      assert [%{"type" => "function", "name" => "search_recipes"}] = body["tools"]
+
+      # 100 input tokens at 1 USD/Mtok + 50 output tokens at 4 USD/Mtok = 300 micro-USD.
+      assert OpenAIResponses.spend(state) == %{
+               spent_micros: 300,
+               spent_tokens: 150,
+               reserved_micros: 0,
+               reserved_tokens: 0
+             }
+    end
+
+    test "parses tool calls" do
+      stub_response(%{
+        "output" => [
+          %{
+            "type" => "function_call",
+            "call_id" => "call_9",
+            "name" => "run_optimizer",
+            "arguments" => ~s({"exclude_recipe_ids":[]})
+          }
+        ],
+        "usage" => %{"input_tokens" => 10, "output_tokens" => 5}
+      })
+
+      {:ok, state} = OpenAIResponses.init(opts())
+
+      assert {:ok, %{tool_calls: [%{id: "call_9", name: "run_optimizer", arguments: args}]}, _} =
+               OpenAIResponses.respond(state, @request)
+
+      assert args == %{"exclude_recipe_ids" => []}
+    end
+
+    test "reserves the worst-case cost before calling and refuses when it exceeds the spend cap" do
+      stub_response(text_response("never", %{"input_tokens" => 1, "output_tokens" => 1}))
+
+      # Worst case output alone is 1_000 tokens at 4 USD/Mtok = 4_000 micro-USD.
+      {:ok, state} = OpenAIResponses.init(opts(spend_cap_micros: 3_999))
+
+      assert {:error, :spend_cap_reached, state} = OpenAIResponses.respond(state, @request)
+      refute_received {:provider_called, _, _}
+      assert OpenAIResponses.spend(state).spent_micros == 0
+    end
+
+    test "the cumulative token cap stops further calls" do
+      stub_response(text_response("ok", %{"input_tokens" => 900, "output_tokens" => 600}))
+      {:ok, state} = OpenAIResponses.init(opts(token_cap: 2_400))
+
+      assert {:ok, _, state} = OpenAIResponses.respond(state, @request)
+      assert_received {:provider_called, _, _}
+
+      assert {:error, :token_cap_reached, _state} = OpenAIResponses.respond(state, @request)
+      refute_received {:provider_called, _, _}
+    end
+
+    test "a provider failure is reported and keeps the worst case as spent" do
+      Req.Test.stub(@stub, fn conn -> Plug.Conn.send_resp(conn, 503, "unavailable") end)
+      {:ok, state} = OpenAIResponses.init(opts())
+
+      assert {:error, :provider_unavailable, state} = OpenAIResponses.respond(state, @request)
+      assert %{reserved_micros: 0, spent_micros: spent} = OpenAIResponses.spend(state)
+      assert spent >= 4_000
+    end
+  end
+end
