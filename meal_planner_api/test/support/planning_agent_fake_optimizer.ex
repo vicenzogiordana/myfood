@@ -17,12 +17,19 @@ defmodule MealPlannerApi.PlanningAgent.FakeOptimizer do
     Keyword.get(opts, :result, &first_candidates/1).(payload)
   end
 
-  @doc "A plan taking the first candidate of each slot on every day."
+  @doc """
+  A plan keeping every fixed meal of the payload and taking the first
+  candidate of each slot for every other day and slot.
+  """
   def first_candidates(payload) do
+    fixed =
+      Map.new(payload["fixed_meals"] || [], &{{&1["day"], &1["slot"]}, &1["recipe_id"]})
+
     meals =
       for day <- payload["days"], slot <- payload["slots"] do
         [first | _] = payload["candidates_by_slot"][slot]
-        %{"day" => day, "slot" => slot, "recipe_id" => first["recipe_id"]}
+        recipe_id = Map.get(fixed, {day, slot}, first["recipe_id"])
+        %{"day" => day, "slot" => slot, "recipe_id" => recipe_id}
       end
 
     {:ok, %{"meals" => meals}}

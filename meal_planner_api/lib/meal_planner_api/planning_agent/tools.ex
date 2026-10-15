@@ -6,12 +6,18 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
     * `search_recipes` — structured search; Restriction-violating recipes are
       excluded by code
+    * `get_workspace` — the current Workspace: Proposal, draft, Pins,
+      Excluded Recipes, Released Meals and variety cap
+    * `edit_workspace` — Pin, unpin, exclude, include, release meals and set
+      the variety cap; invalid edits are refused with a reason and approvals
+      can never be set
     * `get_plan` — the Household's Planned Meals by date or range (planned,
       not eaten)
     * `reuse_plan` — a past stretch of the Meal Plan as the new draft; it
       must pass `present_proposal` like any optimizer plan
-    * `run_optimizer` — the existing optimizer over Restriction-safe candidates;
-      failures are typed errors, never a fallback plan
+    * `run_optimizer` — the existing optimizer over Restriction-safe
+      candidates; it keeps every Pin and, once a Proposal exists, every meal
+      that was not released. Failures are typed errors, never a fallback plan
     * `get_pantry` — the Projected Pantry (Pantry minus stock committed to
       not-yet-cooked Planned Meals)
     * `lookup_prices` — stored prices with provenance; missing prices are
@@ -37,6 +43,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   in model arguments is ignored. Unknown tools are rejected by code.
   """
 
+  alias MealPlannerApi.Optimization.Variety
+
   alias MealPlannerApi.PlanningAgent.{
     CallBounds,
     MealPlan,
@@ -45,7 +53,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     Proposal,
     ProposalValidator,
     RecipeDraft,
-    RecipeSearch
+    RecipeSearch,
+    Workspace
   }
 
   @type context :: %{
@@ -53,7 +62,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
           required(:range) => {Date.t(), Date.t()},
           required(:slots) => [String.t()],
           required(:household) => map(),
-          required(:workspace) => map(),
+          required(:workspace) => Workspace.t(),
           optional(atom()) => term()
         }
 
@@ -80,6 +89,39 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "ingredient" => %{"type" => "string", "description" => "Ingredient name to require"},
             "limit" => %{"type" => "integer", "minimum" => 1, "maximum" => 50}
           },
+          "additionalProperties" => false
+        }
+      },
+      %{
+        name: "get_workspace",
+        description:
+          "Read the current Workspace: last Proposal, draft plan, Pins, Excluded Recipes, " <>
+            "Released Meals and variety cap.",
+        parameters: %{"type" => "object", "properties" => %{}, "additionalProperties" => false}
+      },
+      %{
+        name: "edit_workspace",
+        description:
+          "Edit the Workspace with one action. pin: fix a recipe to a date and slot " <>
+            "(omit recipe_id to keep the proposed meal). unpin: remove a Pin. exclude / include: " <>
+            "add or remove an Excluded Recipe. release: let the next run_optimizer change one " <>
+            "meal of the last Proposal (release only the meals the household mentioned; ask " <>
+            "before releasing more). release_all: redo every meal that is not pinned (Pins last for the session). " <>
+            "set_variety_cap: how many times a recipe may appear in any 7 days. " <>
+            "Approvals and confirmations are never possible here. Refused edits return a reason.",
+        parameters: %{
+          "type" => "object",
+          "properties" => %{
+            "action" => %{
+              "type" => "string",
+              "enum" => ~w(pin unpin exclude include release release_all set_variety_cap)
+            },
+            "date" => %{"type" => "string", "description" => "ISO date inside the range"},
+            "slot" => %{"type" => "string"},
+            "recipe_id" => %{"type" => "string"},
+            "variety_cap" => %{"type" => "integer", "minimum" => 1}
+          },
+          "required" => ["action"],
           "additionalProperties" => false
         }
       },
@@ -148,7 +190,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
         name: "run_optimizer",
         description:
           "Build a plan for every day and slot of the Planning Range with the optimizer. " <>
-            "Optionally exclude recipes. Returns the plan or a typed error.",
+            "Pins and every meal of the last Proposal that was not released stay fixed. " <>
+            "Optionally exclude more recipes for this run. Returns the plan with its " <>
+            "Deviations or a typed error.",
         parameters: %{
           "type" => "object",
           "properties" => %{
@@ -250,6 +294,20 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
+  defp run("get_workspace", _args, ctx),
+    do: {Workspace.to_data(ctx.workspace, ctx), ctx.workspace, :continue}
+
+  defp run("edit_workspace", args, ctx) do
+    case Workspace.edit(ctx.workspace, args, ctx) do
+      {:ok, workspace, result} ->
+        {result, workspace, :continue}
+
+      {:error, code, extra} ->
+        {Map.merge(%{"error" => code, "reason" => Workspace.reason(code)}, extra), ctx.workspace,
+         :continue}
+    end
+  end
+
   defp run("get_recipe", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "reading_recipe"})
     id = string_arg(args, "recipe_id")
@@ -320,21 +378,31 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     emit(ctx, %{"type" => "progress", "step" => "running_optimizer"})
 
     exclude =
-      args |> Map.get("exclude_recipe_ids", []) |> List.wrap() |> Enum.filter(&is_binary/1)
+      args
+      |> Map.get("exclude_recipe_ids", [])
+      |> List.wrap()
+      |> Enum.filter(&is_binary/1)
+      |> Enum.concat(MapSet.to_list(ctx.workspace.excluded))
+      |> Enum.uniq()
+
+    fixed = Workspace.fixed_meals(ctx.workspace)
 
     with {:ok, candidates_by_slot} <- candidates(ctx, exclude),
-         payload = payload(ctx, candidates_by_slot),
-         {:ok, meals} <- solve(ctx, payload) do
+         {:ok, candidates_by_slot} <- with_fixed_candidates(ctx, candidates_by_slot, fixed),
+         {:ok, payload} <- payload(ctx, candidates_by_slot, exclude, fixed),
+         {:ok, solution} <- solve(ctx, payload),
+         :ok <- keeps_fixed(solution.meals, fixed) do
       names =
         candidates_by_slot
         |> Map.values()
         |> List.flatten()
         |> Map.new(&{&1["recipe_id"], &1["label"]})
 
-      workspace = %{ctx.workspace | draft: meals}
+      workspace = %{ctx.workspace | draft: solution.meals}
 
       result =
-        %{"status" => "ok", "meals" => Enum.map(meals, &meal_data(&1, names))}
+        %{"status" => "ok", "meals" => Enum.map(solution.meals, &meal_data(&1, names))}
+        |> Map.merge(solution.extra)
         |> with_missing(missing(candidates_by_slot))
 
       {result, workspace, :continue}
@@ -346,6 +414,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
       {:error, reason} ->
         {%{"error" => reason_string(reason, "search_failed")}, %{ctx.workspace | draft: nil},
+         :continue}
+
+      {:error, :fixed_meal_unavailable, meal} ->
+        {%{"error" => "fixed_meal_unavailable", "meal" => meal}, %{ctx.workspace | draft: nil},
          :continue}
 
       {:error, reason, details} ->
@@ -389,7 +461,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
           "deviations" => deviations
         }
 
-        {result, %{ctx.workspace | proposal: proposal}, :continue}
+        {result, Workspace.present(ctx.workspace, proposal, meals), :continue}
 
       {:invalid, violations} ->
         {%{"status" => "invalid", "violations" => violations}, ctx.workspace, :continue}
@@ -505,6 +577,72 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     }
   end
 
+  # A fixed meal's recipe may fall outside the searched candidates of its
+  # slot; it is added so the optimizer can keep it. A recipe that now violates
+  # a Restriction is flagged, so the optimizer refuses it instead of keeping it.
+  # A fixed meal of an AI-created Recipe Draft of the Workspace is kept from
+  # the Draft itself, since Drafts are not stored recipes.
+  defp with_fixed_candidates(_ctx, candidates_by_slot, []), do: {:ok, candidates_by_slot}
+
+  defp with_fixed_candidates(ctx, candidates_by_slot, fixed) do
+    drafts = ctx |> drafts() |> Map.filter(fn {_id, draft} -> RecipeDraft.plannable?(draft) end)
+    {draft_meals, stored_meals} = Enum.split_with(fixed, &Map.has_key?(drafts, &1.recipe_id))
+
+    candidates_by_slot =
+      Enum.reduce(draft_meals, candidates_by_slot, fn meal, acc ->
+        put_draft_candidate(acc, meal.slot, Map.fetch!(drafts, meal.recipe_id))
+      end)
+
+    with_stored_fixed(ctx, candidates_by_slot, stored_meals)
+  end
+
+  defp with_stored_fixed(_ctx, candidates_by_slot, []), do: {:ok, candidates_by_slot}
+
+  defp with_stored_fixed(ctx, candidates_by_slot, fixed) do
+    case RecipeSearch.lookup(ctx.household, fixed |> Enum.map(& &1.recipe_id) |> Enum.uniq()) do
+      {:ok, found} ->
+        Enum.reduce_while(fixed, {:ok, candidates_by_slot}, fn meal, {:ok, acc} ->
+          case Map.fetch(found, meal.recipe_id) do
+            {:ok, {status, recipe}} ->
+              {:cont, {:ok, put_candidate(acc, meal.slot, recipe, status)}}
+
+            :error ->
+              {:halt, {:error, :fixed_meal_unavailable, meal_key_data(meal)}}
+          end
+        end)
+
+      {:error, :search_failed} = error ->
+        error
+    end
+  end
+
+  defp put_draft_candidate(candidates_by_slot, slot, draft) do
+    candidates = Map.get(candidates_by_slot, slot, [])
+
+    if Enum.any?(candidates, &(&1["recipe_id"] == draft.id)),
+      do: candidates_by_slot,
+      else: Map.put(candidates_by_slot, slot, candidates ++ [draft_candidate(draft)])
+  end
+
+  defp put_candidate(candidates_by_slot, slot, recipe, status) do
+    candidates = Map.get(candidates_by_slot, slot, [])
+
+    candidates =
+      cond do
+        status == :restricted ->
+          [Map.put(candidate(recipe), "violates_restriction", true)] ++
+            Enum.reject(candidates, &(&1["recipe_id"] == recipe.id))
+
+        Enum.any?(candidates, &(&1["recipe_id"] == recipe.id)) ->
+          candidates
+
+        true ->
+          candidates ++ [candidate(recipe)]
+      end
+
+    Map.put(candidates_by_slot, slot, candidates)
+  end
+
   @nutrition_fields ~w(calories_per_serving protein_g_per_serving carbs_g_per_serving
                        fat_g_per_serving)
 
@@ -522,10 +660,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   defp with_missing(result, missing),
     do: Map.merge(result, %{"outcome" => "partial", "missing" => missing})
 
-  defp payload(ctx, candidates_by_slot) do
+  defp payload(ctx, candidates_by_slot, exclude, fixed) do
     {from_date, to_date} = ctx.range
 
-    %{
+    payload = %{
       "days" => from_date |> Date.range(to_date) |> Enum.map(&Date.to_iso8601/1),
       "slots" => ctx.slots,
       "constraints" => %{
@@ -537,8 +675,27 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
           "calories" => @wide_bounds
         }
       },
-      "candidates_by_slot" => candidates_by_slot
+      "candidates_by_slot" => candidates_by_slot,
+      "excluded_recipe_ids" => exclude,
+      "fixed_meals" => Enum.map(fixed, &meal_key_data/1)
     }
+
+    prior = Variety.prior_meals(ctx.account_id, from_date)
+
+    case Variety.put(payload, prior, ctx.workspace.variety_cap) do
+      {:ok, payload} -> {:ok, payload}
+      {:error, reason} -> {:error, reason, %{}}
+    end
+  end
+
+  # Code, not the optimizer's word, guarantees that a re-optimization changes
+  # only Released Meals.
+  defp keeps_fixed(meals, fixed) do
+    planned = Map.new(meals, &{{&1.date, &1.slot}, &1.recipe_id})
+
+    if Enum.all?(fixed, &(Map.get(planned, {&1.date, &1.slot}) == &1.recipe_id)),
+      do: :ok,
+      else: {:error, :fixed_meal_moved, %{}}
   end
 
   # The solver is never retried: a timeout is inconclusive, and every other
@@ -556,8 +713,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
 
     case CallBounds.run(Map.get(ctx, :bounds), :solver, nil, attempt) do
-      {:ok, %{"meals" => meals}, _} when is_list(meals) ->
-        parse_meals(meals)
+      {:ok, %{"meals" => meals} = result, _} when is_list(meals) ->
+        with {:ok, parsed} <- parse_meals(meals) do
+          {:ok, %{meals: parsed, extra: Map.take(result, ["deviations", "optimality"])}}
+        end
 
       {:ok, _other, _} ->
         {:error, :invalid_optimizer_response, %{}}
@@ -654,6 +813,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       "name" => Map.get(names, meal.recipe_id)
     }
   end
+
+  defp meal_key_data(meal),
+    do: %{"day" => Date.to_iso8601(meal.date), "slot" => meal.slot, "recipe_id" => meal.recipe_id}
 
   defp string_arg(args, key) do
     case Map.get(args, key) do

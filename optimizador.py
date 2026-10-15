@@ -33,6 +33,12 @@ Payload:
                                {"day","slot","recipe_id"} Planned Meals of the
                                6 days before the range; never returned or moved
   excluded_recipe_ids          optional recipes the Member excluded
+  fixed_meals                  optional {"day","slot","recipe_id"} range meals
+                               that never move: Pins and, on a
+                               re-optimization, every meal that was not
+                               released. Each names a range day and slot and a
+                               candidate of that slot, at most once per day
+                               and slot
   time_limit_ms                optional solver deadline (default 120 s)
 
 Result:
@@ -54,6 +60,13 @@ times in any rolling 7-day window (counted across every slot, prior meals
 included), and never in the same slot on consecutive days (the day before the
 range included). When no plan satisfies them the error is "infeasible" with
 the single cause {"cause": "variety"}.
+
+Fixed meals beat the variety rules (they are counted toward the rolling cap,
+so free meals of the window cannot add more of that recipe, but are never
+refused by it) and are counted toward the budget and nutrition goals like any
+other meal, so a fixed meal that breaks the budget is a Deviation. They never
+beat a Restriction or an exclusion: a fixed restricted or excluded recipe is
+"infeasible" with the cause naming its slot and day.
 
 Backend choice: CP-SAT through ``ortools.linear_solver.pywraplp`` (OR-Tools
 version pinned in requirements.txt). The model is one boolean per
@@ -218,7 +231,47 @@ def _validate_payload(payload):
             if not isinstance(candidate.get("recipe_id"), str) or not candidate["recipe_id"]:
                 return "invalid_candidate"
 
+    if not _valid_fixed_meals(payload.get("fixed_meals", []), days, slots, candidates_by_slot):
+        return "invalid_fixed_meals"
+
     return None
+
+
+def _valid_fixed_meals(entries, days, slots, candidates_by_slot):
+    if not isinstance(entries, list) or not all(_is_prior_meal(entry) for entry in entries):
+        return False
+
+    seen = set()
+    for entry in entries:
+        key = (entry["day"], entry["slot"])
+        if key in seen or entry["day"] not in days or entry["slot"] not in slots:
+            return False
+        ids = {candidate["recipe_id"] for candidate in candidates_by_slot.get(entry["slot"], [])}
+        if entry["recipe_id"] not in ids:
+            return False
+        seen.add(key)
+
+    return True
+
+
+def _fixed_meals(payload):
+    """{(day, slot): recipe_id} of the meals that never move."""
+    return {(entry["day"], entry["slot"]): entry["recipe_id"] for entry in payload.get("fixed_meals", [])}
+
+
+def _fixed_causes(payload):
+    """A fixed meal never beats a Restriction or an exclusion."""
+    excluded = set(payload.get("excluded_recipe_ids", []))
+    causes = []
+    for entry in payload.get("fixed_meals", []):
+        candidates = [
+            c for c in payload["candidates_by_slot"][entry["slot"]] if c["recipe_id"] == entry["recipe_id"]
+        ]
+        if any(c.get("violates_restriction") is True for c in candidates):
+            causes.append({"cause": "restriction", "slot": entry["slot"], "day": entry["day"]})
+        elif entry["recipe_id"] in excluded:
+            causes.append({"cause": "excluded_recipe", "slot": entry["slot"], "day": entry["day"]})
+    return causes
 
 
 def _candidate_num(candidate, key):
@@ -268,6 +321,7 @@ def _allowed_candidates(payload):
 def _solve(payload, create_solver=None):
     """Returns (result, None) or (None, (reason, details))."""
     allowed_by_slot, causes = _allowed_candidates(payload)
+    causes = causes + _fixed_causes(payload)
     if causes:
         return None, ("infeasible", causes)
 
@@ -282,14 +336,19 @@ def _solve(payload, create_solver=None):
     budget = float(constraints["weekly_budget_cents"])
     deadline = time.monotonic() + float(payload.get("time_limit_ms", DEFAULT_TIME_LIMIT_MS)) / 1000.0
 
+    fixed = _fixed_meals(payload)
+
     x = {}
     for day in days:
         for slot in slots:
             slot_vars = []
-            for index, _candidate in enumerate(allowed_by_slot[slot]):
+            for index, candidate in enumerate(allowed_by_slot[slot]):
                 var = solver.BoolVar(f"x_{day}_{slot}_{index}")
                 x[(day, slot, index)] = var
                 slot_vars.append(var)
+                # A fixed meal leaves only its own recipe open in its slot.
+                if (day, slot) in fixed and candidate["recipe_id"] != fixed[(day, slot)]:
+                    var.SetUb(0)
             # Full coverage is hard: exactly one recipe per (day, slot).
             solver.Add(solver.Sum(slot_vars) == 1)
 
@@ -301,7 +360,7 @@ def _solve(payload, create_solver=None):
             for index, candidate in enumerate(allowed_by_slot[slot])
         )
 
-    _add_variety_rules(solver, x, payload, allowed_by_slot)
+    _add_variety_rules(solver, x, payload, allowed_by_slot, fixed)
 
     infinity = solver.infinity()
 
@@ -405,8 +464,12 @@ def _solve(payload, create_solver=None):
     }, None
 
 
-def _add_variety_rules(solver, x, payload, allowed_by_slot):
+def _add_variety_rules(solver, x, payload, allowed_by_slot, fixed):
     """Hard variety rules over the range, with prior meals as fixed context.
+
+    Fixed meals beat both rules: they are never refused, but they count like
+    prior meals, so free meals of a window cannot add more of that recipe and
+    a free meal next to a fixed one obeys the consecutive rule.
 
     * Rolling cap: in every 7-day window touching the range, the prior meals
       of a recipe plus its range meals (any slot) stay within the cap. A
@@ -424,10 +487,16 @@ def _add_variety_rules(solver, x, payload, allowed_by_slot):
         for entry in payload.get("prior_meals", [])
     ]
 
+    # Fixed meals behave as context, like prior meals.
+    prior = prior + [(dates[day], slot, recipe_id) for (day, slot), recipe_id in fixed.items()]
+
     # (date, slot, recipe_id) -> decision variables choosing that recipe there.
+    # Only free meals are decided; fixed (day, slot) pairs are context.
     chosen = {}
     for day in days:
         for slot in slots:
+            if (day, slot) in fixed:
+                continue
             for index, candidate in enumerate(allowed_by_slot[slot]):
                 key = (dates[day], slot, candidate["recipe_id"])
                 chosen.setdefault(key, []).append(x[(day, slot, index)])
@@ -462,6 +531,11 @@ def _add_variety_rules(solver, x, payload, allowed_by_slot):
 
     for date, slot, recipe_id in prior:
         for var in chosen.get((date + one_day, slot, recipe_id), []):
+            var.SetUb(0)
+
+    # A fixed meal also blocks its recipe in the same slot the day before.
+    for (day, slot), recipe_id in fixed.items():
+        for var in chosen.get((dates[day] - one_day, slot, recipe_id), []):
             var.SetUb(0)
 
 

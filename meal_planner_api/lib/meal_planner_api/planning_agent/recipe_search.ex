@@ -68,6 +68,41 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
   end
 
   @doc """
+  Looks recipes up by id for the Household: each visible recipe maps to
+  `{:safe, recipe}` or, when it violates a Member's Restriction,
+  `{:restricted, recipe}`. Ids that are not visible are absent. Used for Pins
+  and fixed meals, where a Restriction conflict must be told apart from a
+  missing recipe.
+  """
+  @spec lookup(map(), [String.t()]) ::
+          {:ok, %{Ecto.UUID.t() => {:safe | :restricted, recipe()}}} | {:error, :search_failed}
+  def lookup(household, ids) do
+    case Enum.flat_map(ids, &cast_uuid/1) do
+      [] ->
+        {:ok, %{}}
+
+      ids ->
+        by_ids = household |> current() |> where([r], r.id in ^ids)
+        safe = by_ids |> exclude_restricted(household) |> select([r], r.id) |> Repo.all()
+        safe = MapSet.new(safe)
+
+        recipes =
+          by_ids
+          |> preload(recipe_ingredients: :ingredient)
+          |> Repo.all()
+          |> Map.new(fn recipe ->
+            status = if MapSet.member?(safe, recipe.id), do: :safe, else: :restricted
+            {recipe.id, {status, serialize(recipe)}}
+          end)
+
+        {:ok, recipes}
+    end
+  rescue
+    _error in [DBConnection.ConnectionError, Postgrex.Error, Ecto.QueryError] ->
+      {:error, :search_failed}
+  end
+
+  @doc """
   One recipe visible to the Household, with its ingredients, quantities,
   steps and nutrition completeness, for `get_recipe`. A recipe of another
   Household, a superseded one, or one breaking a Restriction is not found.
@@ -91,11 +126,15 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
   end
 
   # Catalog Recipes and the Household's own, current and Restriction-safe.
-  defp visible(household) do
+  defp visible(household), do: household |> current() |> exclude_restricted(household)
+
+  # Catalog Recipes and the Household's own, current, whatever their
+  # Restrictions: `lookup/2` must tell a Restriction conflict from a missing
+  # recipe.
+  defp current(household) do
     from(r in Recipe, as: :recipe)
     |> where([r], is_nil(r.account_id) or r.account_id == ^household.account_id)
     |> where([r], is_nil(r.superseded_by_id))
-    |> exclude_restricted(household)
   end
 
   defp filter_slot(query, slot) when is_binary(slot) and slot != "",

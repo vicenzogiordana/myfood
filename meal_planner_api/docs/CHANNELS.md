@@ -299,8 +299,10 @@ Paid execution requires `OPENAI_API_KEY`, `PLANNING_AGENT_SPEND_CAP_MICROS`,
 `PLANNING_AGENT_TOKEN_CAP`, `OPENAI_INPUT_PRICE_MICROS_PER_MTOK` and
 `OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK`; without them `start_session` replies
 `spend_caps_unconfigured` (or `pricing_unconfigured` / `provider_unconfigured`).
-The spend and token caps apply per Planning Session and are never extended by
-`authorize_continuation`.
+The spend and token caps bound every OpenAI call of one Planning Session; they
+are not reset between messages and never extended by `authorize_continuation`,
+so once they are used up the session replies `agent_unavailable` with
+`spend_cap_reached` or `token_cap_reached` and a new Planning Session is needed.
 
 Per-call bounds: each model attempt 60 s (up to 5 transient retries), each
 solve 120 s (no retry; a timeout is inconclusive), each recipe search 30 s (up

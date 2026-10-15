@@ -119,6 +119,9 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   `present_proposal` and at confirmation. It never edits a profile, lives
   only in this session's Workspace and so is never inherited when meals are
   reused.
+
+  The model state is created once at `start/2` and kept across Member
+  messages, so the spend and token caps are never reset between requests.
   """
 
   use GenServer, restart: :temporary
@@ -136,7 +139,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     OsProcess,
     Proposal,
     ProposalValidator,
-    RecipeDraft
+    RecipeDraft,
+    Workspace
   }
 
   alias MealPlannerApi.Planning.RecipeOrigin
@@ -463,13 +467,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       model_state: args.model_state,
       optimizer: args.optimizer,
       messages: [],
-      workspace: %{
-        draft: nil,
-        proposal: nil,
-        recipe_drafts: %{},
-        deviation_approval: nil,
-        absence_exceptions: []
-      },
+      workspace: Workspace.new(),
       subscribers: %{},
       task: nil,
       deadline_ref: nil,
@@ -973,7 +971,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       "violations" => violations
     })
 
-    state = %{state | workspace: show(state.workspace, nil)}
+    state = %{state | workspace: show(Workspace.void_proposal(state.workspace), nil)}
 
     if state.consent? and state.pending_limit == nil do
       notice = %{role: :user, content: conflict_notice(violations)}

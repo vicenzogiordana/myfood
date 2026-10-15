@@ -4,7 +4,8 @@ defmodule MealPlannerApi.PlanningAgent.SpendLedger do
   Session (spec #93, user stories 102 and 103). Separate from the grocery
   budget. The caps bound every model call of the Planning Session together:
   the session keeps one ledger from start to end, so neither Stop nor a new
-  Member message resets it.
+  Member message resets it. A new Planning Session starts with a fresh
+  ledger (product decision, 2026-10-15).
 
   Before every paid call the worst-case cost and tokens are reserved; a call
   whose reservation would exceed either cap is refused before it is made.
