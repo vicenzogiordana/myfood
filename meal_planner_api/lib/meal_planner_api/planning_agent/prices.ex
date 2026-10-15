@@ -35,6 +35,10 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   # scraped again: the scraper would most likely answer the same thing.
   @refresh_memo_seconds 15 * 60
 
+  # A scraped observation may be dated at most this far after now (clock
+  # skew); a later one would read as fresh and shadow real observations.
+  @max_clock_skew_seconds 5 * 60
+
   # A refresh failing for one of these reasons means the scraper is down or
   # the turn is out of time: the rest of the lookup is not scraped.
   @breaker_reasons [:scraper_timeout, :scraper_unreachable, :deadline_exceeded]
@@ -205,18 +209,30 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   Recording is all or nothing: when the database rejects any item (an
   invalid value, a string wider than its column), nothing is recorded and
   `{:error, :record_failed}` is returned, so a bad scrape is a failed
-  refresh rather than a crash of the read tool.
+  refresh rather than a crash of the read tool. An item observed later than
+  `now` (beyond a small clock skew) rejects the scrape the same way: it
+  would count as fresh and outrank every real observation of its Product.
   """
-  @spec record(Ecto.UUID.t(), [map()]) :: :ok | {:error, :record_failed}
-  def record(ingredient_id, items) do
-    case Repo.transaction(fn -> Enum.each(items, &record_item!(ingredient_id, &1)) end) do
-      {:ok, :ok} -> :ok
-      {:error, _reason} -> {:error, :record_failed}
+  @spec record(Ecto.UUID.t(), [map()], DateTime.t()) :: :ok | {:error, :record_failed}
+  def record(ingredient_id, items, now \\ DateTime.utc_now()) do
+    if Enum.any?(items, &future?(&1.observed_at, now)) do
+      {:error, :record_failed}
+    else
+      case Repo.transaction(fn -> Enum.each(items, &record_item!(ingredient_id, &1)) end) do
+        {:ok, :ok} -> :ok
+        {:error, _reason} -> {:error, :record_failed}
+      end
     end
   rescue
     _error in [Postgrex.Error, Ecto.InvalidChangesetError, Ecto.ConstraintError] ->
       {:error, :record_failed}
   end
+
+  # A missing or invalid time is left to the changeset to reject.
+  defp future?(%DateTime{} = observed_at, now),
+    do: DateTime.diff(observed_at, now, :second) > @max_clock_skew_seconds
+
+  defp future?(_observed_at, _now), do: false
 
   defp record_item!(ingredient_id, item) do
     supermarket = supermarket!(item.supermarket)
@@ -276,7 +292,7 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
     stored = offers_for(ids, now)
     unrefreshed = Enum.filter(ingredients, &needs_refresh?(stored, &1.id))
     {memoized, to_refresh} = Enum.split_with(unrefreshed, &Map.has_key?(memo, &1.id))
-    {failed, skipped} = refresh_all(to_refresh, refresh)
+    {failed, skipped} = refresh_all(to_refresh, refresh, now)
 
     # Ingredients never scraped, or cut by the turn deadline, are left out
     # so the next lookup tries them.
@@ -386,14 +402,14 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   # ids of the Ingredients never scraped. Without a refresh function every
   # refresh fails as unavailable. After a breaker failure the remaining
   # Ingredients are skipped with that same reason.
-  defp refresh_all(ingredients, nil),
+  defp refresh_all(ingredients, nil, _now),
     do: {Map.new(ingredients, &{&1.id, :scraper_unavailable}), MapSet.new()}
 
-  defp refresh_all(ingredients, refresh) do
+  defp refresh_all(ingredients, refresh, now) do
     {failed, _tripped, skipped} =
       Enum.reduce(ingredients, {%{}, nil, MapSet.new()}, fn
         ingredient, {failed, nil, skipped} ->
-          case refresh_one(ingredient, refresh) do
+          case refresh_one(ingredient, refresh, now) do
             :ok ->
               {failed, nil, skipped}
 
@@ -409,8 +425,8 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
     {failed, skipped}
   end
 
-  defp refresh_one(ingredient, refresh) do
-    with {:ok, items} <- refresh.(ingredient.name), do: record(ingredient.id, items)
+  defp refresh_one(ingredient, refresh, now) do
+    with {:ok, items} <- refresh.(ingredient.name), do: record(ingredient.id, items, now)
   end
 
   defp detail(reason) when is_atom(reason), do: Atom.to_string(reason)

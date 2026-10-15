@@ -163,12 +163,79 @@ defmodule MealPlannerApi.PlanningAgent.PricesTest do
       ingredient = ingredient!("Fictitious record")
       item = FakeScraper.item(product: "Fictitious shared product")
 
-      assert :ok = Prices.record(ingredient.id, [item])
+      assert :ok = Prices.record(ingredient.id, [item], @now)
 
       assert :ok =
-               Prices.record(ingredient.id, [Map.put(item, :observed_at, hours_ago(1))])
+               Prices.record(ingredient.id, [Map.put(item, :observed_at, hours_ago(1))], @now)
 
       assert Repo.aggregate(where(Product, ingredient_id: ^ingredient.id), :count) == 1
+    end
+
+    test "rejects an observation dated after now, recording nothing" do
+      ingredient = ingredient!("Fictitious future record")
+      good = FakeScraper.item(product: "Fictitious present product", observed_at: @now)
+
+      future =
+        FakeScraper.item(
+          product: "Fictitious future product",
+          observed_at: DateTime.add(@now, 3, :day)
+        )
+
+      assert {:error, :record_failed} = Prices.record(ingredient.id, [good, future], @now)
+      assert Repo.aggregate(where(Product, ingredient_id: ^ingredient.id), :count) == 0
+    end
+
+    test "accepts an observation within the clock skew tolerance" do
+      ingredient = ingredient!("Fictitious skewed record")
+
+      item =
+        FakeScraper.item(
+          product: "Fictitious skewed product",
+          observed_at: DateTime.add(@now, 60, :second)
+        )
+
+      assert :ok = Prices.record(ingredient.id, [item], @now)
+    end
+  end
+
+  describe "lookup/2 with a future-dated scrape" do
+    test "fails the refresh and keeps later real observations winning" do
+      ingredient = ingredient!("Fictitious future lookup")
+
+      product!(ingredient,
+        supermarket: "Fictitious Live Market",
+        name: "Fictitious future lookup product",
+        observed_at: hours_ago(30)
+      )
+
+      future =
+        FakeScraper.item(
+          product: "Fictitious future lookup product",
+          observed_at: DateTime.add(@now, 3, :day)
+        )
+
+      first = Prices.lookup([ingredient.name], now: @now, refresh: fn _ -> {:ok, [future]} end)
+
+      assert [%{reason: :refresh_failed, detail: :record_failed}] = first.warnings
+      assert [%{fresh?: false}] = first.prices
+
+      # A real observation scraped later is the one the lookup returns.
+      real =
+        FakeScraper.item(product: "Fictitious future lookup product", observed_at: hours_ago(1))
+
+      test_pid = self()
+
+      refresh = fn name ->
+        send(test_pid, {:refreshed, name})
+        {:ok, [real]}
+      end
+
+      second =
+        Prices.lookup([ingredient.name], now: DateTime.add(@now, 3600, :second), refresh: refresh)
+
+      assert_received {:refreshed, _name}
+      assert [%{fresh?: true, observed_at: observed_at}] = second.prices
+      assert DateTime.compare(observed_at, hours_ago(1)) == :eq
     end
   end
 end

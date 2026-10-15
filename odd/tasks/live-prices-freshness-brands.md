@@ -102,7 +102,7 @@ PR #126 was split into four chained PRs to main (strategy
   that brings only old data adds `still_stale`. Review hardening from #126
   rounds 1-3 kept: Ingredient cap (`max_ingredients/0`, 50) and offer cap
   (`max_offers/0`, 200, round-robin from each Ingredient's cheapest with
-  an `offers_truncated` warning), `record/2` returning
+  an `offers_truncated` warning), `record/2` (now `record/3`) returning
   `{:error, :record_failed}` instead of raising, a 15-minute refresh memo,
   and a circuit break after `:scraper_timeout`, `:scraper_unreachable` or
   `:deadline_exceeded`. `lookup_prices` returns prices with `age_hours`
@@ -176,6 +176,21 @@ PR #126 was split into four chained PRs to main (strategy
   25 skipped before the Proposal content test was added;
   `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix precommit` (compile
   with warnings as errors, format, full suite) 1276 passed, 25 skipped.
+- S2 review round (Jorge el Curioso on PR #133), route: inline, one
+  confirmed finding in `Prices`:
+  - A future-dated scraper `observedAt` was stored unchecked; `with_age`
+    clamped its age to 0, so it read as fresh and, being the latest
+    observation of its Product, shadowed later real ones. RED: `record/3`
+    accepted an item dated `now + 3 days`, and a lookup scraping one
+    returned it fresh with no warning. GREEN: `Prices.record/3` (new `now`
+    argument, threaded from the lookup's `now`) rejects the whole scrape
+    with `{:error, :record_failed}` when any item is dated more than 5
+    minutes after `now`; the lookup reports `refresh_failed`, and a later
+    real observation is recorded and returned fresh. An item 60 s ahead is
+    accepted (clock skew).
+  - Focused `PricesTest` 12 passed.
+    `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1279 passed,
+    25 skipped; `mix precommit` 1279 passed, 25 skipped.
 
 ## Next step
 
