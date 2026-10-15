@@ -62,10 +62,16 @@ PR #126 was split into four chained PRs to main (strategy
 
 1. Price scraper port with an HTTP adapter (#132). Nothing calls it yet,
    so agent behaviour does not change.
-2. Refresh stale prices live and report their age (this slice). Lookups
-   take Ingredient names only; brand and Product filters come in slice 3.
-3. Brand and Product queries, Household Brand Preferences.
-4. Purchase steered by Session Brands and Brand Preferences.
+2. Refresh stale prices live and report their age (#133). Lookups take
+   Ingredient names only; brand and Product filters come later.
+
+The rest of #126 (an earlier combined attempt, #134, went through four
+review rounds) is split into three more slices:
+
+3. Household Brand Preferences settings (this slice). Disclosed to the
+   agent with neutral wording; they do not change the Purchase yet.
+4. Brand and Product price queries.
+5. Purchase steered by Session Brands and Brand Preferences.
 
 ## Acceptance criteria
 
@@ -112,6 +118,24 @@ PR #126 was split into four chained PRs to main (strategy
   and `:clock`. Commit: the `feat(planning-agent): refresh stale prices
   live and report their age` commit on
   `feat/issue-101-part-2-live-price-refresh`.
+- [x] S3 Household Brand Preferences settings (split slice 1/3, route:
+  inline, one bounded worker landing code already written and reviewed in
+  #126 and #134). `household_brand_preferences` table (one brand per
+  Household and Ingredient), `BrandPreferences` context, `GET`, `PUT` and
+  `DELETE /api/accounts/:account_id/settings/brand-preferences[/:ingredient_id]`
+  for any active Member, scoped to the current membership (another
+  Household can never read or change them). `HouseholdContext` loads them
+  and lists them in the instructions as "Brand Preferences from household
+  settings"; they do not affect the Purchase in this slice. Review fixes
+  from #134 kept: a 14-digit migration version that sorts after main's
+  latest (`20261015170000`), and brands stored as a single line (whitespace
+  runs collapsed, control characters rejected with 422, collapsed again in
+  the instructions) so a brand cannot forge instruction lines. Commit: the
+  `feat(households): add Household Brand Preferences settings` commit on
+  `feat/issue-101-part-4-household-brand-preferences`.
+- [ ] S4 Brand and Product price queries (split slice 2/3).
+- [ ] S5 Purchase steered by Session Brands and Brand Preferences (split
+  slice 3/3).
 
 ## Checks
 
@@ -199,10 +223,34 @@ PR #126 was split into four chained PRs to main (strategy
     brand `nil` left the stored brand `nil`. GREEN: `product!/3` keeps the
     stored brand when the scraped brand is `nil`; a different non-nil brand
     still replaces it ("Globex").
-  - Focused `PricesTest` 13 passed. `MYFOOD_TEST_DATABASE=meal_planner_api_test101
+  - Focused `PricesTest` 13 passed. `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix precommit`
+  (compile with warnings as errors, format, full suite) 1291 passed, 25
+  skipped. `MYFOOD_TEST_DATABASE=meal_planner_api_test101
     mix precommit` (compile with warnings as errors, format, full suite)
     1280 passed, 25 skipped.
 
+- S3 evidence: `HouseholdBrandPreferenceControllerTest` (CRUD, tenancy,
+  single-line storage, 422 on a control character), `BrandsTest`
+  ("Household Brand Preferences": they reach the instructions, and another
+  Household's never do) and `HouseholdContextTest` (a brand with line
+  breaks cannot forge instruction lines): 13 passed. `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix precommit`
+  (compile with warnings as errors, format, full suite) 1291 passed, 25
+  skipped.
+- S3 review round (Jorge el Curioso on PR #135), route: inline, one
+  confirmed low-severity finding in `HouseholdBrandPreference`:
+  - `validate_length(:brand, max: 120)` counted graphemes while the
+    `varchar(255)` column counts codepoints, so "a" followed by 300
+    combining acute accents (one grapheme) passed the changeset and raised
+    `string_data_right_truncation` (a 500 instead of a 422), and shorter
+    combining-mark runs exceeded the intended 120 bound. RED: the new
+    controller test got `Postgrex.Error` on that PUT. GREEN: the length
+    check uses `count: :codepoints`; the combining-mark brand and a
+    121-character ASCII brand return 422 with a `brand` error, and a
+    120-character brand is still accepted.
+  - Focused `HouseholdBrandPreferenceControllerTest` 9 passed.
+    `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1292 passed,
+    25 skipped; `mix precommit` 1292 passed, 25 skipped.
+
 ## Next step
 
-Slice 3/4: brand and Product queries, Household Brand Preferences.
+S4: brand and Product price queries.
