@@ -219,16 +219,54 @@ Every event is pushed as `agent_event` with `type` and `session_id`:
 
 | `type` | Payload | Meaning |
 |--------|---------|---------|
-| `progress` | `{step}` — `thinking`, `searching_recipes`, `reading_plan` (also for `reuse_plan`), `running_optimizer`, `validating_proposal` | The agent is working (no raw reasoning or tool output) |
+| `progress` | `{step}` — `thinking`, `searching_recipes`, `reading_plan` (also for `reuse_plan`), `reading_pantry`, `looking_up_prices`, `running_optimizer`, `validating_proposal` | The agent is working (no raw reasoning or tool output) |
 | `assistant_message` | `{text}` | Agent reply |
 | `question` | `{text}` | The agent asks one question; the turn ended |
-| `proposal` | `{proposal_id, status, meals: [{date, slot, recipe_id, name}]}` | A Proposal validated by code; `status` is code-owned (`valid`) |
+| `proposal` | `{proposal_id, status, meals: [{date, slot, recipe_id, name}], purchase, consumed_cost, budget, deviations}` | A Proposal validated by code; `status` is code-owned (`valid` or `requires_approval`). See "Proposal Purchase" below |
 | `optimizer_failed` | `{reason}` | The optimizer failed; no fallback plan is produced |
 | `consent_required` | `{}` | Consent must be given before the agent can call the AI provider |
 | `limit_reached` | `{limit}` — `iterations` or `time` | The request hit 10 iterations or 5 minutes |
 | `agent_unavailable` | `{reason}` | The AI provider cannot be used now (including `spend_cap_reached`) |
 | `turn_completed` | `{}` | The agent finished answering |
 | `session_cancelled` / `session_ended` | `{}` | The Planning Session is over |
+
+#### Proposal Purchase
+
+Every `proposal` carries its Purchase: the packages the Household must buy,
+computed by code from the Proposal's meals net of the Projected Pantry
+(Pantry minus stock committed to not-yet-cooked Planned Meals, inside or
+outside the range). Needs are aggregated once per ingredient and unit, then
+rounded up to whole packages of the stored Product with the lowest package
+total.
+
+```json
+{
+  "purchase": {
+    "lines": [{"ingredient": "…", "quantity_milli": 250000, "unit": "g",
+               "packages": 1, "total_cents": 800, "product": "…", "brand": "…",
+               "presentation": {"quantity_milli": 500000, "unit": "g"},
+               "supermarket": "…", "price_cents": 800, "currency": "ARS",
+               "observed_at": "2026-10-13T09:30:00.000000Z"}],
+    "missing_prices": [{"ingredient": "…", "quantity_milli": 2000, "unit": "g",
+                        "reason": "no_stored_price"}],
+    "total_cents": 800, "currency": "ARS", "complete": false
+  },
+  "consumed_cost": {"total_cents": 480, "currency": "ARS", "complete": false,
+                    "missing_prices": []},
+  "budget": {"budget_cents": 1500, "purchase_total_cents": 800,
+             "within_budget": null, "uncertain": true},
+  "deviations": []
+}
+```
+
+- The budget is compared against `purchase.total_cents`, never the consumed
+  cost. Overspend is a `{"type": "budget", budget_cents, total_cents,
+  difference_cents}` Deviation and makes the status `requires_approval`.
+- Missing prices (`no_stored_price`, `no_matching_presentation`,
+  `currency_mismatch`) are never zero: they are left out of the total, which
+  becomes a lower bound (`complete: false`, `uncertain: true`); then
+  `within_budget` is `null` unless the lower bound already overspends.
+- `budget_cents` is `null` when the Household has no budget set.
 
 Paid execution requires `OPENAI_API_KEY`, `PLANNING_AGENT_SPEND_CAP_MICROS`,
 `PLANNING_AGENT_TOKEN_CAP`, `OPENAI_INPUT_PRICE_MICROS_PER_MTOK` and

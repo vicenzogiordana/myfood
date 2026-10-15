@@ -12,9 +12,9 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
     * Restrictions — `MealPlannerApi.Planning.RestrictionValidator` over every
       Member, plus ingredients a Member is allergic to
 
-  Budget deviations and the purchase calculation join this check in a later
-  slice of #93; until then a Proposal is either `valid` or `invalid`.
-  Violations are generic and never name a Member.
+  The budget is not a violation: `present_proposal` compares the Purchase
+  (`MealPlannerApi.PlanningAgent.Purchase`) against it and reports overspend
+  as a budget Deviation. Violations are generic and never name a Member.
   """
 
   import Ecto.Query

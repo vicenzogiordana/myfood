@@ -42,26 +42,28 @@ counted, and stock committed to other pending meals can be allocated twice.
 
 ## Tasks
 
-- [ ] T1 Product + Price Observation storage and `lookup_prices` tool
-  (route: inline, single writer; trigger evidence: one bounded module + tool
-  wiring already understood).
-- [ ] T2 Projected Pantry module and `get_pantry` tool (route: inline).
-
-- [ ] T3 Purchase calculation and `present_proposal` budget comparison,
+- [x] T1 Product + Price Observation storage and `lookup_prices` tool
+  (route: inline, bounded worker is the single writer). Commit: ee6abec.
+  RED observed (4/4 failing, `unknown_tool`), GREEN 4/4.
+- [x] T2 Projected Pantry module and `get_pantry` tool (route: inline).
+  Commit: e6e3415. RED observed (2 failing), GREEN 6/6.
+- [x] T3 Purchase calculation and `present_proposal` budget comparison,
   consumed cost, uncertainty; agent instructions and docs (route: inline).
-
+  RED observed (7 failing), GREEN 14/14. Commit: the
+  `feat(planning-agent): price Proposals with a package-rounded Purchase`
+  work unit on this branch.
 
 ## Acceptance criteria
 
-- [ ] Projected Pantry subtracts stock committed to pending Planned Meals,
+- [x] Projected Pantry subtracts stock committed to pending Planned Meals,
   including outside the new range
-- [ ] Purchase lines are rounded to whole packages and each purchase is
+- [x] Purchase lines are rounded to whole packages and each purchase is
   counted once
-- [ ] Budget comparison uses the Purchase total; consumed cost is reported
+- [x] Budget comparison uses the Purchase total; consumed cost is reported
   separately
-- [ ] Missing prices are flagged as uncertainty and never replaced by zero or
+- [x] Missing prices are flagged as uncertainty and never replaced by zero or
   invented values
-- [ ] Every price line carries product, presentation, supermarket, currency
+- [x] Every price line carries product, presentation, supermarket, currency
   and observation date
 
 ## Checks
@@ -74,4 +76,11 @@ name; isolation uses `MYFOOD_TEST_DATABASE`.
 
 ## Progress / evidence
 
-See the checklist above and the PR body for the observed check results.
+- Decisions: a zero household budget means "not set" (no budget Deviation);
+  budget currency is ARS; uncooked Planned Meals before today do not commit
+  stock; recipe/product unit mismatch is a missing price
+  (`no_matching_presentation`), no conversion yet; with missing prices
+  `within_budget` is unknown unless the lower bound already overspends.
+- The legacy `ShoppingRebuilder` path is untouched; the agent flow uses
+  `PlanningAgent.Purchase`. Confirmation appending Purchase lines is #102.
+- Full-suite and precommit results are recorded in the PR body.

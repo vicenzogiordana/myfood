@@ -46,7 +46,7 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContextTest do
     refute enforced =~ "1800"
   end
 
-  test "the budget and the Nutrition Goal are presented as unchecked targets" do
+  test "the Nutrition Goal is an unchecked target; the budget is checked by code" do
     instructions = HouseholdContext.instructions(context(), @range, ["dinner"])
 
     targets =
@@ -55,10 +55,11 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContextTest do
         "Targets, not yet validated by code (tell the household they are unchecked):"
       )
 
-    assert targets =~ "Grocery budget for the range (cents): 12345"
     assert targets =~ "Nutrition Goal per standard portion, daily: calories 1800-2200"
+    refute targets =~ "budget"
+    assert instructions =~ "Never claim that a plan meets the Nutrition Goal"
 
-    assert instructions =~
-             "Never claim that a plan meets the grocery budget or the Nutrition Goal"
+    assert instructions =~ "Grocery budget (checked by code): 12345 cents (ARS) for the range"
+    assert instructions =~ "compares it against the Purchase total"
   end
 end

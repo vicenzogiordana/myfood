@@ -5,6 +5,7 @@ defmodule MealPlannerApi.PlanningAgentFixtures do
   """
 
   alias MealPlannerApi.Persistence.Accounts.{
+    Account,
     AccountMembership,
     User,
     UserDietaryProfile,
@@ -89,6 +90,14 @@ defmodule MealPlannerApi.PlanningAgentFixtures do
       range: range,
       slots: slots
     }
+  end
+
+  @doc "Sets the Household's grocery budget for a Planning Range, in cents."
+  def budget!(%{account_id: account_id}, cents) do
+    Account
+    |> Repo.get!(account_id)
+    |> Ecto.Changeset.change(default_budget_cents: cents)
+    |> Repo.update!()
   end
 
   def consent!(household, member), do: :ok = Consent.record(household.account_id, member.user_id)
