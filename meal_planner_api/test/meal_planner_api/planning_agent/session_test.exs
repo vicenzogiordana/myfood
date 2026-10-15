@@ -243,6 +243,53 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
                      1_000
     end
 
+    test "spend and token caps bound the whole Planning Session, not one request",
+         %{household: h, owner: owner} do
+      consent!(h, owner)
+
+      # The first answer reports usage just under the token cap, so the
+      # second Member message cannot reserve its worst case: the cap is not
+      # reset per request. A new Planning Session starts with a fresh ledger.
+      answer = %{
+        "output" => [
+          %{"type" => "message", "content" => [%{"type" => "output_text", "text" => "Hello"}]}
+        ],
+        "usage" => %{"input_tokens" => 999_000, "output_tokens" => 0}
+      }
+
+      model_opts = [
+        api_key: "test-key",
+        spend_cap_micros: 100_000_000,
+        token_cap: 1_000_000,
+        input_price_micros_per_mtok: 1,
+        output_price_micros_per_mtok: 1,
+        max_output_tokens: 1_000,
+        req_options: [plug: fn conn -> Req.Test.json(conn, answer) end]
+      ]
+
+      {session_id, pid} = start!(h, owner, [], model: {OpenAIResponses, model_opts})
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "assistant_message", "text" => "Hello"}}
+
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+
+      :ok = Session.send_message(pid, "Plan again")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "agent_unavailable", "reason" => "token_cap_reached"}}
+
+      :ok = Session.cancel(pid, %{membership_id: owner.membership_id, owner?: true})
+
+      {next_session_id, next_pid} = start!(h, owner, [], model: {OpenAIResponses, model_opts})
+      :ok = Session.send_message(next_pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^next_session_id,
+                      %{"type" => "assistant_message", "text" => "Hello"}}
+    end
+
     test "a provider failure tells the Member planning is not possible now",
          %{household: h, owner: owner} do
       consent!(h, owner)

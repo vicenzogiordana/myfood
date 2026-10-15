@@ -27,6 +27,10 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   Per request: `max_iterations` model calls (default 10) and a global
   deadline (default 5 minutes) after which the running turn is killed and
   its late results are discarded.
+
+  Per Planning Session: the model adapter's paid-service spend and token
+  caps. The model state is created once at `start/2` and kept across Member
+  messages, so the caps are never reset between requests.
   """
 
   use GenServer, restart: :temporary

@@ -14,7 +14,10 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
   usage is missing or invalid. The reserved state is reported through the
   request's optional `:checkpoint` callback before the call is made.
 
-  The numeric caps are a human decision and are not set by default.
+  The caps bound the whole Planning Session: `init/1` runs once when the
+  session starts and the ledger travels in the model state across every
+  Member message. The numeric caps are a human decision and are not set by
+  default.
 
   ## Configuration
 
@@ -22,8 +25,8 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
         api_key: "...",
         model: "gpt-6.1-sol",
         base_url: "https://api.openai.com/v1",
-        spend_cap_micros: nil,                 # micro-USD per execution
-        token_cap: nil,                        # cumulative tokens per execution
+        spend_cap_micros: nil,                 # micro-USD per Planning Session
+        token_cap: nil,                        # cumulative tokens per Planning Session
         input_price_micros_per_mtok: nil,      # micro-USD per million input tokens
         output_price_micros_per_mtok: nil,     # micro-USD per million output tokens
         max_output_tokens: 4_096,
@@ -59,7 +62,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
     end
   end
 
-  @doc "Spend summary of the execution so far."
+  @doc "Spend summary of the Planning Session so far."
   @spec spend(map()) :: map()
   def spend(%{ledger: ledger}), do: SpendLedger.summary(ledger)
 

@@ -226,7 +226,7 @@ Every event is pushed as `agent_event` with `type` and `session_id`:
 | `optimizer_failed` | `{reason}` | The optimizer failed; no fallback plan is produced |
 | `consent_required` | `{}` | Consent must be given before the agent can call the AI provider |
 | `limit_reached` | `{limit}` — `iterations` or `time` | The request hit 10 iterations or 5 minutes |
-| `agent_unavailable` | `{reason}` | The AI provider cannot be used now (including `spend_cap_reached`) |
+| `agent_unavailable` | `{reason}` | The AI provider cannot be used now (including `spend_cap_reached` and `token_cap_reached`) |
 | `turn_completed` | `{}` | The agent finished answering |
 | `session_cancelled` / `session_ended` | `{}` | The Planning Session is over |
 
@@ -234,6 +234,10 @@ Paid execution requires `OPENAI_API_KEY`, `PLANNING_AGENT_SPEND_CAP_MICROS`,
 `PLANNING_AGENT_TOKEN_CAP`, `OPENAI_INPUT_PRICE_MICROS_PER_MTOK` and
 `OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK`; without them `start_session` replies
 `spend_caps_unconfigured` (or `pricing_unconfigured` / `provider_unconfigured`).
+The spend and token caps bound every OpenAI call of one Planning Session; they
+are not reset between messages, so once they are used up the session replies
+`agent_unavailable` with `spend_cap_reached` or `token_cap_reached` and a new
+Planning Session is needed.
 
 ---
 
