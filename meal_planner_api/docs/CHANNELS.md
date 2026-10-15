@@ -220,10 +220,11 @@ Every event is pushed as `agent_event` with `type` and `session_id`:
 
 | `type` | Payload | Meaning |
 |--------|---------|---------|
-| `progress` | `{step}` — `thinking`, `searching_recipes`, `reading_plan` (also for `reuse_plan`), `reading_pantry`, `looking_up_prices`, `running_optimizer`, `validating_proposal`; `retrying` with `{call, attempt}` (`call`: `model`, `read`, `solver`); `tool_finished` with `{tool, outcome}` | The agent is working (no raw reasoning or tool output: events pass a field allowlist) |
+| `progress` | `{step}` — `thinking`, `searching_recipes`, `reading_plan` (also for `reuse_plan`), `reading_pantry`, `looking_up_prices`, `reading_recipe`, `drafting_recipe`, `running_optimizer`, `validating_proposal`; `retrying` with `{call, attempt}` (`call`: `model`, `read`, `solver`); `tool_finished` with `{tool, outcome}` | The agent is working (no raw reasoning or tool output: events pass a field allowlist) |
 | `assistant_message` | `{text}` | Agent reply |
 | `question` | `{text}` | The agent asks one question; the turn ended |
 | `proposal` | `{proposal_id, status, meals: [{date, slot, recipe_id, name}], purchase, consumed_cost, budget, deviations}` | A Proposal validated by code; `status` is code-owned (`valid` or `requires_approval`). See "Proposal Purchase" below |
+| `recipe_draft` | `{recipe_id, name, origin, draft: true, servings, slots, ingredients: [{ingredient, quantity_milli, unit}], steps, nutrition, cost}` | The agent built a Recipe Draft from catalog Ingredients. `origin` is `ai_created` (disclose as AI-made, possibly imperfect) or `user_created` (a dictated recipe). See "Recipe Drafts" below |
 | `optimizer_failed` | `{reason}` | The optimizer failed; no fallback plan is produced |
 | `consent_required` | `{}` | Consent must be given before the agent can call the AI provider |
 | `limit_reached` | `{limit, requires_authorization: true}` — `iterations`, `no_progress` or `time` | Execution stopped: 10 iterations per Planning Session (new messages do not reset them), 3 consecutive attempts without new evidence, or 5 minutes per request. Nothing runs until the Member sends `authorize_continuation` |
@@ -269,6 +270,28 @@ total.
   becomes a lower bound (`complete: false`, `uncertain: true`); then
   `within_budget` is `null` unless the lower bound already overspends.
 - `budget_cents` is `null` when the Household has no budget set.
+
+#### Recipe Drafts
+
+A Recipe Draft exists only in the Planning Session's Workspace: it is never
+saved by the agent and disappears when the session ends unconfirmed. Its
+Ingredients are catalog Ingredients only (an unknown one rejects the Draft),
+and its nutrition and cost are computed by code:
+
+```json
+{
+  "nutrition": {"per_serving": {"calories": 380, "protein_g": 13.5,
+                                "carbs_g": 76.0, "fat_g": 1.8},
+                "complete": true, "missing": []},
+  "cost": {"total_cents": 1000, "per_serving_cents": 500, "currency": "ARS",
+           "complete": true, "missing_prices": []}
+}
+```
+
+- A nutrient is `null` unless every Ingredient has it per 100 g or ml;
+  `missing` names the Ingredients without data ("partial nutrition").
+- `cost` is the consumed-ingredient cost at stored prices; missing prices are
+  named and left out of the total (`complete: false`), never zero.
 
 Paid execution requires `OPENAI_API_KEY`, `PLANNING_AGENT_SPEND_CAP_MICROS`,
 `PLANNING_AGENT_TOKEN_CAP`, `OPENAI_INPUT_PRICE_MICROS_PER_MTOK` and

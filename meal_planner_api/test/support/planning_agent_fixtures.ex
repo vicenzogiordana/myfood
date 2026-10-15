@@ -125,9 +125,16 @@ defmodule MealPlannerApi.PlanningAgentFixtures do
     |> Repo.insert!()
   end
 
-  def ingredient!(name, tags \\ []) do
+  @doc """
+  A catalog Ingredient with a unique name, its reviewed `tags` and optional
+  nutrition `attrs` per 100 g/ml (`calories_per_100`, `protein_g_per_100`,
+  `carbs_g_per_100`, `fat_g_per_100`).
+  """
+  def ingredient!(name, tags \\ [], attrs \\ %{}) do
     {:ok, ingredient} =
-      Catalog.create_ingredient(%{name: "#{name} #{unique()}", category: :otros})
+      %{name: "#{name} #{unique()}", category: :otros}
+      |> Map.merge(attrs)
+      |> Catalog.create_ingredient()
 
     Enum.each(tags, fn tag -> {:ok, _} = Catalog.tag_ingredient(ingredient.id, tag) end)
     ingredient
