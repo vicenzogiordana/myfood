@@ -63,7 +63,7 @@ Out of scope: wiring the goal into the optimizer or validator (later issues).
   `PlanningCandidateBuilderTest` (`:plan_not_found` in factory setup) and one `PlanningChannelTest` e2e case.
 - `config/test.exs` does not append `MIX_TEST_PARTITION` to the DB name; isolation used the existing
   `MYFOOD_TEST_DATABASE` env override instead (no config change).
-- T1+T2 commit: `feat(households): add household nutrition goal settings`.
+- T1+T2 commit: `169eff0` `feat(households): add household nutrition goal settings`.
 
 ## Next step
 
