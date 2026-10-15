@@ -45,9 +45,13 @@ Out of scope: wiring the goal into the optimizer or validator (later issues).
 |----|------|-------|--------|
 | T1 | Schema + migration + context + controller + routes, test-first via controller tests | inline (single bounded worker; already delegated by parent) | done |
 | T2 | Document the endpoint contract | inline (mechanical doc edit) | done |
+| T3 | Review round 1 (Jorge, PR #113): cap bounds at int4 max so oversized values return 422, not 500 | inline (one-file fix + test) | done |
 
 - [x] T1 — RED observed (route missing → 404/no route), GREEN after implementation. Commit: see "Evidence".
 - [x] T2 — docs updated alongside T1 in the same work unit.
+- [x] T3 — RED: new controller test PUTting `calories.max` 2_147_483_648 and 99_999_999_999 failed with
+  `DBConnection.EncodeError` (Postgrex int4 range). GREEN: `less_than_or_equal_to: 2_147_483_647` added to
+  both `validate_number` calls; 14/14 controller tests pass. Cap documented in FRONTEND_INTEGRATION.md.
 
 ## Checks
 
@@ -64,6 +68,12 @@ Out of scope: wiring the goal into the optimizer or validator (later issues).
 - `config/test.exs` does not append `MIX_TEST_PARTITION` to the DB name; isolation used the existing
   `MYFOOD_TEST_DATABASE` env override instead (no config change).
 - T1+T2 commit: `169eff0` `feat(households): add household nutrition goal settings`.
+
+## Review rounds
+
+- Round 1 (Jorge el Curioso, PR #113): 1 confirmed finding (medium) — unbounded nutrition goal values
+  caused a 500. Fixed in T3; full suite on `meal_planner_api_test_issue95`: 906 passed, 20 skipped
+  (one earlier run showed 3 transient failures that did not reproduce on two reruns); `mix precommit` exit 0.
 
 ## Next step
 

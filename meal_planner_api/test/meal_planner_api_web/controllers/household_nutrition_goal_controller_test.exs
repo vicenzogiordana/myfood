@@ -113,6 +113,19 @@ defmodule MealPlannerApiWeb.HouseholdNutritionGoalControllerTest do
       assert json_response(conn, 422)["error"] == "invalid_nutrition_goal"
     end
 
+    test "rejects bounds above the storable integer limit with 422", ctx do
+      for too_large <- [2_147_483_648, 99_999_999_999] do
+        invalid = put_in(@valid_goal, ["calories"], %{"min" => 1800, "max" => too_large})
+        conn = put(authed(build_conn(), ctx.owner_token), goal_path(ctx.household), invalid)
+
+        body = json_response(conn, 422)
+        assert body["error"] == "invalid_nutrition_goal"
+        assert Map.has_key?(body["details"], "calories_max")
+      end
+
+      assert get_goal(ctx) == nil
+    end
+
     test "a rejected update keeps the previous goal intact", ctx do
       put(authed(ctx.conn, ctx.owner_token), goal_path(ctx.household), @valid_goal)
 

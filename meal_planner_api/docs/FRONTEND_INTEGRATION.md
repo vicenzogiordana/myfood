@@ -481,8 +481,9 @@ Content-Type: application/json
 "per": "standard_portion", "calories": {"min": 1800, "max": 2200}, ...,
 "updated_at": "..."}}`.
 
-**Rules:** all four ranges are required; bounds are non-negative integers
-(kcal for `calories`, grams for macros) and `min` must not exceed `max`.
+**Rules:** all four ranges are required; bounds are non-negative integers no
+greater than 2147483647 (kcal for `calories`, grams for macros) and `min` must
+not exceed `max`.
 
 **Errors:** `422 invalid_nutrition_goal` with a `details` map keyed by bound
 (e.g. `protein_g_min`); `403 account_mismatch` when the URL Household is not

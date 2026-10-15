@@ -16,6 +16,9 @@ defmodule MealPlannerApi.Persistence.Accounts.HouseholdNutritionGoal do
 
   @ranges [:calories, :protein_g, :carbs_g, :fat_g]
   @bound_fields Enum.flat_map(@ranges, &[:"#{&1}_min", :"#{&1}_max"])
+  # Bounds are stored in 4-byte integer columns; reject anything larger in the
+  # changeset so oversized input becomes a 422 instead of a database encode error.
+  @max_bound 2_147_483_647
 
   schema "household_nutrition_goals" do
     for field_name <- @bound_fields do
@@ -50,8 +53,14 @@ defmodule MealPlannerApi.Persistence.Accounts.HouseholdNutritionGoal do
       max_field = :"#{range}_max"
 
       acc
-      |> validate_number(min_field, greater_than_or_equal_to: 0)
-      |> validate_number(max_field, greater_than_or_equal_to: 0)
+      |> validate_number(min_field,
+        greater_than_or_equal_to: 0,
+        less_than_or_equal_to: @max_bound
+      )
+      |> validate_number(max_field,
+        greater_than_or_equal_to: 0,
+        less_than_or_equal_to: @max_bound
+      )
       |> validate_min_not_above_max(min_field, max_field)
       |> check_constraint(min_field, name: :"#{range}_range_valid")
     end)
