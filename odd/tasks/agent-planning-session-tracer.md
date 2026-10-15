@@ -76,6 +76,7 @@ with its tests at once; commits stay reviewable work units).
 | R3 | Jorge round 3 (PR #114): reap the optimizer when the turn is brutally killed; drop the draft on failed re-runs; 14-digit consent migration version | inline | done (see Review round 3) |
 | R4 | Jorge round 4 (PR #114): trap exits so shutdown releases the lock; stop a Session whose lease renewal finds its row expired | inline | done (see Review round 4) |
 | R5 | Jorge round 5 (PR #114): keep the provider API key out of status output and crash reports; align channel error replies with the documented contract | inline | done (see Review round 5) |
+| R6 | Jorge round 6 (PR #114): refuse incomplete or empty provider responses; refuse non-map start_session payloads with invalid_payload | inline | done (see Review round 6) |
 
 ## Checks
 
@@ -213,6 +214,28 @@ already understood). Confirmed findings and fixes:
 Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix test`
 989 passed, 20 skipped; `mix precommit` exit 0, 989 passed, 20 skipped.
 
+## Review round 6 (Jorge el Curioso, PR #114)
+
+Route: inline (two source files and their tests; each fix is small and already understood).
+Confirmed findings and fixes:
+
+1. Medium: `OpenAIResponses.parse/1` ignored `status` and returned `{:ok, nil, []}` for a 200
+   response with neither a message nor a tool call, so the Loop emitted an empty assistant
+   message and completed the turn. `parse/1` now returns `:error` (replied as
+   `{:error, :invalid_provider_response, state}`) when `status` is `"incomplete"` or when the
+   output has no text and no tool call. Loop, Session and spend semantics are unchanged.
+   RED: new `openai_responses_test.exs` cases "a 200 response with neither a message nor a
+   tool call ..." (reasoning-only output) and "an incomplete 200 response ..." (partial
+   text, `max_output_tokens`) both got `{:ok, ...}`; GREEN.
+2. Low: `handle_in("start_session", ...)` had no `is_map/1` guard, so a string or list
+   payload raised `BadMapError` and killed the channel. The clause is now guarded and a
+   non-map payload reaches the `invalid_payload` catch-all. RED: new channel case "a non-map
+   start_session payload is refused with invalid_payload and the channel survives" crashed
+   with `BadMapError`; GREEN.
+
+Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix test`
+992 passed, 20 skipped; `mix precommit` exit 0, 992 passed, 20 skipped.
+
 ## Known limits handed to later slices of #93
 
 - Purchase calculation and budget deviations (`requires_approval`), Nutrition Goal in the
@@ -223,4 +246,4 @@ Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix 
 
 ## Next step
 
-Re-run the Jorge review gate on PR #114 after review round 5.
+Re-run the Jorge review gate on PR #114 after review round 6.

@@ -175,6 +175,10 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
   # Response
   # ---------------------------------------------------------------------------
 
+  # An incomplete response (for example cut off at max_output_tokens) is not a
+  # finished assistant turn, even when it carries partial text.
+  defp parse(%{"status" => "incomplete"}), do: :error
+
   defp parse(%{"output" => output}) when is_list(output) do
     text =
       for %{"type" => "message", "content" => content} <- output,
@@ -186,7 +190,13 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
         %{id: id, name: name, arguments: decode_arguments(call["arguments"])}
       end
 
-    {:ok, if(text == [], do: nil, else: Enum.join(text)), calls}
+    case {text, calls} do
+      # Neither a message nor a tool call (for example only a reasoning item):
+      # nothing to show the Member and nothing to run.
+      {[], []} -> :error
+      {[], calls} -> {:ok, nil, calls}
+      {text, calls} -> {:ok, Enum.join(text), calls}
+    end
   end
 
   defp parse(_response), do: :error

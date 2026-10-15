@@ -206,6 +206,32 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponsesTest do
       assert spent >= 4_000
     end
 
+    test "a 200 response with neither a message nor a tool call is an invalid provider response" do
+      stub_response(%{
+        "status" => "completed",
+        "output" => [%{"type" => "reasoning", "summary" => []}],
+        "usage" => %{"input_tokens" => 100, "output_tokens" => 50}
+      })
+
+      {:ok, state} = OpenAIResponses.init(opts())
+
+      assert {:error, :invalid_provider_response, _state} =
+               OpenAIResponses.respond(state, @request)
+    end
+
+    test "an incomplete 200 response is an invalid provider response, even with partial text" do
+      stub_response(
+        text_response("Here is your", %{"input_tokens" => 100, "output_tokens" => 50})
+        |> Map.put("status", "incomplete")
+        |> Map.put("incomplete_details", %{"reason" => "max_output_tokens"})
+      )
+
+      {:ok, state} = OpenAIResponses.init(opts())
+
+      assert {:error, :invalid_provider_response, _state} =
+               OpenAIResponses.respond(state, @request)
+    end
+
     test "reports the reserved state through the request checkpoint before calling" do
       test = self()
 

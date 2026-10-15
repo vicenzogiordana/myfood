@@ -180,6 +180,18 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     assert_reply(ref, :error, %{reason: "internal_error"})
   end
 
+  test "a non-map start_session payload is refused with invalid_payload and the channel survives",
+       %{household: h} do
+    socket = join!(h, h.owner)
+
+    for payload <- ["x", ["2026-11-02"]] do
+      ref = push(socket, "start_session", payload)
+      assert_reply(ref, :error, %{reason: "invalid_payload"})
+    end
+
+    assert Process.alive?(socket.channel_pid)
+  end
+
   test "after consent a message produces a validated Proposal event", %{household: h} do
     socket = join!(h, h.owner)
     ref = push(socket, "start_session", @range)

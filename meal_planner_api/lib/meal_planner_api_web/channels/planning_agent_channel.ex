@@ -50,7 +50,8 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
   end
 
   @impl true
-  def handle_in("start_session", payload, socket) do
+  # A non-map payload falls through to the invalid_payload clause below.
+  def handle_in("start_session", payload, socket) when is_map(payload) do
     membership = socket.assigns.current_membership
 
     with {:ok, range} <- parse_range(payload),
