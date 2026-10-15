@@ -340,9 +340,7 @@ defmodule MealPlannerApi.Data.PlanningRepo do
           {:ok, PlanningSession.t()} | {:error, :session_already_active | term()}
   def create_household_session(account_id, attrs) when is_map(attrs) do
     Repo.transaction(fn ->
-      Repo.query!("SELECT pg_advisory_xact_lock(hashtext($1))", [
-        "planning_session:" <> account_id
-      ])
+      lock_household!(account_id)
 
       active? =
         Repo.exists?(
@@ -359,6 +357,46 @@ defmodule MealPlannerApi.Data.PlanningRepo do
       end
     end)
   end
+
+  @doc """
+  Inserts an `:active` legacy session unless an agent Planning Session holds
+  the Household (spec #93, issue #119). Legacy sessions keep their per-range
+  rule among themselves: the overlap EXCLUDE constraint still applies.
+
+  Takes the same transaction-scoped advisory lock as
+  `create_household_session/2`, so a legacy start and an agent start racing
+  cannot both win.
+  """
+  @spec create_legacy_session(Ecto.UUID.t(), map()) ::
+          {:ok, PlanningSession.t()}
+          | {:error, :session_already_active | :overlapping_range | term()}
+  def create_legacy_session(account_id, attrs) when is_map(attrs) do
+    Repo.transaction(fn ->
+      lock_household!(account_id)
+
+      agent_active? =
+        Repo.exists?(
+          from(s in PlanningSession,
+            where: s.account_id == ^account_id and s.status == :active and s.agent
+          )
+        )
+
+      if agent_active? do
+        Repo.rollback(:session_already_active)
+      else
+        case create_session(account_id, Map.put(attrs, :agent, false)) do
+          {:ok, session} -> session
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end
+    end)
+  end
+
+  defp lock_household!(account_id),
+    do:
+      Repo.query!("SELECT pg_advisory_xact_lock(hashtext($1))", [
+        "planning_session:" <> account_id
+      ])
 
   @doc "Extends the lease of an active session so the sweeper does not expire it."
   @spec renew_lease(Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) :: :ok | {:error, :not_active}

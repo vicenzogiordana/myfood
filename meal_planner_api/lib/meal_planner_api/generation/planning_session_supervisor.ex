@@ -52,7 +52,7 @@ defmodule MealPlannerApi.Generation.PlanningSessionSupervisor do
   Starts a new session process and registers the session row.
 
   Generates a `session_id` for the in-memory process identity (the
-  canonical row id comes from `PlanningRepo.create_session/2` once
+  canonical row id comes from `PlanningRepo.create_legacy_session/2` once
   the row is inserted), starts a `PlanningSessionServer` under this
   supervisor, and delegates to `PlanningSessionServer.start_session/5`.
 

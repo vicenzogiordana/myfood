@@ -39,7 +39,7 @@ review. Out: switching the legacy planner off (spec #93, after the battery).
 
 - [x] T1 Restart during an old registration returns `{:error, :session_already_active}` (route: inline, one file + test)
 - [x] T2 Idle expiry: a connected but inactive session ends after `:idle_ms` (default 30 min) and releases the slot (route: inline, one file + test)
-- [ ] T3 Legacy start refuses while an agent session holds the Household lock (route: inline; migration + repo + server + tests)
+- [x] T3 Legacy start refuses while an agent session holds the Household lock (route: inline; migration + repo + server + tests)
 - [ ] T4 Sweeper tests against agent lock rows (route: inline, tests only)
 - [ ] T5 No tool call runs after `ask_human` ends the turn; proposal clearing reviewed (route: inline, one file + test)
 
@@ -64,8 +64,15 @@ review. Out: switching the legacy planner off (spec #93, after the battery).
 - T2: RED: the three idle tests in `session_grace_test.exs` failed (no
   `session_ended`); GREEN: `test/meal_planner_api/planning_agent/` 234 passed.
   Default idle time 30 minutes (configurable `:idle_ms`), glossary term
-  "Idle Expiry" added to CONTEXT.md.
+  "Idle Expiry" added to CONTEXT.md. Commit 02013c2.
+- T3: chose "respect the lock" over removal (the legacy planner is still on
+  until the battery passes). Rows get an `agent` marker (migration
+  `20261015160000`); `PlanningRepo.create_legacy_session/2` takes the same
+  advisory lock and refuses with `:session_already_active` while an agent
+  row is active; legacy rows keep their per-range rule. RED: the new
+  `legacy_session_agent_lock_test.exs` start returned `{:ok, _}`; GREEN:
+  generation, channels, planning repo and migration shape tests 234 passed.
 
 ## Next step
 
-T3.
+T4.

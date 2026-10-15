@@ -1817,7 +1817,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       range_to: to_date,
       lock_owner_user_id: attrs.user_id,
       lock_owner_membership_id: attrs.membership_id,
-      lease_expires_at: present_lease(grace_ms)
+      lease_expires_at: present_lease(grace_ms),
+      agent: true
     })
   end
 
