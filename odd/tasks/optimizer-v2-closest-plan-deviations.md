@@ -51,24 +51,27 @@ ships the seam they call (see "Integration note").
 - [x] Timeouts are reported as inconclusive, never as infeasible
 - [x] Optimality status is reported
 - [x] OR-Tools version is pinned and the chosen backend is documented in the code
-- [ ] Proposals with Deviations are presented as requiring approval (classification seam; tool wiring pending #114, see note)
+- [x] Proposals with Deviations are presented as requiring approval (classification seam; tool wiring pending #114, see note)
 
 ## Tasks
 
 | ID | Task | Route | Status |
 |----|------|-------|--------|
 | T1 | Python optimizer v2 + port-contract tests + OR-Tools pin | inline (bounded worker; single writer) | done |
-| T2 | Elixir contract + ProposalStatus + docs, test-first | inline (bounded worker; single writer) | pending |
+| T2 | Elixir contract + ProposalStatus + docs, test-first | inline (bounded worker; single writer) | done |
 
 - [x] T1 — RED: 24 tests, 5 failures + 15 errors (no `deviations`/`optimality`, budget hard, no `_create_solver`). GREEN: 24/24 OK.
   Refactor: a 90-meal range first hit the 120 s deadline because a met goal was frozen as one summed
   constraint coupling every day; freezing met goals per deviation variable brought it to ~15 s.
-- [ ] T2 — RED: `Contract`/`ProposalStatus` tests failed (modules undefined). GREEN after implementation.
+- [x] T2 — RED: 0/13 (`Contract`/`ProposalStatus` undefined). GREEN: 13/13. A real-port test
+  (`contract_port_test.exs`, runs when `OPTIMIZER_PYTHON` is set) passes 2/2 against `optimizador.py`.
 
 ## Integration note
 
 `run_optimizer` should pass `Contract.nutrition_bounds(NutritionGoals.get(account_id))`
-as `constraints.macro_bounds` and interpret the reply with `Contract.interpret/1`;
+as `constraints.macro_bounds` and interpret the reply with `Contract.interpret/1`
+(the #114 port adapter must also pass the `inconclusive` error through instead of
+mapping it to `:optimizer_error`);
 `present_proposal` should emit `ProposalStatus.classify(violations, deviations)`.
 Wire this in whichever of #96/#97 merges second.
 
@@ -80,5 +83,7 @@ Wire this in whichever of #96/#97 merges second.
 
 ## Evidence
 
-- T1 commit: pending
-- T2 commit: pending
+- T1 commit: `6b9ba4c` feat(optimizer): return closest plan with prioritized deviations
+- T2 commit: the `feat(planning)` commit that follows T1 on this branch
+- Python: `.venv-ortools/bin/python -m unittest test_optimizador` → 24 tests OK
+- `mix precommit` (partitioned DB, `OPTIMIZER_PYTHON` set) → 938 passed, 20 skipped
