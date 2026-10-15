@@ -203,7 +203,41 @@ defmodule MealPlannerApi.PlanningAgent.SessionToolsTest do
                last_tool_result(third)
 
       assert Enum.all?(violations, &(&1["type"] == "restriction_conflict"))
+      assert last_tool_result(third)["outcome"] == "failure"
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{
+                        "type" => "progress",
+                        "step" => "tool_finished",
+                        "tool" => "present_proposal",
+                        "outcome" => "failure"
+                      }}
+
       assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "proposal"}}
+    end
+
+    test "presenting a rejected plan again and again is not progress",
+         %{household: h, recipes: r} do
+      diet!(member!(h), :vegetarian)
+      present = {:tool_calls, [{"present_proposal", %{}}]}
+
+      {session_id, pid} =
+        start!(
+          h,
+          [{:tool_calls, [{"run_optimizer", %{}}]}, present, present, present, present],
+          result: FakeOptimizer.everywhere(r.chicken_rice.id)
+        )
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "no_progress"}},
+                     1_000
+
+      # The optimizer run is evidence; three rejected presentations are not.
+      for _ <- 1..4, do: assert_received({:scripted_model_request, _})
+      refute_received {:scripted_model_request, _}
       refute_received {:planning_agent_event, ^session_id, %{"type" => "proposal"}}
     end
 

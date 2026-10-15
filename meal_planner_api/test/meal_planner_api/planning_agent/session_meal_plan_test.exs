@@ -72,6 +72,19 @@ defmodule MealPlannerApi.PlanningAgent.SessionMealPlanTest do
     {session_id, results}
   end
 
+  # Several rejected calls in one attempt: one attempt per rejected call
+  # would hit the no-progress limit (3 attempts without new evidence).
+  defp run_tools_at_once(household, calls) do
+    {session_id, pid} = start!(household, [{:tool_calls, calls}, {:text, "done"}])
+    :ok = Session.send_message(pid, "Look at our plan")
+
+    assert_receive {:scripted_model_request, _first}
+    assert_receive {:scripted_model_request, %{messages: messages}}
+    assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+
+    {session_id, for(%{role: :tool_result, content: content} <- messages, do: content)}
+  end
+
   defp plan_week!(household, recipes) do
     scheduled_meal!(household, @past_monday, :lunch, recipes.rice_salad)
     scheduled_meal!(household, @past_monday, :dinner, recipes.lentil_stew)
@@ -137,7 +150,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionMealPlanTest do
 
     test "rejects missing, malformed, reversed and oversized ranges", %{household: h} do
       {_session_id, results} =
-        run_tools(h, [
+        run_tools_at_once(h, [
           {"get_plan", %{}},
           {"get_plan", %{"from" => "next monday"}},
           {"get_plan", %{"from" => "2026-11-03", "to" => "2026-11-02"}},
@@ -267,14 +280,14 @@ defmodule MealPlannerApi.PlanningAgent.SessionMealPlanTest do
           {"present_proposal", %{}}
         ])
 
-      assert reused == %{"error" => "no_planned_meals"}
-      assert presented == %{"error" => "no_plan_to_present"}
+      assert %{"error" => "no_planned_meals", "outcome" => "failure"} = reused
+      assert %{"error" => "no_plan_to_present", "outcome" => "failure"} = presented
     end
 
     test "rejects a source that is malformed or not entirely before the Planning Range",
          %{household: h} do
       {_session_id, results} =
-        run_tools(h, [
+        run_tools_at_once(h, [
           {"reuse_plan", %{}},
           {"reuse_plan", %{"source_from" => "last week"}},
           {"reuse_plan", %{"source_from" => "2026-11-16"}},

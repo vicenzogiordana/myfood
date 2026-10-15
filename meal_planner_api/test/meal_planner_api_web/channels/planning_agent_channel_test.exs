@@ -192,6 +192,38 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     assert Process.alive?(socket.channel_pid)
   end
 
+  test "after a limit the Member authorizes continuing through the channel", %{household: h} do
+    search = {:tool_calls, [{"search_recipes", %{"query" => "soup"}}]}
+    configure_agent(List.duplicate(search, 4) ++ [{:text, "Continued."}])
+
+    socket = join!(h, h.owner)
+    ref = push(socket, "start_session", @range)
+    assert_reply(ref, :ok, _)
+    ref = push(socket, "give_consent", %{})
+    assert_reply(ref, :ok, _)
+
+    ref = push(socket, "authorize_continuation", %{})
+    assert_reply(ref, :error, %{reason: "no_limit_reached"})
+
+    ref = push(socket, "send_message", %{"text" => "Plan dinner"})
+    assert_reply(ref, :ok, _)
+
+    assert_push("agent_event", %{
+      "type" => "limit_reached",
+      "limit" => "no_progress",
+      "requires_authorization" => true
+    })
+
+    ref = push(socket, "send_message", %{"text" => "Go on"})
+    assert_reply(ref, :error, %{reason: "authorization_required"})
+
+    ref = push(socket, "authorize_continuation", %{})
+    assert_reply(ref, :ok, _)
+
+    assert_push("agent_event", %{"type" => "assistant_message", "text" => "Continued."})
+    cancel!(socket)
+  end
+
   test "after consent a message produces a validated Proposal event", %{household: h} do
     socket = join!(h, h.owner)
     ref = push(socket, "start_session", @range)

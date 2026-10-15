@@ -22,6 +22,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       over the budget is a budget Deviation (`requires_approval`)
     * `ask_human` — one question; ends the turn
 
+  Read calls (recipe search) and solver calls run within
+  `MealPlannerApi.PlanningAgent.CallBounds`: their own deadline and retry
+  budget, clipped by the turn's global deadline.
+
   Every call runs with the session's tool context. The Household always comes
   from that context: tool schemas carry no Household and any Household named
   in model arguments is ignored. Unknown tools are rejected by code.
@@ -30,6 +34,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   alias MealPlannerApi.Planning.ProposalStatus
 
   alias MealPlannerApi.PlanningAgent.{
+    CallBounds,
     MealPlan,
     Prices,
     ProjectedPantry,
@@ -177,7 +182,27 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   updated workspace, and whether the turn continues.
   """
   @spec execute(String.t(), map(), context()) :: {map(), map(), control()}
-  def execute("search_recipes", args, ctx) do
+  def execute(name, args, ctx) do
+    {content, workspace, control} = run(name, args, ctx)
+    {Map.put_new(content, "outcome", outcome(content)), workspace, control}
+  end
+
+  @doc """
+  The outcome kind of a tool result: `complete`, `partial` (verified but
+  with missing data, named under `"missing"`), `failure`, or `unknown` (the
+  call was cut by its deadline, so absence of a result proves nothing).
+  `cancelled` applies only to runs, which a cancel interrupts mid-tool.
+  """
+  @spec outcome(map()) :: String.t()
+  def outcome(%{"outcome" => outcome}), do: outcome
+  def outcome(%{"error" => "search_timeout"}), do: "unknown"
+  def outcome(%{"error" => "optimizer_failed", "reason" => "optimizer_timeout"}), do: "unknown"
+  def outcome(%{"error" => _}), do: "failure"
+  # A proposal the validator rejected is a failed attempt, not evidence.
+  def outcome(%{"status" => "invalid"}), do: "failure"
+  def outcome(_content), do: "complete"
+
+  defp run("search_recipes", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "searching_recipes"})
 
     filters = %{
@@ -187,16 +212,16 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       limit: integer_arg(args, "limit")
     }
 
-    case RecipeSearch.search(ctx.household, reject_nil(filters)) do
+    case search(ctx, reject_nil(filters)) do
       {:ok, recipes} ->
         {%{"recipes" => Enum.map(recipes, &recipe_data/1)}, ctx.workspace, :continue}
 
-      {:error, :search_failed} ->
-        {%{"error" => "search_failed"}, ctx.workspace, :continue}
+      {:error, reason} ->
+        {%{"error" => reason_string(reason, "search_failed")}, ctx.workspace, :continue}
     end
   end
 
-  def execute("get_plan", args, ctx) do
+  defp run("get_plan", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "reading_plan"})
 
     case MealPlan.parse_range(Map.get(args, "from"), Map.get(args, "to")) do
@@ -209,7 +234,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
-  def execute("reuse_plan", args, ctx) do
+  defp run("reuse_plan", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "reading_plan"})
 
     case MealPlan.reuse(ctx.account_id, Map.get(args, "source_from"), ctx.range, ctx.slots) do
@@ -225,7 +250,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
-  def execute("run_optimizer", args, ctx) do
+  defp run("run_optimizer", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "running_optimizer"})
 
     exclude =
@@ -242,19 +267,23 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
       workspace = %{ctx.workspace | draft: meals}
 
-      {%{"status" => "ok", "meals" => Enum.map(meals, &meal_data(&1, names))}, workspace,
-       :continue}
+      result =
+        %{"status" => "ok", "meals" => Enum.map(meals, &meal_data(&1, names))}
+        |> with_missing(missing(candidates_by_slot))
+
+      {result, workspace, :continue}
     else
       # Every failed run discards the earlier draft so present_proposal cannot
       # show a plan the agent just asked to change.
       {:error, :no_candidates, slot} ->
         {%{"error" => "no_candidates", "slot" => slot}, %{ctx.workspace | draft: nil}, :continue}
 
-      {:error, :search_failed} ->
-        {%{"error" => "search_failed"}, %{ctx.workspace | draft: nil}, :continue}
+      {:error, reason} ->
+        {%{"error" => reason_string(reason, "search_failed")}, %{ctx.workspace | draft: nil},
+         :continue}
 
       {:error, reason, details} ->
-        reason = reason_string(reason)
+        reason = reason_string(reason, "optimizer_error")
         emit(ctx, %{"type" => "optimizer_failed", "reason" => reason})
 
         {%{"error" => "optimizer_failed", "reason" => reason, "details" => details},
@@ -262,10 +291,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
-  def execute("present_proposal", _args, %{workspace: %{draft: nil}} = ctx),
+  defp run("present_proposal", _args, %{workspace: %{draft: nil}} = ctx),
     do: {%{"error" => "no_plan_to_present"}, ctx.workspace, :continue}
 
-  def execute("present_proposal", _args, ctx) do
+  defp run("present_proposal", _args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "validating_proposal"})
 
     case ProposalValidator.validate(ctx.workspace.draft, ctx) do
@@ -314,13 +343,13 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
-  def execute("get_pantry", _args, ctx) do
+  defp run("get_pantry", _args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "reading_pantry"})
     pantry = ProjectedPantry.load(ctx.account_id)
     {%{"items" => ProjectedPantry.to_data(pantry)}, ctx.workspace, :continue}
   end
 
-  def execute("lookup_prices", args, ctx) do
+  defp run("lookup_prices", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "looking_up_prices"})
 
     case args |> Map.get("ingredients") |> List.wrap() |> Enum.filter(&is_binary/1) do
@@ -339,11 +368,14 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             end)
         }
 
+        # Missing prices are named, never zero: the lookup is then partial.
+        result = if missing == [], do: result, else: Map.put(result, "outcome", "partial")
+
         {result, ctx.workspace, :continue}
     end
   end
 
-  def execute("ask_human", args, ctx) do
+  defp run("ask_human", args, ctx) do
     case string_arg(args, "question") do
       nil ->
         {%{"error" => "question_required"}, ctx.workspace, :continue}
@@ -354,7 +386,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
-  def execute(_name, _arguments, ctx),
+  defp run(_name, _arguments, ctx),
     do: {%{"error" => "unknown_tool"}, ctx.workspace, :continue}
 
   # ---------------------------------------------------------------------------
@@ -412,10 +444,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     Enum.reduce_while(ctx.slots, {:ok, %{}}, fn slot, {:ok, acc} ->
       filters = %{slot: slot, exclude_recipe_ids: exclude, limit: @optimizer_candidates_per_slot}
 
-      case RecipeSearch.search(ctx.household, filters) do
+      case search(ctx, filters) do
         {:ok, []} -> {:halt, {:error, :no_candidates, slot}}
         {:ok, recipes} -> {:cont, {:ok, Map.put(acc, slot, Enum.map(recipes, &candidate/1))}}
-        {:error, :search_failed} = error -> {:halt, error}
+        {:error, _reason} = error -> {:halt, error}
       end
     end)
   end
@@ -423,18 +455,38 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   # Candidate costs and the Nutrition Goal enter the optimizer with the
   # package-aware purchase calculation and goal relaxation slices of #93; the
   # tracer bullet keeps bounds wide so only coverage decides feasibility.
+  #
+  # Missing nutrition data is sent as missing (nil), never as zero, and the
+  # plan built from it is reported as partial with what is missing.
   defp candidate(recipe) do
     %{
       "recipe_id" => recipe.id,
       "label" => recipe.name,
       "estimated_cost_cents" => 0,
-      "calories_per_serving" => recipe.calories_per_serving || 0,
-      "protein_g_per_serving" => recipe.protein_g_per_serving || 0,
-      "carbs_g_per_serving" => recipe.carbs_g_per_serving || 0,
-      "fat_g_per_serving" => recipe.fat_g_per_serving || 0,
+      "calories_per_serving" => Map.get(recipe, :calories_per_serving),
+      "protein_g_per_serving" => Map.get(recipe, :protein_g_per_serving),
+      "carbs_g_per_serving" => Map.get(recipe, :carbs_g_per_serving),
+      "fat_g_per_serving" => Map.get(recipe, :fat_g_per_serving),
       "inventory_hit_count" => 0
     }
   end
+
+  @nutrition_fields ~w(calories_per_serving protein_g_per_serving carbs_g_per_serving
+                       fat_g_per_serving)
+
+  # Candidate costs are not priced yet (purchase slice of #93), so every plan
+  # misses its estimated cost and is partial until that slice lands.
+  defp missing(candidates_by_slot) do
+    candidates = candidates_by_slot |> Map.values() |> List.flatten()
+
+    nutrition =
+      Enum.filter(@nutrition_fields, fn field -> Enum.any?(candidates, &is_nil(&1[field])) end)
+
+    ["estimated_cost" | nutrition]
+  end
+
+  defp with_missing(result, missing),
+    do: Map.merge(result, %{"outcome" => "partial", "missing" => missing})
 
   defp payload(ctx, candidates_by_slot) do
     {from_date, to_date} = ctx.range
@@ -455,15 +507,57 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     }
   end
 
+  # The solver is never retried: a timeout is inconclusive, and every other
+  # failure is a property of the payload.
   defp solve(ctx, payload) do
     {optimizer, opts} = optimizer(ctx)
 
-    case optimizer.solve(payload, opts) do
-      {:ok, %{"meals" => meals}} when is_list(meals) -> parse_meals(meals)
-      {:ok, _other} -> {:error, :invalid_optimizer_response, %{}}
-      {:error, reason, details} -> {:error, reason, details}
+    attempt = fn state, call ->
+      opts = Keyword.update(opts, :timeout_ms, call.timeout_ms, &min(&1, call.timeout_ms))
+
+      case optimizer.solve(payload, opts) do
+        {:ok, result} -> {:ok, result, state}
+        {:error, reason, details} -> {:error, {reason, details}, state}
+      end
+    end
+
+    case CallBounds.run(Map.get(ctx, :bounds), :solver, nil, attempt) do
+      {:ok, %{"meals" => meals}, _} when is_list(meals) ->
+        parse_meals(meals)
+
+      {:ok, _other, _} ->
+        {:error, :invalid_optimizer_response, %{}}
+
+      {:error, {reason, details}, _} ->
+        {:error, reason, details}
+
+      {:error, reason, _} when reason in [:timeout, :deadline_exceeded] ->
+        {:error, :optimizer_timeout, %{}}
     end
   end
+
+  # Recipe search is a read tool: bounded and retried on transient failure.
+  defp search(ctx, filters) do
+    {module, opts} = Map.get(ctx, :recipe_search) || {RecipeSearch, []}
+
+    attempt = fn state, _call ->
+      case search_with(module, ctx.household, filters, opts) do
+        {:ok, recipes} -> {:ok, recipes, state}
+        {:error, reason} -> {:error, reason, state}
+      end
+    end
+
+    case CallBounds.run(Map.get(ctx, :bounds), :read, nil, attempt) do
+      {:ok, recipes, _} -> {:ok, recipes}
+      {:error, :timeout, _} -> {:error, :search_timeout}
+      {:error, reason, _} -> {:error, reason}
+    end
+  end
+
+  defp search_with(RecipeSearch, household, filters, _opts),
+    do: RecipeSearch.search(household, filters)
+
+  defp search_with(module, household, filters, opts), do: module.search(household, filters, opts)
 
   defp optimizer(%{optimizer: {module, opts}}), do: {module, opts}
   defp optimizer(%{optimizer: module}) when is_atom(module) and module != nil, do: {module, []}
@@ -538,6 +632,6 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   defp emit(%{emit: emit}, event) when is_function(emit, 1), do: emit.(event)
   defp emit(_ctx, _event), do: :ok
 
-  defp reason_string(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp reason_string(_reason), do: "optimizer_error"
+  defp reason_string(reason, _default) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_string(_reason, default), do: default
 end

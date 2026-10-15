@@ -14,7 +14,11 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
       a failure without a typed reason replies `internal_error`.
     * `give_consent` — records the Member's consent to external AI use.
     * `send_message` — `%{"text"}`; replies `:ok` or
-      `%{reason: "consent_required" | "busy" | "invalid_message" | "message_too_long"}`.
+      `%{reason: "consent_required" | "busy" | "invalid_message" | "message_too_long" |
+      "authorization_required"}`.
+    * `authorize_continuation` — the session Member authorizes continuing
+      after a `limit_reached` event; replies `:ok` or
+      `%{reason: "forbidden" | "no_limit_reached"}`.
     * `cancel_session` — ends the Household's session (its Member or the Owner).
 
   Outgoing: every session event is pushed as `agent_event` with its `type`
@@ -82,6 +86,11 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
   # with invalid_message as documented.
   def handle_in("send_message", payload, socket) when is_map(payload) do
     with_own_session(socket, fn pid -> Session.send_message(pid, Map.get(payload, "text")) end)
+  end
+
+  def handle_in("authorize_continuation", _payload, socket) do
+    membership_id = socket.assigns.current_membership.id
+    with_own_session(socket, fn pid -> Session.authorize_continuation(pid, membership_id) end)
   end
 
   def handle_in("cancel_session", _payload, socket) do

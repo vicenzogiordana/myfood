@@ -209,7 +209,8 @@ cancelled or when its Member's socket leaves (grace and recovery come later).
 |-------|---------|-------|
 | `start_session` | `{range_from, range_to, slots?}` — ISO dates, at most 31 days of unplanned days; `slots` from `breakfast`, `lunch`, `snack`, `dinner` (default `lunch`, `dinner`) | `{session_id}` or `{reason}`: `session_already_active`, `range_already_planned`, `overlapping_range`, `invalid_range`, `invalid_slots`, `subscription_required`, `spend_caps_unconfigured`, `pricing_unconfigured`, `provider_unconfigured`, `internal_error` |
 | `give_consent` | `{}` — explicit consent before the first external AI use | `ok` |
-| `send_message` | `{text}` — a non-blank string of at most 4,000 bytes | `ok`, or `{reason}`: `invalid_message` (missing, non-string or blank `text`), `message_too_long`, `consent_required`, `busy`, `no_active_session`, `internal_error` |
+| `send_message` | `{text}` — a non-blank string of at most 4,000 bytes | `ok`, or `{reason}`: `invalid_message` (missing, non-string or blank `text`), `message_too_long`, `consent_required`, `busy`, `authorization_required` (a limit was reached), `no_active_session`, `internal_error` |
+| `authorize_continuation` | `{}` — only the session's Member, after `limit_reached` | `ok` (the request resumes with that limit extended) or `{reason}`: `forbidden`, `no_limit_reached`, `no_active_session` |
 | `cancel_session` | `{}` — the session's Member or the Household Owner | `{status: "cancelled"}` or `{reason}`: `forbidden`, `no_active_session` |
 | any other event | — | `{reason}`: `invalid_payload` |
 
@@ -219,15 +220,16 @@ Every event is pushed as `agent_event` with `type` and `session_id`:
 
 | `type` | Payload | Meaning |
 |--------|---------|---------|
-| `progress` | `{step}` — `thinking`, `searching_recipes`, `reading_plan` (also for `reuse_plan`), `reading_pantry`, `looking_up_prices`, `running_optimizer`, `validating_proposal` | The agent is working (no raw reasoning or tool output) |
+| `progress` | `{step}` — `thinking`, `searching_recipes`, `reading_plan` (also for `reuse_plan`), `reading_pantry`, `looking_up_prices`, `running_optimizer`, `validating_proposal`; `retrying` with `{call, attempt}` (`call`: `model`, `read`, `solver`); `tool_finished` with `{tool, outcome}` | The agent is working (no raw reasoning or tool output: events pass a field allowlist) |
 | `assistant_message` | `{text}` | Agent reply |
 | `question` | `{text}` | The agent asks one question; the turn ended |
 | `proposal` | `{proposal_id, status, meals: [{date, slot, recipe_id, name}], purchase, consumed_cost, budget, deviations}` | A Proposal validated by code; `status` is code-owned (`valid` or `requires_approval`). See "Proposal Purchase" below |
 | `optimizer_failed` | `{reason}` | The optimizer failed; no fallback plan is produced |
 | `consent_required` | `{}` | Consent must be given before the agent can call the AI provider |
-| `limit_reached` | `{limit}` — `iterations` or `time` | The request hit 10 iterations or 5 minutes |
-| `agent_unavailable` | `{reason}` | The AI provider cannot be used now (including `spend_cap_reached`) |
+| `limit_reached` | `{limit, requires_authorization: true}` — `iterations`, `no_progress` or `time` | Execution stopped: 10 iterations per Planning Session (new messages do not reset them), 3 consecutive attempts without new evidence, or 5 minutes per request. Nothing runs until the Member sends `authorize_continuation` |
+| `agent_unavailable` | `{reason}` | The AI provider cannot be used now: `provider_unavailable` / `provider_timeout` after up to 5 retries, or at once for `provider_unauthorized`, `provider_rejected_request`, `provider_conflict`, `spend_cap_reached`, `token_cap_reached` |
 | `turn_completed` | `{}` | The agent finished answering |
+| `run_finished` | `{outcome}` — `complete`, `partial`, `failure`, `cancelled`, `unknown` | Exactly one per request or authorized continuation; `partial` means stopped by a limit, `unknown` that the run crashed |
 | `session_cancelled` / `session_ended` | `{}` | The Planning Session is over |
 
 #### Proposal Purchase
@@ -272,6 +274,13 @@ Paid execution requires `OPENAI_API_KEY`, `PLANNING_AGENT_SPEND_CAP_MICROS`,
 `PLANNING_AGENT_TOKEN_CAP`, `OPENAI_INPUT_PRICE_MICROS_PER_MTOK` and
 `OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK`; without them `start_session` replies
 `spend_caps_unconfigured` (or `pricing_unconfigured` / `provider_unconfigured`).
+The spend and token caps apply per Planning Session and are never extended by
+`authorize_continuation`.
+
+Per-call bounds: each model attempt 60 s (up to 5 transient retries), each
+solve 120 s (no retry; a timeout is inconclusive), each recipe search 30 s (up
+to 2 retries), with increasing backoff and every deadline shortened by the
+request's remaining 5 minutes. No retry starts while the Member is absent.
 
 ---
 
