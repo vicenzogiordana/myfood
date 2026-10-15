@@ -43,8 +43,8 @@ grace/restart recovery (#107).
 - [x] Existing pending and in-cart Shopping List lines are untouched
 - [x] A stale Proposal is not saved and the Member is asked again
 - [x] A revalidation conflict blocks saving and leads to a corrected Proposal needing new approval
-- [ ] Replaying the same confirmation never saves twice
-- [ ] An unverifiable confirmation is reported as unresolved after 30 s, never as failed
+- [x] Replaying the same confirmation never saves twice
+- [x] An unverifiable confirmation is reported as unresolved after 30 s, never as failed
 - [x] No agent tool can persist a plan
 
 ## Tasks
@@ -58,7 +58,7 @@ grace/restart recovery (#107).
   - Changed Projected Pantry / prices / budget → recalculated Proposal (new identity)
   - Restriction conflict → nothing saved, Proposal voided, agent turn corrects it
   - `requires_approval` → `:approval_required` until #103
-- [ ] **T3** Idempotency and lost acknowledgement (route: inline)
+- [x] **T3** Idempotency and lost acknowledgement (route: inline)
   - Replay (live session or after it ended) returns the original confirmation
   - Lost acknowledgement reconciled by status for up to 30 s, then `:unresolved`
   - Status stays queryable
@@ -73,9 +73,9 @@ grace/restart recovery (#107).
 | Task | Commit | Tests |
 |------|--------|-------|
 | T1   | b58251a | RED 3/5 (confirm/3 undefined; 2 no-persist characterization tests already green); GREEN 5/5; planning_agent suite 144 passed |
-| T2   | this commit | RED 6/9 (stale/budget/conflict); GREEN 9/9; planning_agent suite 148 passed |
-| T3   | (pending) | |
+| T2   | 5cb59bb | RED 6/9 (stale/budget/conflict); GREEN 9/9; planning_agent suite 148 passed |
+| T3   | this commit | No true RED: reconciliation and replay were written with T1; mutation check (disable reconcile + replay) failed 4/15, restored GREEN 15/15; `mix precommit` 1117 passed, 25 skipped |
 
 ## Next step
 
-T3.
+Open the PR; Deviation Approval (#103) lifts `:approval_required`.

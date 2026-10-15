@@ -13,7 +13,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionConfirmTest do
 
   alias MealPlannerApi.Persistence.Planning.{PlanningSession, ScheduledMeal}
   alias MealPlannerApi.Persistence.Shopping.ShoppingItem
-  alias MealPlannerApi.PlanningAgent.{FakeOptimizer, Tools}
+  alias MealPlannerApi.PlanningAgent.{Confirmation, FakeOptimizer, FlakyConfirmationStore, Tools}
   alias MealPlannerApi.PlanningAgent.Model.Scripted
   alias MealPlannerApi.PlanningAgent.Session
   alias MealPlannerApi.Repo
@@ -319,6 +319,100 @@ defmodule MealPlannerApi.PlanningAgent.SessionConfirmTest do
       assert {:error, :stale_proposal} = confirm(h, proposal["proposal_id"])
       assert {:ok, %{meals_count: 2}} = confirm(h, corrected["proposal_id"])
       assert Enum.all?(planned_meals(h), &(&1.recipe_id == safe.id))
+    end
+  end
+
+  describe "idempotent confirmation" do
+    test "replaying the same confirmation never saves twice", %{household: h} = ctx do
+      %{pid: pid, proposal: proposal} = present!(h, ctx.recipe)
+      ref = Process.monitor(pid)
+
+      assert {:ok, first} = confirm(h, proposal["proposal_id"])
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+
+      # The Planning Session and its Workspace are gone; the confirmation
+      # identity outlives them.
+      assert {:ok, ^first} = confirm(h, proposal["proposal_id"])
+      assert length(planned_meals(h)) == 2
+      assert length(shopping_lines(h)) == first.shopping_lines_count
+    end
+
+    test "concurrent confirmations of the same Proposal save once", %{household: h} = ctx do
+      %{proposal: proposal} = present!(h, ctx.recipe)
+
+      results =
+        1..3
+        |> Enum.map(fn _ -> Task.async(fn -> confirm(h, proposal["proposal_id"]) end) end)
+        |> Task.await_many(10_000)
+
+      assert [{:ok, summary}, {:ok, summary}, {:ok, summary}] = results
+      assert length(planned_meals(h)) == 2
+      assert length(shopping_lines(h)) == summary.shopping_lines_count
+    end
+
+    test "the status of a confirmation stays queryable", %{household: h} = ctx do
+      %{proposal: proposal} = present!(h, ctx.recipe)
+      assert Session.confirmation_status(h.account_id, proposal["proposal_id"]) == :not_found
+
+      assert {:ok, summary} = confirm(h, proposal["proposal_id"])
+
+      assert Session.confirmation_status(h.account_id, proposal["proposal_id"]) ==
+               {:confirmed, summary}
+
+      # Another Household never sees it.
+      assert Session.confirmation_status(household!().account_id, proposal["proposal_id"]) ==
+               :not_found
+    end
+  end
+
+  describe "a lost acknowledgement" do
+    test "is reconciled without saving twice", %{household: h} = ctx do
+      %{session_id: session_id, proposal: proposal} =
+        present!(h, ctx.recipe,
+          session: [
+            confirmation_store: {FlakyConfirmationStore, mode: :lost_ack, notify: self()},
+            poll_ms: 10
+          ]
+        )
+
+      assert {:ok, %{meals_count: 2}} = confirm(h, proposal["proposal_id"])
+      assert_received {:confirmation_store, :commit}
+      refute_received {:confirmation_store, :commit}
+
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "proposal_confirmed"}}
+      assert length(planned_meals(h)) == 2
+    end
+
+    test "an unverifiable confirmation is unresolved after the window, never failed",
+         %{household: h} = ctx do
+      window_ms = 200
+
+      %{session_id: session_id, pid: pid, proposal: proposal} =
+        present!(h, ctx.recipe,
+          session: [
+            confirmation_store: {FlakyConfirmationStore, mode: :unreachable},
+            reconcile_ms: window_ms,
+            poll_ms: 20
+          ]
+        )
+
+      started = System.monotonic_time(:millisecond)
+      assert {:error, :unresolved} = confirm(h, proposal["proposal_id"])
+      assert System.monotonic_time(:millisecond) - started >= window_ms
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "confirmation_unresolved", "proposal_id" => unresolved}}
+
+      assert unresolved == proposal["proposal_id"]
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "agent_unavailable"}}
+
+      # The session keeps the Proposal and the status stays queryable.
+      assert Session.whereis(h.account_id) == pid
+      assert Session.confirmation_status(h.account_id, proposal["proposal_id"]) == :not_found
+    end
+
+    test "is reconciled for up to 30 seconds by default" do
+      assert Confirmation.reconcile_window_ms() == 30_000
     end
   end
 
