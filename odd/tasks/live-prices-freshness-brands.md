@@ -115,6 +115,20 @@ PR #126 was split into four chained PRs to main (strategy
   first runs failed only because the shared test database still held the
   source branch's schema and lacked main's recovery migration (reset with
   `ecto.drop`, `ecto.create`, `ecto.migrate`).
+- S1 review round (Jorge el Curioso on PR #132), route: inline, two
+  confirmed findings in `PriceScraper.Http`:
+  - Non-string `observedAt` crashed `fetch/2` (`FunctionClauseError` in
+    `DateTime.from_iso8601/1`). RED: the new test with `observedAt` nil
+    and `1_700_000_000` raised. GREEN: `is_binary(observed_at)` in the
+    `item/1` guard; the bad products are dropped and the valid one kept.
+  - Every non-200 status was the transient `:scraper_unreachable`, so a
+    permanent 4xx was retried. RED: a 404 gave `:scraper_unreachable`.
+    GREEN: 5xx and 429 stay `:scraper_unreachable`; any other status is
+    the non-transient `:scraper_rejected` (not in `CallBounds` transient
+    reads).
+  - Focused run: 8 passed.
+    `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix precommit` 1242
+    passed, 25 skipped.
 
 ## Next step
 

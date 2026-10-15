@@ -11,6 +11,9 @@ defmodule MealPlannerApi.PlanningAgent.PriceScraper.Http do
   currency or package size is never assumed. Until the scraper exposes the
   contract, every product is dropped and prices stay missing or stale.
 
+  A 5xx or 429 response is `:scraper_unreachable` (transient); any other
+  non-200 status is `:scraper_rejected`, which is not retried.
+
   Options: `:base_url` (default: the `:go_scraper_url` application env),
   `:receive_timeout` (default 15 s; the read-call deadline also applies) and
   `:req_options`, merged into the request (used by tests for a `Req.Test`
@@ -47,8 +50,11 @@ defmodule MealPlannerApi.PlanningAgent.PriceScraper.Http do
       {:ok, %{status: 200}} ->
         {:error, :invalid_scraper_response}
 
-      {:ok, %{status: _status}} ->
+      {:ok, %{status: status}} when status >= 500 or status == 429 ->
         {:error, :scraper_unreachable}
+
+      {:ok, %{status: _status}} ->
+        {:error, :scraper_rejected}
 
       {:error, %Req.TransportError{reason: :timeout}} ->
         {:error, :timeout}
@@ -74,7 +80,8 @@ defmodule MealPlannerApi.PlanningAgent.PriceScraper.Http do
        )
        when is_binary(supermarket) and supermarket != "" and is_binary(product) and
               product != "" and is_number(price) and price >= 0 and is_binary(currency) and
-              is_number(quantity) and quantity > 0 and is_boolean(cached) do
+              is_number(quantity) and quantity > 0 and is_binary(observed_at) and
+              is_boolean(cached) do
     with {:ok, package_unit, quantity_milli} <- package(unit, quantity),
          true <- Regex.match?(~r/\A[A-Z]{3}\z/, currency),
          {:ok, observed_at, _offset} <- DateTime.from_iso8601(observed_at) do

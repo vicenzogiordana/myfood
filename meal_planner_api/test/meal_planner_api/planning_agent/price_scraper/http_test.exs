@@ -7,6 +7,7 @@ defmodule MealPlannerApi.PlanningAgent.PriceScraper.HttpTest do
 
   use ExUnit.Case, async: true
 
+  alias MealPlannerApi.PlanningAgent.CallBounds
   alias MealPlannerApi.PlanningAgent.PriceScraper.Http
 
   @stub __MODULE__
@@ -92,6 +93,16 @@ defmodule MealPlannerApi.PlanningAgent.PriceScraper.HttpTest do
     assert {:ok, []} = fetch()
   end
 
+  test "drops products whose observation time is not a string, keeping the rest" do
+    stub_products([
+      product(%{}),
+      product(%{"observedAt" => nil}),
+      product(%{"observedAt" => 1_700_000_000})
+    ])
+
+    assert {:ok, [%{observed_at: ~U[2026-11-01 09:00:00Z]}]} = fetch()
+  end
+
   test "a product without a brand keeps a nil brand" do
     stub_products([Map.delete(product(%{}), "brand")])
 
@@ -104,5 +115,14 @@ defmodule MealPlannerApi.PlanningAgent.PriceScraper.HttpTest do
 
     Req.Test.stub(@stub, fn conn -> Req.Test.json(conn, %{"unexpected" => true}) end)
     assert {:error, :invalid_scraper_response} = fetch()
+  end
+
+  test "throttling is unreachable and other client errors are rejected without retry" do
+    Req.Test.stub(@stub, fn conn -> Plug.Conn.send_resp(conn, 429, "slow down") end)
+    assert {:error, :scraper_unreachable} = fetch()
+
+    Req.Test.stub(@stub, fn conn -> Plug.Conn.send_resp(conn, 404, "missing") end)
+    assert {:error, :scraper_rejected} = fetch()
+    refute CallBounds.transient?(:read, :scraper_rejected)
   end
 end
