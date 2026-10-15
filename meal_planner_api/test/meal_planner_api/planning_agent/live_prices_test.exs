@@ -262,6 +262,125 @@ defmodule MealPlannerApi.PlanningAgent.LivePricesTest do
     end
   end
 
+  describe "brand and product queries" do
+    setup do
+      pasta = ingredient!("Fictitious pasta")
+
+      product!(pasta,
+        name: "Fictitious spaghetti",
+        brand: "Fictitious Luchetti",
+        package: {500_000, :g},
+        price_cents: 1_400,
+        observed_at: hours_ago(1)
+      )
+
+      product!(pasta,
+        name: "Fictitious penne",
+        brand: "Fictitious Matarazzo",
+        package: {500_000, :g},
+        price_cents: 1_200,
+        observed_at: hours_ago(1)
+      )
+
+      %{pasta: pasta}
+    end
+
+    test "a brand query returns only that brand's Products with prices",
+         %{household: h, pasta: pasta} do
+      result =
+        run_tool(h, "lookup_prices", %{
+          "ingredients" => [pasta.name],
+          "brand" => "fictitious luchetti"
+        })
+
+      refute_received {:fake_scraper_fetch, _}
+
+      assert [
+               %{
+                 "product" => "Fictitious spaghetti",
+                 "brand" => "Fictitious Luchetti",
+                 "price_cents" => 1_400
+               }
+             ] = result["prices"]
+
+      assert result["missing"] == []
+    end
+
+    test "a brand missing from the database is looked up live",
+         %{household: h, pasta: pasta} do
+      live =
+        FakeScraper.item(
+          product: "Fictitious fusilli",
+          brand: "Fictitious Don Vicente",
+          package_quantity_milli: 500_000,
+          price_cents: 1_600,
+          observed_at: hours_ago(2)
+        )
+
+      result =
+        run_tool(
+          h,
+          "lookup_prices",
+          %{"ingredients" => [pasta.name], "brand" => "Fictitious Don Vicente"},
+          responses: %{String.downcase(pasta.name) => {:ok, [live]}}
+        )
+
+      assert_received {:fake_scraper_fetch, _}
+      assert [%{"brand" => "Fictitious Don Vicente", "price_cents" => 1_600}] = result["prices"]
+    end
+
+    test "a brand nobody sells is reported missing, never priced",
+         %{household: h, pasta: pasta} do
+      result =
+        run_tool(h, "lookup_prices", %{"ingredients" => [pasta.name], "brand" => "Nonexistent"})
+
+      assert result["prices"] == []
+
+      assert result["missing"] == [
+               %{
+                 "ingredient" => pasta.name,
+                 "brand" => "Nonexistent",
+                 "reason" => "no_matching_brand"
+               }
+             ]
+
+      assert result["outcome"] == "partial"
+    end
+
+    test "a Product query matches product names and brands across ingredients",
+         %{household: h} do
+      result = run_tool(h, "lookup_prices", %{"product" => "SPAGHETTI"})
+
+      assert [%{"product" => "Fictitious spaghetti", "price_cents" => 1_400}] = result["prices"]
+
+      assert [%{"product" => "Fictitious penne"}] =
+               run_tool(h, "lookup_prices", %{"product" => "matarazzo"})["prices"]
+    end
+
+    test "a Product query combined with a brand narrows the match", %{household: h} do
+      result =
+        run_tool(h, "lookup_prices", %{
+          "product" => "fictitious",
+          "brand" => "Fictitious Matarazzo"
+        })
+
+      assert [%{"product" => "Fictitious penne"}] = result["prices"]
+    end
+
+    test "a Product query that matches nothing is reported missing", %{household: h} do
+      result = run_tool(h, "lookup_prices", %{"product" => "Nonexistent product"})
+
+      assert result["prices"] == []
+
+      assert result["missing"] == [
+               %{"product" => "Nonexistent product", "reason" => "no_matching_product"}
+             ]
+
+      # Wildcards are matched literally.
+      assert run_tool(h, "lookup_prices", %{"product" => "%"})["prices"] == []
+    end
+  end
+
   # Runs `calls` (one model step each) in one turn and returns every tool
   # result the model received, in order, and every scraper query made.
   defp run_tools(household, calls, opts \\ []) do
@@ -324,6 +443,24 @@ defmodule MealPlannerApi.PlanningAgent.LivePricesTest do
 
       assert [%{"reason" => "refresh_failed", "detail" => "scraper_unavailable"}] =
                second["warnings"]
+    end
+
+    test "a brand query that matches nothing scrapes each Ingredient once", %{household: h} do
+      ingredients =
+        for name <- ["Fictitious beans", "Fictitious corn", "Fictitious peas"] do
+          ingredient = ingredient!(name)
+          product!(ingredient, brand: "Fictitious Brand", observed_at: hours_ago(2))
+          ingredient
+        end
+
+      call =
+        {"lookup_prices", %{"ingredients" => Enum.map(ingredients, & &1.name), "brand" => "zzz"}}
+
+      {[_first, second], fetches} = run_tools(h, [call, call])
+
+      assert Enum.sort(fetches) == Enum.map(ingredients, & &1.name)
+      assert second["prices"] == []
+      assert length(second["missing"]) == 3
     end
   end
 

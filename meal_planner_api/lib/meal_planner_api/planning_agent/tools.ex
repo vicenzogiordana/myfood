@@ -219,7 +219,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "presentation, supermarket, currency, observation date and age. Missing or stale " <>
             "prices are refreshed live; when that fails the old price keeps its real age and a " <>
             "warning is returned. Ingredients without a price are listed as missing; never " <>
-            "assume a price for them, and tell the household when a price is stale.",
+            "assume a price for them, and tell the household when a price is stale. Give " <>
+            "ingredients, a product text, or both; brand narrows either.",
         parameters: %{
           "type" => "object",
           "properties" => %{
@@ -229,9 +230,19 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
               "minItems" => 1,
               "maxItems" => @max_price_lookups,
               "description" => "Ingredient names, as returned by search_recipes"
+            },
+            "brand" => %{
+              "type" => "string",
+              "description" =>
+                "Only Products of this brand, e.g. to answer how much a brand costs"
+            },
+            "product" => %{
+              "type" => "string",
+              "description" =>
+                "Only Products whose name or brand contains this text; without ingredients " <>
+                  "it searches every stored Product"
             }
           },
-          "required" => ["ingredients"],
           "additionalProperties" => false
         }
       },
@@ -483,18 +494,23 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   defp run("lookup_prices", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "looking_up_prices"})
 
-    case args |> Map.get("ingredients") |> List.wrap() |> Enum.filter(&is_binary/1) do
-      [] ->
+    names = args |> Map.get("ingredients") |> List.wrap() |> Enum.filter(&is_binary/1)
+    product = string_arg(args, "product")
+
+    case {names, product} do
+      {[], nil} ->
         {%{"error" => "ingredients_required"}, ctx.workspace, :continue}
 
-      names ->
+      {names, product} ->
         %{prices: prices, missing: missing, warnings: warnings, refresh_memo: memo} =
           names
           |> Enum.take(@max_price_lookups)
           |> Prices.lookup(
             now: now(ctx),
             refresh: &scrape(ctx, &1),
-            refresh_memo: Map.get(ctx.workspace, :price_refreshes, %{})
+            refresh_memo: Map.get(ctx.workspace, :price_refreshes, %{}),
+            brand: string_arg(args, "brand"),
+            product: product
           )
 
         result = %{

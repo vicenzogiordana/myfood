@@ -62,9 +62,11 @@ PR #126 was split into four chained PRs to main (strategy
 
 1. Price scraper port with an HTTP adapter (#132). Nothing calls it yet,
    so agent behaviour does not change.
-2. Refresh stale prices live and report their age (this slice). Lookups
-   take Ingredient names only; brand and Product filters come in slice 3.
-3. Brand and Product queries, Household Brand Preferences.
+2. Refresh stale prices live and report their age (#133). Lookups take
+   Ingredient names only; brand and Product filters come in slice 3.
+3. Brand and Product queries, Household Brand Preferences (this slice).
+   Brand Preferences reach the agent's instructions only; they do not
+   change the Purchase until slice 4.
 4. Purchase steered by Session Brands and Brand Preferences.
 
 ## Acceptance criteria
@@ -72,9 +74,10 @@ PR #126 was split into four chained PRs to main (strategy
 - [x] Fresh prices (under 24 h) come from the database without a live call
 - [x] Missing or stale prices trigger a live lookup; failures keep the old
   price with its real age and a warning
-- [ ] Brand and Product queries return matching Products with prices
+- [x] Brand and Product queries return matching Products with prices
 - [ ] Session Brands live only in the Workspace; Brand Preferences come from
-  household settings
+  household settings (Brand Preferences half done in slice 3; Session
+  Brands come in slice 4)
 - [ ] The agent never substitutes a chosen brand without telling the Member
 - [x] Tests use a fake scraper; the scraper prerequisite is tracked and
   referenced (fake scraper in test support, contract doc, HTTP adapter)
@@ -112,6 +115,27 @@ PR #126 was split into four chained PRs to main (strategy
   and `:clock`. Commit: the `feat(planning-agent): refresh stale prices
   live and report their age` commit on
   `feat/issue-101-part-2-live-price-refresh`.
+- [x] S3 Brand and Product queries, Household Brand Preferences (slice 3/4,
+  route: inline, one bounded worker landing a slice already written and
+  reviewed in #126, ported onto main's slice-2 code). `Prices.lookup/2`
+  takes `:brand` (case-insensitive exact match on the Product brand) and
+  `:product` (case-insensitive substring of the Product name or brand;
+  without names it searches every stored Product, wildcards matched
+  literally). Freshness is judged on the matching offers, so a brand the
+  database lacks is looked up live; a brand or Product nobody sells is
+  `missing` with `no_matching_brand` or `no_matching_product`, never
+  priced. `Prices.stored_brand/2` validates a brand against stored
+  Products. `lookup_prices` gains the optional `brand` and `product`
+  parameters (`ingredients` is no longer required when `product` is
+  given). Household Brand Preferences: `household_brand_preferences`
+  table (one per Household and Ingredient, non-blank brand),
+  `BrandPreferences` context, `GET/PUT/DELETE
+  /settings/brand-preferences[/:ingredient_id]` for any active Member,
+  and `HouseholdContext` renders them into the agent's instructions; another
+  Household's preferences never reach the session. Commits on
+  `feat/issue-101-part-3-brand-product-queries-and-preferences`:
+  `feat(settings): add Household Brand Preferences` (fbf6b05) and
+  `feat(planning-agent): query prices by brand and Product`.
 
 ## Checks
 
@@ -203,6 +227,28 @@ PR #126 was split into four chained PRs to main (strategy
     mix precommit` (compile with warnings as errors, format, full suite)
     1280 passed, 25 skipped.
 
+- S3 glue for main:
+  - The migration is `202610151400000_create_household_brand_preferences`
+    (15 digits, after main's `202610141095000`); the source branch's
+    14-digit `20261015140000` would sort before main's latest migration.
+  - Main keeps slice 2's review fixes (future-dated scrape rejection,
+    `record/3`, a scrape without a brand keeping the stored one); the
+    brand and Product filters were added on top of them.
+  - `PricesTest` keeps slice 2's name-only cap test and adds the Product
+    query cap test of #126 (60 stale matching Ingredients, exactly 50
+    refreshed, 50 warnings).
+  - The Brand Preferences instruction line and the `BrandPreferences`
+    moduledoc describe slice-3 behaviour only (disclosed to the agent, no
+    effect on the Purchase); the Brands rules and `set_session_brand` stay
+    for slice 4.
+- S3 evidence: focused `BrandsTest` (Household Brand Preferences),
+  `LivePricesTest` (brand and product queries, brand-miss memo),
+  `PricesTest` and `HouseholdBrandPreferenceControllerTest` 43 passed.
+  Full `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1297
+  passed, 25 skipped; `mix precommit` (compile with warnings as errors,
+  format, full suite) 1297 passed, 25 skipped. The shared test database
+  needed `mix ecto.migrate` for the new table first.
+
 ## Next step
 
-Slice 3/4: brand and Product queries, Household Brand Preferences.
+Slice 4/4: Purchase steered by Session Brands and Brand Preferences.

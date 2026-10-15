@@ -1,9 +1,9 @@
 defmodule MealPlannerApi.PlanningAgent.PricesTest do
   @moduledoc """
   `MealPlannerApi.PlanningAgent.Prices` bounds (issue #101 review round):
-  a lookup never refreshes more Ingredients than the lookup cap, and
-  recording scraped data that the database rejects returns an error instead
-  of raising inside the read tool.
+  a lookup or a Product search never refreshes more Ingredients than the
+  lookup cap, and recording scraped data that the database rejects returns
+  an error instead of raising inside the read tool.
   """
 
   use ExUnit.Case, async: false
@@ -42,6 +42,33 @@ defmodule MealPlannerApi.PlanningAgent.PricesTest do
       end
 
       result = Prices.lookup(names, now: @now, refresh: refresh)
+
+      {:messages, messages} = Process.info(self(), :messages)
+      refreshed = Enum.count(messages, &match?({:refreshed, _}, &1))
+
+      assert refreshed == Prices.max_ingredients()
+      assert length(result.prices) <= Prices.max_offers()
+      assert length(result.warnings) == Prices.max_ingredients()
+    end
+  end
+
+  describe "lookup/2 with a Product query" do
+    test "refreshes at most the lookup cap of stale matching Ingredients" do
+      search = "capped search #{System.unique_integer([:positive])}"
+
+      for n <- 1..(Prices.max_ingredients() + 10) do
+        ingredient = ingredient!("Fictitious searched #{n}")
+        product!(ingredient, name: "#{search} #{n}", observed_at: hours_ago(30))
+      end
+
+      test_pid = self()
+
+      refresh = fn name ->
+        send(test_pid, {:refreshed, name})
+        {:error, :scraper_unavailable}
+      end
+
+      result = Prices.lookup([], product: search, now: @now, refresh: refresh)
 
       {:messages, messages} = Process.info(self(), :messages)
       refreshed = Enum.count(messages, &match?({:refreshed, _}, &1))
