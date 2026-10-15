@@ -740,9 +740,13 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     {:noreply, finish_run(state, result.outcome)}
   end
 
+  # A turn that replied just before the deadline finished on its own, so its
+  # outcome stands; otherwise the run reached its time limit.
   def handle_info({:deadline, ref}, %{task: %Task{ref: ref}} = state) do
-    state = stop_turn(state)
-    {:noreply, finish_run(state, {:limit_reached, "time"})}
+    case halt_turn(state) do
+      {state, {:ok, result}} -> {:noreply, finish_run(state, result.outcome)}
+      {state, _shutdown} -> {:noreply, finish_run(state, {:limit_reached, "time"})}
+    end
   end
 
   def handle_info({:deadline, _stale}, state), do: {:noreply, state}
@@ -1139,14 +1143,21 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     %{state | task: task, deadline_ref: deadline_ref}
   end
 
-  defp stop_turn(%{task: task} = state) do
+  defp stop_turn(state), do: state |> halt_turn() |> elem(0)
+
+  # Kills the turn and also returns the shutdown result, so a caller can tell
+  # a turn that had already replied from one that was cut off.
+  defp halt_turn(%{task: task} = state) do
     shutdown = Task.shutdown(task, :brutal_kill)
 
-    state
-    |> adopt_checkpoints(task.ref)
-    |> adopt_finished_turn(shutdown)
-    |> kill_os_processes()
-    |> clear_turn()
+    state =
+      state
+      |> adopt_checkpoints(task.ref)
+      |> adopt_finished_turn(shutdown)
+      |> kill_os_processes()
+      |> clear_turn()
+
+    {state, shutdown}
   end
 
   # A turn that replied before the shutdown already settled: Task.shutdown

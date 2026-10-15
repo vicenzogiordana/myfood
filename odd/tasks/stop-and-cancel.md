@@ -100,6 +100,23 @@ Note: `config/test.exs` does not append `MIX_TEST_PARTITION` to the database nam
 - Checks: `MIX_TEST_PARTITION=106 MYFOOD_TEST_DATABASE=meal_planner_api_test106 mix
   precommit` exit 0, 1035 passed, 25 skipped.
 
+## Review round 2 (Jorge el Curioso, PR #121)
+
+- Finding (low, confirmed): the `{:deadline, ref}` handler called `stop_turn/1` and then always
+  `finish_run(state, {:limit_reached, "time"})`, so a turn whose `{ref, result}` reply was
+  already queued when the deadline fired lost its outcome (no `turn_completed`, a spurious
+  `limit_reached` and `pending_limit: "time"`).
+- Fix (route: inline, one file plus one test): `halt_turn/1` returns `{state, shutdown}`;
+  `stop_turn/1` wraps it unchanged for Stop and Cancel. The deadline handler finishes with
+  `result.outcome` when the shutdown is `{:ok, result}`, otherwise `{:limit_reached, "time"}`.
+- RED: new test "a deadline racing a turn that already replied keeps that turn's outcome"
+  (suspends the session, hand-sends `{:deadline, ref}`, lets the turn task reply and exit,
+  resumes) received `limit_reached` / `run_finished partial` instead of `turn_completed`;
+  re-confirmed with the fix stashed (8/9). GREEN: 9/9. The test waits for the turn task's own
+  `DOWN`, because model steps run in a `CallBounds` child process.
+- Checks: `MYFOOD_TEST_DATABASE=meal_planner_api_test106 mix test` 1165 passed, 25 skipped
+  (3 runs); `mix precommit` exit 0, 1165 passed, 25 skipped.
+
 ## Next step
 
 Re-review by the pipeline gate.

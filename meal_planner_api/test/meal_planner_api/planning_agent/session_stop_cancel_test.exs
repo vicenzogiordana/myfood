@@ -201,6 +201,41 @@ defmodule MealPlannerApi.PlanningAgent.SessionStopCancelTest do
       assert %{calls: 1, script: []} = state.model_state.()
     end
 
+    test "a deadline racing a turn that already replied keeps that turn's outcome",
+         %{household: h, member: member} do
+      test_pid = self()
+
+      finishing = fn _request ->
+        send(test_pid, {:model_waiting, self()})
+        receive(do: (:finish -> {:text, "Final answer"}))
+      end
+
+      {session_id, pid} = start!(h, member, [finishing])
+      :ok = Session.send_message(pid, "Plan")
+      assert_receive {:model_waiting, task_pid}, 2_000
+
+      # Queue the deadline ahead of the turn's reply, so the session handles
+      # the deadline while the completed turn's result sits in its mailbox.
+      %{task: %Task{ref: turn_ref, pid: turn_pid}} = :sys.get_state(pid)
+      :ok = :sys.suspend(pid)
+      send(pid, {:deadline, turn_ref})
+
+      # The model step runs in a call-bounds child, so wait for the turn
+      # task itself: once it is down, its reply is queued behind the deadline.
+      monitor = Process.monitor(turn_pid)
+      send(task_pid, :finish)
+      assert_receive {:DOWN, ^monitor, :process, ^turn_pid, _}, 2_000
+      :ok = :sys.resume(pid)
+
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}, 2_000
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "run_finished", "outcome" => "complete"}}
+
+      refute_receive {:planning_agent_event, ^session_id, %{"type" => "limit_reached"}}
+      assert %{pending_limit: nil, task: nil} = :sys.get_state(pid)
+    end
+
     test "a stopped session accepts a new message", %{household: h, member: member} do
       {session_id, pid} = start!(h, member, [blocking_step(self()), {:text, "Back again"}])
       :ok = Session.send_message(pid, "Plan")
