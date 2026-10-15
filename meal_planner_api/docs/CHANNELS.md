@@ -219,7 +219,7 @@ Every event is pushed as `agent_event` with `type` and `session_id`:
 
 | `type` | Payload | Meaning |
 |--------|---------|---------|
-| `progress` | `{step}` — `thinking`, `searching_recipes`, `running_optimizer`, `validating_proposal` | The agent is working (no raw reasoning or tool output) |
+| `progress` | `{step}` — `thinking`, `searching_recipes`, `reading_plan`, `running_optimizer`, `validating_proposal` | The agent is working (no raw reasoning or tool output) |
 | `assistant_message` | `{text}` | Agent reply |
 | `question` | `{text}` | The agent asks one question; the turn ended |
 | `proposal` | `{proposal_id, status, meals: [{date, slot, recipe_id, name}]}` | A Proposal validated by code; `status` is code-owned (`valid`) |

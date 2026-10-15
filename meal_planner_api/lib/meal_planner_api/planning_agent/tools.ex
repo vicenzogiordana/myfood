@@ -5,6 +5,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
     * `search_recipes` — structured search; Restriction-violating recipes are
       excluded by code
+    * `get_plan` — the Household's Planned Meals by date or range (planned,
+      not eaten)
     * `run_optimizer` — the existing optimizer over Restriction-safe candidates;
       failures are typed errors, never a fallback plan
     * `present_proposal` — always validates the latest optimizer plan; only a
@@ -16,7 +18,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   in model arguments is ignored. Unknown tools are rejected by code.
   """
 
-  alias MealPlannerApi.PlanningAgent.{ProposalValidator, RecipeSearch}
+  alias MealPlannerApi.PlanningAgent.{MealPlan, ProposalValidator, RecipeSearch}
 
   @type context :: %{
           required(:account_id) => Ecto.UUID.t(),
@@ -49,6 +51,25 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "ingredient" => %{"type" => "string", "description" => "Ingredient name to require"},
             "limit" => %{"type" => "integer", "minimum" => 1, "maximum" => 50}
           },
+          "additionalProperties" => false
+        }
+      },
+      %{
+        name: "get_plan",
+        description:
+          "Read the household's confirmed Planned Meals for one date or an inclusive range " <>
+            "(at most #{MealPlan.max_range_days()} days). Reports what was planned, not what " <>
+            "was eaten.",
+        parameters: %{
+          "type" => "object",
+          "properties" => %{
+            "from" => %{"type" => "string", "description" => "First date, YYYY-MM-DD"},
+            "to" => %{
+              "type" => "string",
+              "description" => "Last date, YYYY-MM-DD; defaults to from"
+            }
+          },
+          "required" => ["from"],
           "additionalProperties" => false
         }
       },
@@ -106,6 +127,19 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
       {:error, :search_failed} ->
         {%{"error" => "search_failed"}, ctx.workspace, :continue}
+    end
+  end
+
+  def execute("get_plan", args, ctx) do
+    emit(ctx, %{"type" => "progress", "step" => "reading_plan"})
+
+    case MealPlan.parse_range(Map.get(args, "from"), Map.get(args, "to")) do
+      {:ok, range} ->
+        meals = ctx.account_id |> MealPlan.list(range) |> Enum.map(&planned_meal_data/1)
+        {%{"meals" => meals}, ctx.workspace, :continue}
+
+      {:error, :invalid_range} ->
+        {%{"error" => "invalid_range"}, ctx.workspace, :continue}
     end
   end
 
@@ -287,6 +321,15 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       "slots" => recipe.slots,
       "ingredients" => recipe.ingredients,
       "calories_per_serving" => recipe.calories_per_serving
+    }
+  end
+
+  defp planned_meal_data(meal) do
+    %{
+      "date" => Date.to_iso8601(meal.date),
+      "slot" => meal.slot,
+      "recipe_id" => meal.recipe_id,
+      "name" => meal.name
     }
   end
 
