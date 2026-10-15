@@ -12,6 +12,7 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
   alias MealPlannerApi.Persistence.Accounts.{Account, AccountMembership, User}
   alias MealPlannerApi.PlanningAgent.FakeOptimizer
   alias MealPlannerApi.PlanningAgent.Model.Scripted
+  alias MealPlannerApi.PlanningAgent.Session
   alias MealPlannerApi.Repo
   alias MealPlannerApiWeb.{PlanningAgentChannel, UserSocket}
 
@@ -104,6 +105,22 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     ref = push(socket, "send_message", %{"text" => "Plan dinner"})
     assert_reply(ref, :error, %{reason: "consent_required"})
     assert_push("agent_event", %{"type" => "consent_required"})
+
+    cancel!(socket)
+  end
+
+  test "a message over the size limit is refused with a typed reason", %{household: h} do
+    socket = join!(h, h.owner)
+    ref = push(socket, "start_session", @range)
+    assert_reply(ref, :ok, _)
+
+    ref = push(socket, "give_consent", %{})
+    assert_reply(ref, :ok, _)
+
+    too_long = String.duplicate("a", Session.max_message_bytes() + 1)
+    ref = push(socket, "send_message", %{"text" => too_long})
+    assert_reply(ref, :error, %{reason: "message_too_long"})
+    refute_push("agent_event", %{"type" => "assistant_message"}, 100)
 
     cancel!(socket)
   end

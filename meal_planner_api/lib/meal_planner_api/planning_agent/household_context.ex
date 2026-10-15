@@ -137,9 +137,14 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
     Household facts (enforced by code):
     - Forbidden Ingredient Tags (Restrictions of household members): #{list(context.forbidden_tags)}
     - Ingredients forbidden by allergies: #{forbidden_ingredient_count(context)}
+
+    Household preferences (not enforced by code):
     - Disliked ingredients (Preferences, avoid and disclose when used): #{list(context.disliked_ingredients)}
+
+    Targets, not yet validated by code (tell the household they are unchecked):
     - Grocery budget for the range (cents): #{context.budget_cents}
     - Nutrition Goal per standard portion, daily: #{goal(context.nutrition_goal)}
+    - Never claim that a plan meets the grocery budget or the Nutrition Goal; say they have not been checked.
     """
   end
 

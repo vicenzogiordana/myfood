@@ -12,7 +12,8 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
       to lunch and dinner). Replies `%{session_id}` or
       `%{reason: "session_already_active" | "range_already_planned" | ...}`.
     * `give_consent` — records the Member's consent to external AI use.
-    * `send_message` — `%{"text"}`; replies `:ok` or `%{reason: "consent_required" | "busy"}`.
+    * `send_message` — `%{"text"}`; replies `:ok` or
+      `%{reason: "consent_required" | "busy" | "invalid_message" | "message_too_long"}`.
     * `cancel_session` — ends the Household's session (its Member or the Owner).
 
   Outgoing: every session event is pushed as `agent_event` with its `type`

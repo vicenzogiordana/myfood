@@ -134,6 +134,18 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
       assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
     end
 
+    test "a message over the size limit is refused before it reaches the model",
+         %{household: h, owner: owner} do
+      consent!(h, owner)
+      {_session_id, pid} = start!(h, owner, [{:text, "should never be produced"}])
+      too_long = String.duplicate("a", Session.max_message_bytes() + 1)
+
+      assert {:error, :message_too_long} = Session.send_message(pid, too_long)
+
+      assert :sys.get_state(pid).messages == []
+      refute_receive {:scripted_model_request, _}, 100
+    end
+
     test "consent recorded earlier is injected at start", %{household: h, owner: owner} do
       consent!(h, owner)
       {session_id, pid} = start!(h, owner, [{:text, "Ready."}])

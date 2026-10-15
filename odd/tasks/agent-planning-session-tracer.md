@@ -72,6 +72,7 @@ with its tests at once; commits stay reviewable work units).
 | T4 | OpenAI Responses adapter + spend ledger | inline | done (`49a307b`) |
 | T5 | Phoenix channel adapter, config, docs | inline | done (`f35cb9b`) |
 | R1 | Jorge round 1 (PR #114): ledger survives killed turns, unknown usage settles at the reservation, refused cancel still expires | inline | done (see Review round 1) |
+| R2 | Jorge round 2 (PR #114): bound Member message size; stop claiming code enforces budget and Nutrition Goal | inline | done (see Review round 2) |
 
 ## Checks
 
@@ -112,6 +113,26 @@ Confirmed findings and fixes (each RED first, then GREEN):
 Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix test`
 976 passed, 20 skipped; `mix precommit` exit 0, 976 passed, 20 skipped.
 
+## Review round 2 (Jorge el Curioso, PR #114)
+
+Confirmed findings and fixes (each RED first, then GREEN):
+
+1. SP-1: `send_message` text had no size bound (medium). `Session` now refuses texts over
+   `max_message_bytes/0` (4_000 bytes) with `{:error, :message_too_long}` before consent
+   and turn checks, so nothing is stored or sent to the model; the channel replies
+   `%{reason: "message_too_long"}`. RED: `session_test.exs` and
+   `planning_agent_channel_test.exs` failed with `max_message_bytes/0` undefined.
+2. CD-2: instructions claimed the budget and Nutrition Goal were "enforced by code" (medium).
+   Only Restrictions and allergies stay under that heading; disliked ingredients move under
+   "Household preferences (not enforced by code)"; the budget and Nutrition Goal move under
+   "Targets, not yet validated by code (tell the household they are unchecked)" with a rule
+   never to claim a plan meets them. Optimizer and validator behaviour unchanged. RED:
+   new `household_context_test.exs` 0/2; GREEN 2/2.
+
+Checks: focused files 21/25 RED then 25/25 GREEN;
+`MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix test` 980 passed,
+20 skipped; `mix precommit` exit 0, 980 passed, 20 skipped.
+
 ## Known limits handed to later slices of #93
 
 - Purchase calculation and budget deviations (`requires_approval`), Nutrition Goal in the
@@ -123,4 +144,4 @@ Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix 
 
 ## Next step
 
-Re-run the Jorge review gate on PR #114 after review round 1.
+Re-run the Jorge review gate on PR #114 after review round 2.

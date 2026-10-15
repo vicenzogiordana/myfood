@@ -45,6 +45,9 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   @lease_seconds 120
   @lease_renew_ms 30_000
   @max_range_days 31
+  # Bounds what a Member message adds to the stored transcript, which is
+  # re-encoded on every model call.
+  @max_message_bytes 4_000
   @known_slots ~w(breakfast lunch snack dinner)
 
   @type attrs :: %{
@@ -119,11 +122,16 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   @doc """
   Sends a Member message and starts one agent turn. Refuses with
   `:consent_required` (no model call) until consent is recorded, and with
-  `:busy` while a turn is running.
+  `:busy` while a turn is running. A text over `max_message_bytes/0` is
+  refused with `:message_too_long` and never stored.
   """
   @spec send_message(GenServer.server(), String.t()) ::
-          :ok | {:error, :consent_required | :busy | :invalid_message}
+          :ok | {:error, :consent_required | :busy | :invalid_message | :message_too_long}
   def send_message(session, text), do: GenServer.call(session, {:send_message, text})
+
+  @doc "The largest Member message, in bytes, a session accepts."
+  @spec max_message_bytes() :: pos_integer()
+  def max_message_bytes, do: @max_message_bytes
 
   @doc "Adds an event subscriber."
   @spec subscribe(GenServer.server(), pid()) :: :ok
@@ -200,6 +208,9 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     cond do
       not is_binary(text) or String.trim(text) == "" ->
         {:reply, {:error, :invalid_message}, state}
+
+      byte_size(text) > @max_message_bytes ->
+        {:reply, {:error, :message_too_long}, state}
 
       not state.consent? ->
         emit(state, %{"type" => "consent_required"})
