@@ -99,6 +99,10 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
           {:error, reason} -> {:reply, {:error, %{reason: reason_string(reason)}}, socket}
         end
     end
+  catch
+    # The session can end between the lookup and the call.
+    :exit, _ ->
+      {:reply, {:error, %{reason: "no_active_session"}}, assign(socket, :session_pid, nil)}
   end
 
   def handle_in(_event, _payload, socket),

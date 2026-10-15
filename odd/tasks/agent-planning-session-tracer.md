@@ -77,6 +77,7 @@ with its tests at once; commits stay reviewable work units).
 | R4 | Jorge round 4 (PR #114): trap exits so shutdown releases the lock; stop a Session whose lease renewal finds its row expired | inline | done (see Review round 4) |
 | R5 | Jorge round 5 (PR #114): keep the provider API key out of status output and crash reports; align channel error replies with the documented contract | inline | done (see Review round 5) |
 | R6 | Jorge round 6 (PR #114): refuse incomplete or empty provider responses; refuse non-map start_session payloads with invalid_payload | inline | done (see Review round 6) |
+| R7 | Jorge round 7 (PR #114): catch exits from cancel_session when the session dies between lookup and call | inline | done (see Review round 7) |
 
 ## Checks
 
@@ -236,6 +237,24 @@ Confirmed findings and fixes:
 Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix test`
 992 passed, 20 skipped; `mix precommit` exit 0, 992 passed, 20 skipped.
 
+## Review round 7 (Jorge el Curioso, PR #114)
+
+Route: inline (one channel clause and one test; the fix mirrors the existing
+`with_own_session/2` exit handling).
+Confirmed finding and fix:
+
+1. Low: `handle_in("cancel_session", ...)` called `Session.cancel/2` after
+   `Session.whereis/1` with no exit handling, so a session that died between the lookup and
+   the call (or a 5 s call timeout) crashed the channel. The clause now catches `:exit`,
+   replies `{:error, %{reason: "no_active_session"}}` and clears `session_pid`. Session
+   internals and the other handlers are unchanged. RED: new channel case "cancelling a
+   session that dies before replying keeps the channel alive" (a Registry-held stub that
+   exits on the call) failed with `EXIT ... GenServer.call(..., {:cancel, ...}) ** (EXIT)
+   shutdown`; GREEN.
+
+Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix test`
+993 passed, 20 skipped; `mix precommit` exit 0, 993 passed, 20 skipped.
+
 ## Known limits handed to later slices of #93
 
 - Purchase calculation and budget deviations (`requires_approval`), Nutrition Goal in the
@@ -246,4 +265,4 @@ Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix 
 
 ## Next step
 
-Re-run the Jorge review gate on PR #114 after review round 6.
+Re-run the Jorge review gate on PR #114 after review round 7.

@@ -223,4 +223,35 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     cancel!(owner_socket)
     assert_push("agent_event", %{"type" => "session_cancelled"})
   end
+
+  test "cancelling a session that dies before replying keeps the channel alive",
+       %{household: h} do
+    socket = join!(h, h.owner)
+    test_pid = self()
+
+    # A stub registered as the Household's session: whereis finds it, then
+    # it dies on the cancel call, as a session ending mid-lookup would.
+    stub =
+      spawn(fn ->
+        {:ok, _} =
+          Registry.register(
+            MealPlannerApi.PlanningAgent.Registry,
+            {:household, h.account_id},
+            "stub"
+          )
+
+        send(test_pid, :registered)
+
+        receive do
+          {:"$gen_call", _from, _request} -> exit(:shutdown)
+        end
+      end)
+
+    assert_receive :registered
+    assert Session.whereis(h.account_id) == stub
+
+    ref = push(socket, "cancel_session", %{})
+    assert_reply(ref, :error, %{reason: "no_active_session"})
+    assert Process.alive?(socket.channel_pid)
+  end
 end
