@@ -198,6 +198,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   def outcome(%{"error" => "search_timeout"}), do: "unknown"
   def outcome(%{"error" => "optimizer_failed", "reason" => "optimizer_timeout"}), do: "unknown"
   def outcome(%{"error" => _}), do: "failure"
+  # A proposal the validator rejected is a failed attempt, not evidence.
+  def outcome(%{"status" => "invalid"}), do: "failure"
   def outcome(_content), do: "complete"
 
   defp run("search_recipes", args, ctx) do
