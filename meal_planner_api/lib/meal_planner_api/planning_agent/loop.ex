@@ -12,7 +12,7 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
   keeps paid usage even when it kills the turn.
   """
 
-  alias MealPlannerApi.PlanningAgent.Tools
+  alias MealPlannerApi.PlanningAgent.{CallBounds, Tools}
 
   @type turn :: %{
           required(:model) => module(),
@@ -22,7 +22,8 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
           required(:tool_context) => Tools.context(),
           required(:max_iterations) => pos_integer(),
           required(:emit) => (map() -> any()),
-          optional(:checkpoint) => (term() -> any())
+          optional(:checkpoint) => (term() -> any()),
+          optional(:bounds) => CallBounds.t()
         }
 
   @type outcome :: :completed | {:limit_reached, String.t()} | {:failed, term()}
@@ -53,7 +54,18 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
       checkpoint: checkpoint
     }
 
-    response = turn.model.respond(turn.model_state, request)
+    response =
+      CallBounds.run(Map.get(turn, :bounds), :model, turn.model_state, fn model_state, call ->
+        # Reported states reach the call bounds too, so a killed attempt
+        # keeps its reserved spend for the next attempt.
+        report = fn reported ->
+          call.report.(reported)
+          checkpoint.(reported)
+        end
+
+        turn.model.respond(model_state, %{request | checkpoint: report})
+      end)
+
     {_status, _result, model_state} = response
     checkpoint.(model_state)
 
@@ -72,7 +84,12 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
         turn.emit.(%{"type" => "assistant_message", "text" => text})
         finish(append(turn, %{role: :assistant, content: text}), :completed)
 
+      {:error, :deadline_exceeded, model_state} ->
+        turn.emit.(%{"type" => "limit_reached", "limit" => "time"})
+        finish(%{turn | model_state: model_state}, {:limit_reached, "time"})
+
       {:error, reason, model_state} ->
+        reason = if reason == :timeout, do: :provider_timeout, else: reason
         turn.emit.(%{"type" => "agent_unavailable", "reason" => reason_string(reason)})
         finish(%{turn | model_state: model_state}, {:failed, reason})
     end

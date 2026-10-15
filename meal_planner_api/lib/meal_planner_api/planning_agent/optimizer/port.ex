@@ -13,7 +13,8 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
     * `:optimizer_unavailable` — the subprocess could not start or never
       became ready
     * `:optimizer_timeout` — no answer within the deadline (inconclusive)
-    * `:optimizer_crashed` — the subprocess exited before answering
+    * `:optimizer_crashed` — the subprocess exited before answering, or
+      was already gone when a request was written
     * the optimizer's own error reason (for example `:infeasible`) with its
       details
 
@@ -82,6 +83,9 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
       {:error, :optimizer_timeout, _} -> {:error, :optimizer_unavailable, %{}}
       {:error, reason, details} -> {:error, reason, details}
     end
+  rescue
+    # Writing to a subprocess that already exited raises `badarg`.
+    ArgumentError -> {:error, :optimizer_crashed, %{}}
   end
 
   defp ready?(frame), do: frame["type"] == "ready"

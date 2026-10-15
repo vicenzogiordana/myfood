@@ -246,11 +246,13 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
     test "a provider failure tells the Member planning is not possible now",
          %{household: h, owner: owner} do
       consent!(h, owner)
-      {session_id, pid} = start!(h, owner, [{:error, :provider_unavailable}])
+      # Transient failures are retried first (see SessionBoundsTest); a
+      # permission failure is reported at once.
+      {session_id, pid} = start!(h, owner, [{:error, :provider_unauthorized}])
       :ok = Session.send_message(pid, "Plan")
 
       assert_receive {:planning_agent_event, ^session_id,
-                      %{"type" => "agent_unavailable", "reason" => "provider_unavailable"}}
+                      %{"type" => "agent_unavailable", "reason" => "provider_unauthorized"}}
     end
   end
 

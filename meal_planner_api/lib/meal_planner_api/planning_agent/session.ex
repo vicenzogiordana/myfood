@@ -34,7 +34,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   require Logger
 
   alias MealPlannerApi.Data.PlanningRepo
-  alias MealPlannerApi.PlanningAgent.{HouseholdContext, Loop}
+  alias MealPlannerApi.PlanningAgent.{CallBounds, HouseholdContext, Loop}
 
   @registry MealPlannerApi.PlanningAgent.Registry
   @supervisor MealPlannerApi.PlanningAgent.SessionSupervisor
@@ -72,7 +72,11 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       (default from `config :meal_planner_api, :planning_agent`)
     * `:optimizer` — `{module, opts}` implementing `MealPlannerApi.PlanningAgent.Optimizer`
     * `:subscriber` — pid receiving events (more can join with `subscribe/2`)
-    * `:max_iterations`, `:deadline_ms` — per-request limits
+    * `:max_iterations`, `:deadline_ms` — execution limits
+    * `:call_policies` — per-kind overrides of the per-call deadlines and
+      retry budgets (see `MealPlannerApi.PlanningAgent.CallBounds`)
+    * `:recipe_search` — `{module, opts}` replacing the recipe search read
+      tool (`module.search(household, filters, opts)`), for tests
   """
   @spec start(attrs(), keyword()) ::
           {:ok, %{session_id: Ecto.UUID.t(), pid: pid()}}
@@ -98,7 +102,9 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         optimizer: Keyword.get_lazy(opts, :optimizer, fn -> config(:optimizer) end),
         subscriber: Keyword.get(opts, :subscriber),
         max_iterations: Keyword.get(opts, :max_iterations, @default_max_iterations),
-        deadline_ms: Keyword.get(opts, :deadline_ms, @default_deadline_ms)
+        deadline_ms: Keyword.get(opts, :deadline_ms, @default_deadline_ms),
+        call_policies: Keyword.get(opts, :call_policies, %{}),
+        recipe_search: Keyword.get(opts, :recipe_search)
       }
 
       case DynamicSupervisor.start_child(@supervisor, {__MODULE__, init_args}) do
@@ -192,7 +198,12 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       task: nil,
       deadline_ref: nil,
       max_iterations: args.max_iterations,
-      deadline_ms: args.deadline_ms
+      deadline_ms: args.deadline_ms,
+      call_policies: CallBounds.policies(args.call_policies),
+      recipe_search: args.recipe_search,
+      # Read by the running turn without a message round trip: no retry
+      # starts while no Member is connected.
+      presence: :atomics.new(1, [])
     }
 
     state = if args.subscriber, do: add_subscriber(state, args.subscriber), else: state
@@ -306,6 +317,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
     case Map.pop(state.subscribers, pid) do
       {^ref, subscribers} when map_size(subscribers) == 0 ->
+        :atomics.put(state.presence, 1, 0)
+
         # Grace and recovery belong to a later slice of #93: for now the
         # Planning Session ends when its last subscriber is gone.
         {:stop, :normal, %{state | subscribers: subscribers}}
@@ -377,6 +390,10 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     session = self()
     holder = make_ref()
 
+    deadline_at = System.monotonic_time(:millisecond) + state.deadline_ms
+    presence = state.presence
+    policies = state.call_policies
+
     turn = %{
       model: state.model,
       model_state: state.model_state,
@@ -390,6 +407,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         slots: state.slots,
         household: state.household,
         optimizer: state.optimizer,
+        recipe_search: state.recipe_search,
         workspace: state.workspace
       }
     }
@@ -399,11 +417,28 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         ref = receive(do: ({^holder, ref} -> ref))
         emit_fun = fn event -> send(session, {:agent_event, ref, event}) end
         checkpoint = fn model_state -> send(session, {:model_state, ref, seal(model_state)}) end
-        tool_context = Map.put(turn.tool_context, :emit, emit_fun)
+
+        bounds =
+          CallBounds.new(
+            policies: policies,
+            deadline_at: deadline_at,
+            present?: fn -> :atomics.get(presence, 1) == 1 end,
+            on_retry: fn kind, attempt, _reason ->
+              emit_fun.(%{
+                "type" => "progress",
+                "step" => "retrying",
+                "call" => Atom.to_string(kind),
+                "attempt" => attempt
+              })
+            end
+          )
+
+        tool_context = turn.tool_context |> Map.put(:emit, emit_fun) |> Map.put(:bounds, bounds)
 
         result =
           %{turn | tool_context: tool_context, model_state: unseal(turn.model_state)}
           |> Map.put(:emit, emit_fun)
+          |> Map.put(:bounds, bounds)
           |> Map.put(:checkpoint, checkpoint)
           |> Loop.run()
 
@@ -452,6 +487,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     if Map.has_key?(state.subscribers, pid) do
       state
     else
+      :atomics.put(state.presence, 1, 1)
       %{state | subscribers: Map.put(state.subscribers, pid, Process.monitor(pid))}
     end
   end

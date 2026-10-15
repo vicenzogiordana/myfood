@@ -22,6 +22,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       over the budget is a budget Deviation (`requires_approval`)
     * `ask_human` — one question; ends the turn
 
+  Read calls (recipe search) and solver calls run within
+  `MealPlannerApi.PlanningAgent.CallBounds`: their own deadline and retry
+  budget, clipped by the turn's global deadline.
+
   Every call runs with the session's tool context. The Household always comes
   from that context: tool schemas carry no Household and any Household named
   in model arguments is ignored. Unknown tools are rejected by code.
@@ -30,6 +34,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   alias MealPlannerApi.Planning.ProposalStatus
 
   alias MealPlannerApi.PlanningAgent.{
+    CallBounds,
     MealPlan,
     Prices,
     ProjectedPantry,
@@ -187,12 +192,12 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       limit: integer_arg(args, "limit")
     }
 
-    case RecipeSearch.search(ctx.household, reject_nil(filters)) do
+    case search(ctx, reject_nil(filters)) do
       {:ok, recipes} ->
         {%{"recipes" => Enum.map(recipes, &recipe_data/1)}, ctx.workspace, :continue}
 
-      {:error, :search_failed} ->
-        {%{"error" => "search_failed"}, ctx.workspace, :continue}
+      {:error, reason} ->
+        {%{"error" => reason_string(reason, "search_failed")}, ctx.workspace, :continue}
     end
   end
 
@@ -250,11 +255,12 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       {:error, :no_candidates, slot} ->
         {%{"error" => "no_candidates", "slot" => slot}, %{ctx.workspace | draft: nil}, :continue}
 
-      {:error, :search_failed} ->
-        {%{"error" => "search_failed"}, %{ctx.workspace | draft: nil}, :continue}
+      {:error, reason} ->
+        {%{"error" => reason_string(reason, "search_failed")}, %{ctx.workspace | draft: nil},
+         :continue}
 
       {:error, reason, details} ->
-        reason = reason_string(reason)
+        reason = reason_string(reason, "optimizer_error")
         emit(ctx, %{"type" => "optimizer_failed", "reason" => reason})
 
         {%{"error" => "optimizer_failed", "reason" => reason, "details" => details},
@@ -412,10 +418,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     Enum.reduce_while(ctx.slots, {:ok, %{}}, fn slot, {:ok, acc} ->
       filters = %{slot: slot, exclude_recipe_ids: exclude, limit: @optimizer_candidates_per_slot}
 
-      case RecipeSearch.search(ctx.household, filters) do
+      case search(ctx, filters) do
         {:ok, []} -> {:halt, {:error, :no_candidates, slot}}
         {:ok, recipes} -> {:cont, {:ok, Map.put(acc, slot, Enum.map(recipes, &candidate/1))}}
-        {:error, :search_failed} = error -> {:halt, error}
+        {:error, _reason} = error -> {:halt, error}
       end
     end)
   end
@@ -455,15 +461,57 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     }
   end
 
+  # The solver is never retried: a timeout is inconclusive, and every other
+  # failure is a property of the payload.
   defp solve(ctx, payload) do
     {optimizer, opts} = optimizer(ctx)
 
-    case optimizer.solve(payload, opts) do
-      {:ok, %{"meals" => meals}} when is_list(meals) -> parse_meals(meals)
-      {:ok, _other} -> {:error, :invalid_optimizer_response, %{}}
-      {:error, reason, details} -> {:error, reason, details}
+    attempt = fn state, call ->
+      opts = Keyword.update(opts, :timeout_ms, call.timeout_ms, &min(&1, call.timeout_ms))
+
+      case optimizer.solve(payload, opts) do
+        {:ok, result} -> {:ok, result, state}
+        {:error, reason, details} -> {:error, {reason, details}, state}
+      end
+    end
+
+    case CallBounds.run(Map.get(ctx, :bounds), :solver, nil, attempt) do
+      {:ok, %{"meals" => meals}, _} when is_list(meals) ->
+        parse_meals(meals)
+
+      {:ok, _other, _} ->
+        {:error, :invalid_optimizer_response, %{}}
+
+      {:error, {reason, details}, _} ->
+        {:error, reason, details}
+
+      {:error, reason, _} when reason in [:timeout, :deadline_exceeded] ->
+        {:error, :optimizer_timeout, %{}}
     end
   end
+
+  # Recipe search is a read tool: bounded and retried on transient failure.
+  defp search(ctx, filters) do
+    {module, opts} = Map.get(ctx, :recipe_search) || {RecipeSearch, []}
+
+    attempt = fn state, _call ->
+      case search_with(module, ctx.household, filters, opts) do
+        {:ok, recipes} -> {:ok, recipes, state}
+        {:error, reason} -> {:error, reason, state}
+      end
+    end
+
+    case CallBounds.run(Map.get(ctx, :bounds), :read, nil, attempt) do
+      {:ok, recipes, _} -> {:ok, recipes}
+      {:error, :timeout, _} -> {:error, :search_timeout}
+      {:error, reason, _} -> {:error, reason}
+    end
+  end
+
+  defp search_with(RecipeSearch, household, filters, _opts),
+    do: RecipeSearch.search(household, filters)
+
+  defp search_with(module, household, filters, opts), do: module.search(household, filters, opts)
 
   defp optimizer(%{optimizer: {module, opts}}), do: {module, opts}
   defp optimizer(%{optimizer: module}) when is_atom(module) and module != nil, do: {module, []}
@@ -538,6 +586,6 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   defp emit(%{emit: emit}, event) when is_function(emit, 1), do: emit.(event)
   defp emit(_ctx, _event), do: :ok
 
-  defp reason_string(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp reason_string(_reason), do: "optimizer_error"
+  defp reason_string(reason, _default) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_string(_reason, default), do: default
 end

@@ -14,7 +14,14 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
   usage is missing or invalid. The reserved state is reported through the
   request's optional `:checkpoint` callback before the call is made.
 
-  The numeric caps are a human decision and are not set by default.
+  The numeric caps are a human decision and are not set by default. Caps
+  apply per Planning Session: every attempt of every model call, retries
+  included, draws on the same ledger.
+
+  Provider failures are typed: `:provider_unauthorized` (401/403),
+  `:provider_rejected_request` (other 4xx), `:provider_conflict` (409),
+  `:provider_timeout` (transport timeout) and `:provider_unavailable`
+  (408, 429, 5xx, other transport errors). Only the last two are transient.
 
   ## Configuration
 
@@ -160,16 +167,25 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
       {:ok, %Req.Response{status: 200, body: %{} = response}} ->
         {:ok, response}
 
-      {:ok, %Req.Response{status: status}} when status in [401, 403] ->
-        {:error, :provider_unauthorized}
+      {:ok, %Req.Response{status: status}} ->
+        {:error, status_reason(status)}
 
-      {:ok, %Req.Response{}} ->
-        {:error, :provider_unavailable}
+      {:error, %Req.TransportError{reason: :timeout}} ->
+        {:error, :provider_timeout}
 
       {:error, _exception} ->
         {:error, :provider_unavailable}
     end
   end
+
+  # Only `:provider_unavailable` and `:provider_timeout` are transient (see
+  # `MealPlannerApi.PlanningAgent.CallBounds`). Permission, invalid request
+  # and conflict answers are never retried automatically.
+  defp status_reason(status) when status in [401, 403], do: :provider_unauthorized
+  defp status_reason(409), do: :provider_conflict
+  defp status_reason(status) when status in [408, 429], do: :provider_unavailable
+  defp status_reason(status) when status in 400..499, do: :provider_rejected_request
+  defp status_reason(_status), do: :provider_unavailable
 
   # ---------------------------------------------------------------------------
   # Response

@@ -182,6 +182,52 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponsesTest do
       assert spent >= 4_000
     end
 
+    for {status, reason} <- [
+          {401, :provider_unauthorized},
+          {403, :provider_unauthorized},
+          {400, :provider_rejected_request},
+          {404, :provider_rejected_request},
+          {422, :provider_rejected_request},
+          {409, :provider_conflict},
+          {408, :provider_unavailable},
+          {429, :provider_unavailable},
+          {500, :provider_unavailable},
+          {503, :provider_unavailable}
+        ] do
+      test "an HTTP #{status} is classified as #{reason}" do
+        status = unquote(status)
+        Req.Test.stub(@stub, fn conn -> Plug.Conn.send_resp(conn, status, "{}") end)
+        {:ok, state} = OpenAIResponses.init(opts())
+
+        assert {:error, unquote(reason), _state} = OpenAIResponses.respond(state, @request)
+      end
+    end
+
+    test "a transport timeout is classified as a provider timeout" do
+      Req.Test.stub(@stub, &Req.Test.transport_error(&1, :timeout))
+      {:ok, state} = OpenAIResponses.init(opts())
+
+      assert {:error, :provider_timeout, _state} = OpenAIResponses.respond(state, @request)
+    end
+
+    test "reasoning items never reach the response text" do
+      stub_response(%{
+        "output" => [
+          %{
+            "type" => "reasoning",
+            "summary" => [%{"type" => "summary_text", "text" => "secret chain of thought"}]
+          },
+          %{"type" => "message", "content" => [%{"type" => "output_text", "text" => "Answer."}]}
+        ],
+        "usage" => %{"input_tokens" => 10, "output_tokens" => 5}
+      })
+
+      {:ok, state} = OpenAIResponses.init(opts())
+
+      assert {:ok, %{text: "Answer.", tool_calls: []}, _state} =
+               OpenAIResponses.respond(state, @request)
+    end
+
     test "a 200 response without usage keeps the reservation as spent" do
       stub_response(%{
         "output" => [
