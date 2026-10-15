@@ -2,7 +2,7 @@
 
 The OR-Tools optimizer (`optimizador.py` at the repository root) is reached
 through the JSON-lines port protocol (`OptimizerPortRunner`). This page is the
-contract between the planning code and the solver (spec #93, issues #97 and #98).
+contract between the planning code and the solver (spec #93, issues #97, #98 and #99).
 
 ## Solver
 
@@ -26,6 +26,7 @@ contract between the planning code and the solver (spec #93, issues #97 and #98)
 | `constraints.variety_cap` | Optional positive integer, default 2: how many times one recipe may appear in any rolling 7-day window. Adjustable per Planning Session |
 | `prior_meals` | Optional fixed context: the confirmed `{day, slot, recipe_id}` Planned Meals of the 6 days before the range, built by code (`MealPlannerApi.Optimization.Variety`). Never returned and never moved |
 | `excluded_recipe_ids` | Optional Excluded Recipes |
+| `fixed_meals` | Optional `{day, slot, recipe_id}` range meals that never move: Pins and, on a re-optimization, every meal of the previous Proposal that was not released. Each names a range day and slot and a candidate of that slot, at most once per day and slot (otherwise `invalid_fixed_meals`) |
 | `time_limit_ms` | Solver deadline. Python defaults to 120 000, but `OptimizerServer` always sends one below its own timeout (`optimizer_timeout_ms` minus up to 1.5 s) and clamps larger caller values, so slow solves end as `inconclusive` or a feasible incumbent instead of an Elixir timeout |
 
 ## Goal policy
@@ -49,6 +50,18 @@ contract between the planning code and the solver (spec #93, issues #97 and #98)
   Different slots on consecutive days are allowed.
 - When no plan satisfies them the reply is `infeasible` with the single cause
   `{"cause": "variety"}`.
+
+## Fixed meals
+
+- A fixed meal is never moved and never refused by the variety rules (a Pin
+  beats the variety cap), but it counts like a prior meal: free meals of its
+  window cannot add more of that recipe, and a free meal on the day before
+  or after it in the same slot cannot repeat it.
+- Fixed meals count toward the budget and the nutrition goals, so a fixed
+  meal that breaks the budget is reported as a Deviation.
+- A fixed meal never beats a Restriction or an exclusion: a fixed candidate
+  flagged `violates_restriction` or listed in `excluded_recipe_ids` makes the
+  reply `infeasible` with `{"cause": "restriction" | "excluded_recipe", "slot": …, "day": …}`.
 
 ## Replies
 
@@ -75,9 +88,9 @@ Errors (`{"type": "error", "error": …, "details": …}`):
 
 | `error` | Meaning |
 |---|---|
-| `infeasible` | A hard rule leaves a slot empty, and `details.causes` names each one: `{"cause": "coverage" \| "restriction" \| "excluded_recipe", "slot": …}`; or the variety rules cannot be met: `[{"cause": "variety"}]` |
+| `infeasible` | A hard rule leaves a slot empty, and `details.causes` names each one: `{"cause": "coverage" \| "restriction" \| "excluded_recipe", "slot": …}` (with `day` when a fixed meal caused it); or the variety rules cannot be met: `[{"cause": "variety"}]` |
 | `inconclusive` | The deadline passed before any plan was found (`details.reason = "time_limit"`). Never reported as infeasible |
-| `invalid_*`, `missing_payload` | Malformed request (including `invalid_variety_cap`, `invalid_prior_meals`) |
+| `invalid_*`, `missing_payload` | Malformed request (including `invalid_variety_cap`, `invalid_prior_meals`, `invalid_fixed_meals`) |
 | `solver_unavailable`, `abnormal` | Solver fault |
 
 Elixir callers add the variety part of a request with

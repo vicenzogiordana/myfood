@@ -556,6 +556,110 @@ class VarietyValidationTests(unittest.TestCase):
                 self.assertEqual(frame["error"], "invalid_prior_meals")
 
 
+def fixed(day, recipe_id, slot="lunch"):
+    return {"day": day, "slot": slot, "recipe_id": recipe_id}
+
+
+class FixedMealTests(unittest.TestCase):
+    """Fixed meals (Pins and kept meals of a re-optimization) never move (issue #99)."""
+
+    def test_a_fixed_meal_is_kept_even_when_a_cheaper_recipe_exists(self):
+        frame = solve_over_port(payload([recipe("cheap", cost=1), recipe("dear", cost=900)],
+                                        days=["2026-09-07", "2026-09-09"],
+                                        fixed_meals=[fixed("2026-09-09", "dear")]))
+
+        self.assertEqual(frame["type"], "solution")
+        self.assertEqual([meal["recipe_id"] for meal in frame["result"]["meals"]], ["cheap", "dear"])
+
+    def test_only_the_meals_that_are_not_fixed_are_chosen(self):
+        days = week(count=4)
+        problem = payload([recipe("a", cost=1), recipe("b", cost=2), recipe("c", cost=3)], days=days,
+                          fixed_meals=[fixed("2026-09-07", "c"), fixed("2026-09-10", "c")])
+
+        result, error = _solve(problem)
+
+        self.assertIsNone(error)
+        chosen = recipe_ids(result)
+        self.assertEqual([chosen[0], chosen[3]], ["c", "c"])
+        self.assertEqual(sorted(chosen[1:3]), ["a", "b"])
+
+    def test_fixed_meals_beat_the_variety_cap_but_free_meals_still_respect_it(self):
+        # Three pinned "batch" meals exceed the default cap of 2 in one window;
+        # the free day in that window cannot add a fourth.
+        days = ["2026-09-07", "2026-09-09", "2026-09-11", "2026-09-13"]
+        problem = payload([recipe("batch", cost=1), recipe("other", cost=500)], days=days,
+                          fixed_meals=[fixed("2026-09-07", "batch"), fixed("2026-09-09", "batch"),
+                                       fixed("2026-09-11", "batch")])
+
+        result, error = _solve(problem)
+
+        self.assertIsNone(error)
+        self.assertEqual(recipe_ids(result), ["batch", "batch", "batch", "other"])
+
+    def test_fixed_meals_beat_the_consecutive_rule(self):
+        result, error = _solve(payload([recipe("batch", cost=1), recipe("other", cost=500)],
+                                       days=week(count=2),
+                                       fixed_meals=[fixed("2026-09-07", "batch"),
+                                                    fixed("2026-09-08", "batch")]))
+
+        self.assertIsNone(error)
+        self.assertEqual(recipe_ids(result), ["batch", "batch"])
+
+    def test_a_free_meal_next_to_a_fixed_one_still_obeys_the_consecutive_rule(self):
+        result, error = _solve(payload([recipe("cheap", cost=1), recipe("other", cost=500)],
+                                       days=week(count=2),
+                                       fixed_meals=[fixed("2026-09-07", "cheap")]))
+
+        self.assertIsNone(error)
+        self.assertEqual(recipe_ids(result), ["cheap", "other"])
+
+    def test_a_free_meal_before_a_fixed_one_still_obeys_the_consecutive_rule(self):
+        result, error = _solve(payload([recipe("cheap", cost=1), recipe("other", cost=500)],
+                                       days=week(count=2),
+                                       fixed_meals=[fixed("2026-09-08", "cheap")]))
+
+        self.assertIsNone(error)
+        self.assertEqual(recipe_ids(result), ["other", "cheap"])
+
+    def test_a_fixed_meal_that_breaks_the_budget_is_a_deviation(self):
+        result, error = _solve(payload([recipe("cheap", cost=100), recipe("dear", cost=900)],
+                                       budget=200, days=["2026-09-07", "2026-09-09"],
+                                       fixed_meals=[fixed("2026-09-07", "dear")]))
+
+        self.assertIsNone(error)
+        self.assertEqual(recipe_ids(result), ["dear", "cheap"])
+        self.assertEqual(result["deviations"][0]["goal"], "budget")
+        self.assertEqual(result["deviations"][0]["amount"], 800)
+
+    def test_a_fixed_meal_never_beats_a_restriction(self):
+        frame = solve_over_port(payload([recipe("unsafe", violates_restriction=True), recipe("safe")],
+                                        fixed_meals=[fixed("2026-09-07", "unsafe")]))
+
+        self.assertEqual(frame["error"], "infeasible")
+        self.assertEqual(frame["details"]["causes"],
+                         [{"cause": "restriction", "slot": "lunch", "day": "2026-09-07"}])
+
+    def test_a_fixed_meal_never_beats_an_exclusion(self):
+        frame = solve_over_port(payload([recipe("gone"), recipe("kept")],
+                                        excluded_recipe_ids=["gone"],
+                                        fixed_meals=[fixed("2026-09-07", "gone")]))
+
+        self.assertEqual(frame["error"], "infeasible")
+        self.assertEqual(frame["details"]["causes"],
+                         [{"cause": "excluded_recipe", "slot": "lunch", "day": "2026-09-07"}])
+
+    def test_fixed_meals_must_name_a_range_meal_and_a_candidate_of_its_slot(self):
+        for entries in ["x",
+                        [{"day": "2026-09-07", "slot": "lunch"}],
+                        [fixed("2026-09-08", "a")],
+                        [fixed("2026-09-07", "a", slot="dinner")],
+                        [fixed("2026-09-07", "missing")],
+                        [fixed("2026-09-07", "a"), fixed("2026-09-07", "a")]]:
+            with self.subTest(entries=entries):
+                frame = solve_over_port(payload([recipe("a")], fixed_meals=entries))
+                self.assertEqual(frame["error"], "invalid_fixed_meals")
+
+
 class ScaleTests(unittest.TestCase):
     def test_a_ninety_meal_range_solves_well_within_the_deadline(self):
         days = [f"2026-10-{day:02d}" for day in range(1, 31)]
