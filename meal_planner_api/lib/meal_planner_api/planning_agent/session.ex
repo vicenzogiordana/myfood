@@ -143,6 +143,15 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   Member no longer active in the Household. When the grace expires the
   running work is cancelled, the Workspace discarded and the slot released.
 
+  ## Idle expiry
+
+  A Member who stays connected but does nothing does not hold the slot
+  forever: after `:idle_ms` (default 30 minutes) without a Member action
+  (any call but `info/1` and `current_proposal/1`) and without a running
+  turn, the session ends with `session_ended`, its Workspace discarded and
+  the slot released. A running turn is never cut; the idle time restarts
+  when it ends.
+
   ## Restart recovery
 
   The durable state (transcript, Workspace, allowance, pending limit and the
@@ -194,6 +203,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   @default_max_iterations 10
   @default_deadline_ms 5 * 60 * 1000
   @default_grace_ms 15 * 60 * 1000
+  @default_idle_ms 30 * 60 * 1000
   # While the Member is present the lease covers at least this long, so the
   # sweeper never expires a session that is still renewing it.
   @min_lease_ms 120_000
@@ -237,6 +247,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       store (see `MealPlannerApi.PlanningAgent.Confirmation`), for tests
     * `:reconcile_ms`, `:poll_ms` — how long and how often a lost
       confirmation acknowledgement is reconciled (default 30 s and 1 s)
+    * `:grace_ms` — the absence grace (default 15 minutes)
+    * `:idle_ms` — the idle expiry (default 30 minutes)
   """
   @spec start(attrs(), keyword()) ::
           {:ok, %{session_id: Ecto.UUID.t(), pid: pid()}}
@@ -283,7 +295,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       recipe_search: Keyword.get(opts, :recipe_search),
       confirmation_store: Keyword.get_lazy(opts, :confirmation_store, &Confirmation.store/0),
       confirmation_opts: Keyword.take(opts, [:reconcile_ms, :poll_ms]),
-      grace_ms: Keyword.get(opts, :grace_ms, @default_grace_ms)
+      grace_ms: Keyword.get(opts, :grace_ms, @default_grace_ms),
+      idle_ms: Keyword.get(opts, :idle_ms, @default_idle_ms)
     }
   end
 
@@ -701,6 +714,9 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       grace_ms: args.grace_ms,
       grace_ref: nil,
       grace_deadline: nil,
+      idle_ms: args.idle_ms,
+      idle_ref: nil,
+      idle_timer: nil,
       persisted: nil
     }
 
@@ -714,13 +730,14 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     end
 
     schedule_lease_renewal()
-    persist(state)
+    state |> touch() |> persist()
   end
 
   # Every change to the durable state is written to recoverable storage
   # before the next message, so a restart finds the latest Workspace.
   @impl true
-  def handle_call(message, from, state), do: message |> do_call(from, state) |> persisted()
+  def handle_call(message, from, state),
+    do: message |> do_call(from, member_activity(message, state)) |> persisted()
 
   @impl true
   def handle_info(message, state), do: message |> do_info(state) |> persisted()
@@ -1029,6 +1046,20 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   end
 
   defp do_info({:grace_expired, _stale}, state), do: {:noreply, state}
+
+  # A running turn is never cut: the idle time restarts when it ends.
+  defp do_info({:idle_expired, ref}, %{idle_ref: ref, task: %Task{}} = state),
+    do: {:noreply, touch(state)}
+
+  # The Member did nothing for the idle time: the session ends like an
+  # expired grace, discarding its Workspace and releasing the slot.
+  defp do_info({:idle_expired, ref}, %{idle_ref: ref} = state) do
+    _ = PlanningRepo.expire_session(state.account_id, state.session_id)
+    emit(state, %{"type" => "session_ended"})
+    {:stop, :normal, %{state | session_id: nil, idle_ref: nil}}
+  end
+
+  defp do_info({:idle_expired, _stale}, state), do: {:noreply, state}
 
   defp do_info(:renew_lease, state) do
     case renew_lease(state) do
@@ -1554,9 +1585,27 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   defp reason_string(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp reason_string(_reason), do: "provider_error"
 
+  # A turn that ends restarts the idle time: the Member reads its result.
   defp clear_turn(state) do
     if state.deadline_ref, do: Process.cancel_timer(state.deadline_ref)
-    %{state | task: nil, deadline_ref: nil}
+    touch(%{state | task: nil, deadline_ref: nil})
+  end
+
+  # ===========================================================================
+  # Idle expiry
+  # ===========================================================================
+
+  # Reads that change nothing are not Member activity.
+  @passive_calls [:info, :current_proposal]
+
+  defp member_activity(message, state) when message in @passive_calls, do: state
+  defp member_activity(_message, state), do: touch(state)
+
+  defp touch(state) do
+    if state.idle_timer, do: Process.cancel_timer(state.idle_timer)
+    ref = make_ref()
+    timer = Process.send_after(self(), {:idle_expired, ref}, state.idle_ms)
+    %{state | idle_ref: ref, idle_timer: timer}
   end
 
   # ===========================================================================

@@ -37,8 +37,8 @@ review. Out: switching the legacy planner off (spec #93, after the battery).
 
 ## Tasks
 
-- [ ] T1 Restart during an old registration returns `{:error, :session_already_active}` (route: inline, one file + test)
-- [ ] T2 Idle expiry: a connected but inactive session ends after `:idle_ms` (default 30 min) and releases the slot (route: inline, one file + test)
+- [x] T1 Restart during an old registration returns `{:error, :session_already_active}` (route: inline, one file + test)
+- [x] T2 Idle expiry: a connected but inactive session ends after `:idle_ms` (default 30 min) and releases the slot (route: inline, one file + test)
 - [ ] T3 Legacy start refuses while an agent session holds the Household lock (route: inline; migration + repo + server + tests)
 - [ ] T4 Sweeper tests against agent lock rows (route: inline, tests only)
 - [ ] T5 No tool call runs after `ask_human` ends the turn; proposal clearing reviewed (route: inline, one file + test)
@@ -58,8 +58,14 @@ review. Out: switching the legacy planner off (spec #93, after the battery).
 
 ## Progress
 
-Baseline suite run on `origin/main` (79bb2da) before the first change.
+- T1 commit 1b26822. RED: `session_test.exs` new test failed with the
+  `MatchError` wrapped in the start error; GREEN: session + recovery tests
+  33 passed.
+- T2: RED: the three idle tests in `session_grace_test.exs` failed (no
+  `session_ended`); GREEN: `test/meal_planner_api/planning_agent/` 234 passed.
+  Default idle time 30 minutes (configurable `:idle_ms`), glossary term
+  "Idle Expiry" added to CONTEXT.md.
 
 ## Next step
 
-T1.
+T3.

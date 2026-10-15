@@ -90,6 +90,10 @@ _Avoid_: Stop, leave, close
 The 15 minutes a Planning Session, its Workspace, its last Proposal and the Household's slot are kept after its Member leaves or disconnects, also across a server restart. Nothing runs or is saved while the Member is absent; only that Member, still active in the Household, can return. When it expires the Workspace is discarded and the slot released. A restart never resets it.
 _Avoid_: Timeout, idle period
 
+**Idle Expiry**:
+The end of a Planning Session whose Member stays connected but takes no action for 30 minutes while no agent work runs. Like an expired Absence Grace, the Workspace is discarded and the Household's slot released.
+_Avoid_: Absence Grace, session timeout
+
 **Spend Cap**:
 The most a Planning Session may spend on the paid AI provider, in money and in cumulative tokens, across all of its turns. Stop and new messages never reset it. Separate from the Household's grocery budget.
 _Avoid_: Budget, execution cap

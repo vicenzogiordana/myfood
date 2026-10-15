@@ -243,4 +243,71 @@ defmodule MealPlannerApi.PlanningAgent.SessionGraceTest do
       assert Session.whereis(h.account_id) == pid
     end
   end
+
+  describe "idle expiry" do
+    test "a connected Member who does nothing for the idle time loses the session and the slot",
+         %{household: h, owner: owner, member: member} do
+      {session_id, pid} = start!(h, member, [], subscriber: self(), idle_ms: 150)
+      ref = Process.monitor(pid)
+
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "session_ended"}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert %PlanningSession{status: :expired} = session_row(session_id)
+      assert Session.whereis(h.account_id) == nil
+      assert {:error, :no_session} = resume(h, member)
+
+      assert {:ok, _} =
+               Session.start(session_attrs(h, owner, {@monday, @tuesday}),
+                 model: {Scripted, []},
+                 subscriber: self()
+               )
+    end
+
+    test "every Member action restarts the idle time", %{household: h, member: member} do
+      script = for n <- 1..3, do: {:text, "Answer #{n}"}
+      {session_id, pid} = start!(h, member, script, subscriber: self(), idle_ms: 400)
+
+      for n <- 1..3 do
+        Process.sleep(250)
+        assert :ok = Session.send_message(pid, "Message #{n}")
+        text = "Answer #{n}"
+
+        assert_receive {:planning_agent_event, ^session_id,
+                        %{"type" => "assistant_message", "text" => ^text}},
+                       2_000
+      end
+
+      assert Session.whereis(h.account_id) == pid
+      assert %PlanningSession{status: :active} = session_row(session_id)
+    end
+
+    test "a running turn is never cut by the idle time; it restarts when the turn ends",
+         %{household: h, member: member} do
+      test_pid = self()
+
+      slow = fn _request ->
+        send(test_pid, {:in_flight, self()})
+        receive(do: (:finish -> {:text, "Done"}))
+      end
+
+      {session_id, pid} = start!(h, member, [slow], subscriber: self(), idle_ms: 150)
+      ref = Process.monitor(pid)
+
+      :ok = Session.send_message(pid, "Plan")
+      assert_receive {:in_flight, call_pid}, 2_000
+
+      refute_receive {:planning_agent_event, ^session_id, %{"type" => "session_ended"}}, 400
+      assert Session.whereis(h.account_id) == pid
+
+      send(call_pid, :finish)
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "assistant_message", "text" => "Done"}},
+                     2_000
+
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "session_ended"}}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert %PlanningSession{status: :expired} = session_row(session_id)
+    end
+  end
 end
