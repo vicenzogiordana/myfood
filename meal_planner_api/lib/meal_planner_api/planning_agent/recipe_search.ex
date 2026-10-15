@@ -48,9 +48,8 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
     limit = filters |> Map.get(:limit, @default_limit) |> min(@max_limit) |> max(1)
 
     recipes =
-      from(r in Recipe, as: :recipe)
-      |> where([r], is_nil(r.account_id) or r.account_id == ^household.account_id)
-      |> where([r], is_nil(r.superseded_by_id))
+      household
+      |> visible()
       |> filter_slot(filters[:slot])
       |> filter_text(filters[:query])
       |> filter_ingredient(filters[:ingredient])
@@ -65,6 +64,47 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
   rescue
     _error in [DBConnection.ConnectionError, Postgrex.Error, Ecto.QueryError] ->
       {:error, :search_failed}
+  end
+
+  @doc """
+  Looks recipes up by id for the Household: each visible recipe maps to
+  `{:safe, recipe}` or, when it violates a Member's Restriction,
+  `{:restricted, recipe}`. Ids that are not visible are absent. Used for Pins
+  and fixed meals, where a Restriction conflict must be told apart from a
+  missing recipe.
+  """
+  @spec lookup(map(), [String.t()]) ::
+          {:ok, %{Ecto.UUID.t() => {:safe | :restricted, recipe()}}} | {:error, :search_failed}
+  def lookup(household, ids) do
+    case Enum.flat_map(ids, &cast_uuid/1) do
+      [] ->
+        {:ok, %{}}
+
+      ids ->
+        by_ids = household |> visible() |> where([r], r.id in ^ids)
+        safe = by_ids |> exclude_restricted(household) |> select([r], r.id) |> Repo.all()
+        safe = MapSet.new(safe)
+
+        recipes =
+          by_ids
+          |> preload(recipe_ingredients: :ingredient)
+          |> Repo.all()
+          |> Map.new(fn recipe ->
+            status = if MapSet.member?(safe, recipe.id), do: :safe, else: :restricted
+            {recipe.id, {status, serialize(recipe)}}
+          end)
+
+        {:ok, recipes}
+    end
+  rescue
+    _error in [DBConnection.ConnectionError, Postgrex.Error, Ecto.QueryError] ->
+      {:error, :search_failed}
+  end
+
+  defp visible(household) do
+    from(r in Recipe, as: :recipe)
+    |> where([r], is_nil(r.account_id) or r.account_id == ^household.account_id)
+    |> where([r], is_nil(r.superseded_by_id))
   end
 
   defp filter_slot(query, slot) when is_binary(slot) and slot != "",

@@ -34,7 +34,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   require Logger
 
   alias MealPlannerApi.Data.PlanningRepo
-  alias MealPlannerApi.PlanningAgent.{HouseholdContext, Loop}
+  alias MealPlannerApi.PlanningAgent.{HouseholdContext, Loop, Workspace}
 
   @registry MealPlannerApi.PlanningAgent.Registry
   @supervisor MealPlannerApi.PlanningAgent.SessionSupervisor
@@ -187,7 +187,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       model_state: args.model_state,
       optimizer: args.optimizer,
       messages: [],
-      workspace: %{draft: nil, proposal: nil},
+      workspace: Workspace.new(),
       subscribers: %{},
       task: nil,
       deadline_ref: nil,
