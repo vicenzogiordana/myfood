@@ -72,7 +72,7 @@ defmodule MealPlannerApi.Generation.PlanningSessionServer do
 
     * `:session_id` — UUID for the process's in-memory identity
       (default: `Ecto.UUID.generate/0`). The canonical row id comes
-      from `PlanningRepo.create_session/2` once the row is inserted.
+      from `PlanningRepo.create_legacy_session/2` once the row is inserted.
     * `:owner_user_id` — informational; copied onto the row.
     * `:owner_membership_id` — informational; copied onto the row.
     * `:owner_channel_pid` — when set, the server `Process.monitor`s
@@ -125,6 +125,8 @@ defmodule MealPlannerApi.Generation.PlanningSessionServer do
   `{:error, :subscription_required}` without writing a row. On an
   overlapping active range the Postgres EXCLUDE constraint rejects
   the insert and the server replies `{:error, :overlapping_range}`.
+  While an agent Planning Session holds the Household the server replies
+  `{:error, :session_already_active}` (spec #93, issue #119).
   Both failure modes leave the server's state as `:initializing` —
   the row never lands.
   """
@@ -136,7 +138,12 @@ defmodule MealPlannerApi.Generation.PlanningSessionServer do
           {Date.t(), Date.t()}
         ) ::
           {:ok, %{session_id: Ecto.UUID.t()}}
-          | {:error, :subscription_required | :overlapping_range | :already_active | term()}
+          | {:error,
+             :subscription_required
+             | :overlapping_range
+             | :already_active
+             | :session_already_active
+             | term()}
   def start_session(server, account_id, user_id, membership_id, {date_from, date_to}) do
     GenServer.call(
       server,
@@ -277,7 +284,7 @@ defmodule MealPlannerApi.Generation.PlanningSessionServer do
           lease_expires_at: lease
         }
 
-        case PlanningRepo.create_session(account_id, attrs) do
+        case PlanningRepo.create_legacy_session(account_id, attrs) do
           {:ok, %PlanningSession{id: session_id} = _session} ->
             new_state = %{state | session_id: session_id, status: :active}
 
@@ -287,6 +294,10 @@ defmodule MealPlannerApi.Generation.PlanningSessionServer do
 
           {:error, :overlapping_range} ->
             {:reply, {:error, :overlapping_range}, state}
+
+          # An agent Planning Session holds the whole Household.
+          {:error, :session_already_active} ->
+            {:reply, {:error, :session_already_active}, state}
 
           {:error, %Ecto.Changeset{} = changeset} ->
             {:reply, {:error, changeset}, state}
