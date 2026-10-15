@@ -33,7 +33,7 @@ Soft guidance the culinary agent tries to honour: disliked ingredients, tastes, 
 _Avoid_: Restriction, rule
 
 **Ingredient Tag**:
-A reviewed classification of a catalog ingredient (an allergen, or a diet-relevant property such as containing meat, fish, animal products or gluten). Every Restriction is expressed as a set of forbidden Ingredient Tags.
+A reviewed classification of a catalog ingredient (an allergen, or a diet-relevant property such as containing meat, fish, animal products or gluten). Every Restriction is expressed as a set of forbidden Ingredient Tags: vegetarian forbids meat and fish, pescatarian forbids meat, vegan forbids every animal product, celiac forbids gluten, omnivore forbids nothing, and an allergy forbids its allergen. A suggested tag (for example from AI) does not count until a reviewer accepts it.
 _Avoid_: Category, label
 
 **Nutrition Goal**:
