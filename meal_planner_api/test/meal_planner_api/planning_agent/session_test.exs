@@ -393,6 +393,30 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
       assert_receive {:planning_agent_event, ^session_id, %{"type" => "session_ended"}}
       assert %PlanningSession{status: :expired} = Repo.get!(PlanningSession, session_id)
     end
+
+    test "a start while the old session is still registered is refused with a typed error",
+         %{household: h, owner: owner} do
+      # The old row was expired behind its live process (a lapsed lease), so
+      # the database lock is free while the process is still registered
+      # until its next lease renewal.
+      {old_session_id, old_pid} = start!(h, owner, [])
+      assert {:ok, _} = PlanningRepo.expire_session(h.account_id, old_session_id)
+      other = member!(h)
+
+      log =
+        capture_log(fn ->
+          assert {:error, :session_already_active} =
+                   Session.start(session_attrs(h, other, {@monday, @tuesday}),
+                     model: {Scripted, []},
+                     subscriber: self()
+                   )
+        end)
+
+      refute log =~ "MatchError"
+      assert Session.whereis(h.account_id) == old_pid
+      # The refused start released the row it had just taken.
+      assert active_sessions(h) == []
+    end
   end
 
   describe "secrets in process state" do

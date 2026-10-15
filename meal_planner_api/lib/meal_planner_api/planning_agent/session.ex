@@ -653,8 +653,18 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     # lapse. Turns run under async_nolink, so no turn exit reaches here.
     Process.flag(:trap_exit, true)
     %{attrs: attrs} = args
-    {:ok, _} = Registry.register(@registry, {:household, attrs.account_id}, args.session_id)
 
+    # An old process can still hold the Household's name after its lock was
+    # released (a cancel whose process is still exiting, or a row expired
+    # behind it until its next lease renewal): the start is refused, never
+    # crashed.
+    case Registry.register(@registry, {:household, attrs.account_id}, args.session_id) do
+      {:ok, _owner} -> {:ok, init_state(args)}
+      {:error, {:already_registered, _pid}} -> {:stop, :session_already_active}
+    end
+  end
+
+  defp init_state(%{attrs: attrs} = args) do
     household = HouseholdContext.load(attrs.account_id, attrs.user_id)
     saved = args.recovered
 
@@ -704,7 +714,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     end
 
     schedule_lease_renewal()
-    {:ok, persist(state)}
+    persist(state)
   end
 
   # Every change to the durable state is written to recoverable storage
