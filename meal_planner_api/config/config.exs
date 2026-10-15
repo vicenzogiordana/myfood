@@ -27,6 +27,13 @@ config :meal_planner_api,
   optimizer_timeout_ms: 15_000,
   optimizer_inventory_weight: 100
 
+# Planning agent (spec #93). One provider, one model, no failover. The OpenAI
+# adapter refuses to run until spend and token caps and prices are set (see
+# config/runtime.exs); the numeric caps are a human decision.
+config :meal_planner_api, :planning_agent,
+  model: {MealPlannerApi.PlanningAgent.Model.OpenAIResponses, []},
+  optimizer: {MealPlannerApi.PlanningAgent.Optimizer.Port, []}
+
 config :meal_planner_api,
   social_verifier: MealPlannerApi.Auth.SocialVerifier,
   google_oauth_client_ids: [],

@@ -71,6 +71,7 @@ defmodule MealPlannerApiWeb.UserSocket do
   channel("shopping:*", MealPlannerApiWeb.ShoppingChannel)
   channel("calendar:*", MealPlannerApiWeb.CalendarChannel)
   channel("planning:*", MealPlannerApiWeb.PlanningChannel)
+  channel("planning_agent:*", MealPlannerApiWeb.PlanningAgentChannel)
   channel("cooking:*", MealPlannerApiWeb.CookingChannel)
 
   @impl true

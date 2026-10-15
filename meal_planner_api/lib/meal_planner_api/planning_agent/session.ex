@@ -45,6 +45,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   @lease_seconds 120
   @lease_renew_ms 30_000
   @max_range_days 31
+  @known_slots ~w(breakfast lunch snack dinner)
 
   @type attrs :: %{
           account_id: Ecto.UUID.t(),
@@ -66,17 +67,23 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
     * `:model` — `{adapter, opts}` implementing `MealPlannerApi.PlanningAgent.Model`
       (default from `config :meal_planner_api, :planning_agent`)
-    * `:optimizer` — module implementing `MealPlannerApi.PlanningAgent.Optimizer`
+    * `:optimizer` — `{module, opts}` implementing `MealPlannerApi.PlanningAgent.Optimizer`
     * `:subscriber` — pid receiving events (more can join with `subscribe/2`)
     * `:max_iterations`, `:deadline_ms` — per-request limits
   """
   @spec start(attrs(), keyword()) ::
           {:ok, %{session_id: Ecto.UUID.t(), pid: pid()}}
-          | {:error, :invalid_range | :range_already_planned | :session_already_active | term()}
+          | {:error,
+             :invalid_range
+             | :invalid_slots
+             | :range_already_planned
+             | :session_already_active
+             | term()}
   def start(attrs, opts \\ []) do
     {model, model_opts} = Keyword.get_lazy(opts, :model, fn -> config(:model) end)
 
     with {:ok, {from_date, to_date}} <- validate_range(attrs.range),
+         :ok <- validate_slots(attrs.slots),
          :ok <- ensure_unplanned(attrs.account_id, from_date, to_date),
          {:ok, model_state} <- model.init(model_opts),
          {:ok, row} <- lock(attrs, from_date, to_date) do
@@ -379,6 +386,14 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   end
 
   defp validate_range(_), do: {:error, :invalid_range}
+
+  defp validate_slots([_ | _] = slots) do
+    if Enum.all?(slots, &(&1 in @known_slots)) and Enum.uniq(slots) == slots,
+      do: :ok,
+      else: {:error, :invalid_slots}
+  end
+
+  defp validate_slots(_), do: {:error, :invalid_slots}
 
   defp ensure_unplanned(account_id, from_date, to_date) do
     if PlanningRepo.range_planned?(account_id, from_date, to_date),

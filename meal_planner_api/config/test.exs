@@ -44,3 +44,9 @@ config :meal_planner_api,
 # Email-code auth — Bamboo LocalAdapter captures deliveries in test
 # (`Bamboo.SentEmail.all/0` under LocalAdapter). No outbound SMTP.
 config :meal_planner_api, MealPlannerApi.Mailer, adapter: Bamboo.LocalAdapter
+
+# Planning agent: never reach a paid provider or the Python optimizer from
+# tests unless a test opts in explicitly.
+config :meal_planner_api, :planning_agent,
+  model: {MealPlannerApi.PlanningAgent.Model.Scripted, []},
+  optimizer: {MealPlannerApi.PlanningAgent.Optimizer.Unavailable, []}
