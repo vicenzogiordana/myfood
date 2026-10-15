@@ -283,6 +283,25 @@ PR #126 was split into four chained PRs to main (strategy
     (the project has no `ecto.reset` alias). Pre-existing 15-digit
     migrations on main (for example `202610141095000`) are out of scope.
   - Focused `PricesTest` and `LivePricesTest` 37 passed.
+- S3 review round 3 (Jorge el Curioso on PR #134), route: inline, one
+  confirmed medium finding:
+  - A Brand Preference's brand is the only Member-authored free text in
+    the agent instructions, and the changeset only trimmed it, so a brand
+    with line breaks could forge directive lines (for example a fake
+    "Household facts (enforced by code):" block) in every Member's Planning
+    Session. RED: new `HouseholdContextTest` "a brand with line breaks
+    cannot forge instruction lines" and controller test "stores a brand as
+    a single line and rejects control characters" failed (2 failures).
+    GREEN: `HouseholdBrandPreference.changeset/2` collapses every whitespace
+    run into one space through a new `single_line/1` and rejects remaining
+    control characters with `validate_format(~r/\A[^\p{C}]+\z/u)` (422);
+    `HouseholdContext.brands/1` also applies `single_line/1` as defense in
+    depth. No schema or migration change.
+  - Focused `HouseholdContextTest`, controller and `BrandsTest` 13 passed.
+    `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1304 passed,
+    25 skipped; `mix precommit` 1304 passed, 25 skipped (one earlier
+    precommit run had a single unrelated flaky failure that did not
+    reproduce on two reruns).
 
 ## Next step
 

@@ -24,6 +24,7 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
   alias MealPlannerApi.Persistence.Accounts.{
     Account,
     AccountMembership,
+    HouseholdBrandPreference,
     UserDietaryProfile,
     UserExcludedIngredient
   }
@@ -200,7 +201,12 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
   defp brands([]), do: "none"
 
   defp brands(preferences),
-    do: Enum.map_join(preferences, "; ", &"#{&1.ingredient}: #{&1.brand}")
+    do:
+      Enum.map_join(
+        preferences,
+        "; ",
+        &"#{&1.ingredient}: #{HouseholdBrandPreference.single_line(&1.brand)}"
+      )
 
   defp forbidden_ingredient_count(context) do
     case MapSet.size(context.allergic_ingredient_ids) do

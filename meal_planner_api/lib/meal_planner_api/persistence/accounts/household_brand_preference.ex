@@ -24,11 +24,20 @@ defmodule MealPlannerApi.Persistence.Accounts.HouseholdBrandPreference do
   def changeset(preference, attrs) do
     preference
     |> cast(attrs, [:account_id, :ingredient_id, :brand])
-    |> update_change(:brand, &String.trim/1)
+    |> update_change(:brand, &single_line/1)
     |> validate_required([:account_id, :ingredient_id, :brand])
     |> validate_length(:brand, max: @max_brand_length)
+    |> validate_format(:brand, ~r/\A[^\p{C}]+\z/u)
     |> foreign_key_constraint(:account_id)
     |> foreign_key_constraint(:ingredient_id)
     |> unique_constraint([:account_id, :ingredient_id])
   end
+
+  @doc """
+  Collapses every whitespace run (line breaks included) into one space and
+  trims. The brand is Member-authored text that reaches the agent
+  instructions, so it must never span lines (it could forge directives).
+  """
+  def single_line(brand) when is_binary(brand),
+    do: ~r/\s+/u |> Regex.replace(brand, " ") |> String.trim()
 end
