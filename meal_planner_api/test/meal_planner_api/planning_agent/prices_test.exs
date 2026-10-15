@@ -1,9 +1,10 @@
 defmodule MealPlannerApi.PlanningAgent.PricesTest do
   @moduledoc """
   `MealPlannerApi.PlanningAgent.Prices` bounds (issue #101 review round):
-  a lookup never refreshes more Ingredients than the lookup cap, and
-  recording scraped data that the database rejects returns an error instead
-  of raising inside the read tool.
+  a lookup or a Product search never refreshes more Ingredients than the
+  lookup cap, a brand query judges freshness on every offer of the
+  Ingredient, and recording scraped data that the database rejects returns
+  an error instead of raising inside the read tool.
   """
 
   use ExUnit.Case, async: false
@@ -49,6 +50,188 @@ defmodule MealPlannerApi.PlanningAgent.PricesTest do
       assert refreshed == Prices.max_ingredients()
       assert length(result.prices) <= Prices.max_offers()
       assert length(result.warnings) == Prices.max_ingredients()
+    end
+  end
+
+  describe "lookup/2 with a Product query" do
+    test "refreshes at most the lookup cap of stale matching Ingredients" do
+      search = "capped search #{System.unique_integer([:positive])}"
+
+      for n <- 1..(Prices.max_ingredients() + 10) do
+        ingredient = ingredient!("Fictitious searched #{n}")
+        product!(ingredient, name: "#{search} #{n}", observed_at: hours_ago(30))
+      end
+
+      test_pid = self()
+
+      refresh = fn name ->
+        send(test_pid, {:refreshed, name})
+        {:error, :scraper_unavailable}
+      end
+
+      result = Prices.lookup([], product: search, now: @now, refresh: refresh)
+
+      {:messages, messages} = Process.info(self(), :messages)
+      refreshed = Enum.count(messages, &match?({:refreshed, _}, &1))
+
+      assert refreshed == Prices.max_ingredients()
+      assert length(result.prices) <= Prices.max_offers()
+
+      assert Enum.count(result.warnings, &(&1.reason == :refresh_failed)) ==
+               Prices.max_ingredients()
+
+      assert %{ingredient: nil, reason: :ingredients_truncated, detail: nil} in result.warnings
+    end
+
+    test "does not report truncation when the matching Ingredients fit the cap" do
+      search = "fitting search #{System.unique_integer([:positive])}"
+
+      for n <- 1..Prices.max_ingredients() do
+        ingredient = ingredient!("Fictitious fitting #{n}")
+        product!(ingredient, name: "#{search} #{n}", observed_at: hours_ago(2))
+      end
+
+      result = Prices.lookup([], product: search, now: @now, refresh: fn _ -> {:ok, []} end)
+
+      refute Enum.any?(result.warnings, &(&1.reason == :ingredients_truncated))
+    end
+
+    test "with a brand finds the branded Ingredient past the lookup cap" do
+      search = "branded search #{System.unique_integer([:positive])}"
+      brand = "Fictitious Hacendado #{System.unique_integer([:positive])}"
+
+      for n <- 1..(Prices.max_ingredients() + 5) do
+        ingredient = ingredient!("Fictitious branded a#{n}")
+        product!(ingredient, name: "#{search} #{n}", observed_at: hours_ago(2))
+      end
+
+      last = ingredient!("Fictitious branded z#{System.unique_integer([:positive])}")
+      product!(last, name: "#{search} last", brand: brand, observed_at: hours_ago(2))
+
+      test_pid = self()
+
+      refresh = fn name ->
+        send(test_pid, {:refreshed, name})
+        {:ok, []}
+      end
+
+      result =
+        Prices.lookup([],
+          product: search,
+          brand: String.upcase(brand),
+          now: @now,
+          refresh: refresh
+        )
+
+      {:messages, messages} = Process.info(self(), :messages)
+
+      assert [%{ingredient: name, brand: ^brand}] = result.prices
+      assert name == last.name
+      assert result.missing == []
+      refute Enum.any?(messages, &match?({:refreshed, _}, &1))
+      refute Enum.any?(result.warnings, &(&1.reason == :ingredients_truncated))
+    end
+
+    test "with names narrows the named Ingredients instead of adding others" do
+      brand = "Fictitious Acme #{System.unique_integer([:positive])}"
+      milk = ingredient!("Fictitious milk #{System.unique_integer([:positive])}")
+      rice = ingredient!("Fictitious rice #{System.unique_integer([:positive])}")
+      product!(milk, brand: brand, observed_at: hours_ago(30))
+      product!(rice, brand: brand, observed_at: hours_ago(30))
+
+      test_pid = self()
+
+      refresh = fn name ->
+        send(test_pid, {:refreshed, name})
+        {:ok, []}
+      end
+
+      result = Prices.lookup([milk.name], product: brand, now: @now, refresh: refresh)
+
+      {:messages, messages} = Process.info(self(), :messages)
+      refreshed = for {:refreshed, name} <- messages, do: name
+
+      assert refreshed == [milk.name]
+      assert [_ | _] = result.prices
+      assert Enum.all?(result.prices, &(&1.ingredient == milk.name))
+    end
+  end
+
+  describe "lookup/2 with a brand query" do
+    # The scrape is keyed by Ingredient name, so freshness is judged on every
+    # offer of the Ingredient, never only on the brand asked for.
+    defp counting_refresh do
+      test_pid = self()
+
+      fn name ->
+        send(test_pid, {:refreshed, name})
+        {:ok, []}
+      end
+    end
+
+    defp refreshed_count do
+      {:messages, messages} = Process.info(self(), :messages)
+      Enum.count(messages, &match?({:refreshed, _}, &1))
+    end
+
+    test "fresh offers of another brand are not refreshed live" do
+      ingredient = ingredient!("Fictitious brand fresh #{System.unique_integer([:positive])}")
+      product!(ingredient, brand: "Fictitious Brand A", observed_at: hours_ago(2))
+
+      result =
+        Prices.lookup([ingredient.name],
+          brand: "Fictitious Brand B",
+          now: @now,
+          refresh: counting_refresh()
+        )
+
+      assert refreshed_count() == 0
+      assert result.prices == []
+
+      assert [%{ingredient: name, reason: :no_matching_brand}] = result.missing
+      assert name == ingredient.name
+      refute Enum.any?(result.warnings, &(&1.reason == :refresh_failed))
+    end
+
+    test "stale offers of another brand are still refreshed live" do
+      ingredient = ingredient!("Fictitious brand stale #{System.unique_integer([:positive])}")
+      product!(ingredient, brand: "Fictitious Brand A", observed_at: hours_ago(30))
+
+      Prices.lookup([ingredient.name],
+        brand: "Fictitious Brand B",
+        now: @now,
+        refresh: counting_refresh()
+      )
+
+      assert refreshed_count() == 1
+    end
+
+    test "with a Product of a stored brand blames the Product, not the brand" do
+      brand = "Fictitious Acme #{System.unique_integer([:positive])}"
+      milk = ingredient!("Fictitious milk #{System.unique_integer([:positive])}")
+      product!(milk, name: "Whole", brand: brand, observed_at: hours_ago(2))
+
+      result =
+        Prices.lookup([milk.name],
+          brand: brand,
+          product: "skimmed",
+          now: @now,
+          refresh: counting_refresh()
+        )
+
+      assert result.prices == []
+
+      assert [
+               %{
+                 ingredient: name,
+                 brand: ^brand,
+                 product: "skimmed",
+                 reason: :no_matching_product
+               }
+             ] =
+               result.missing
+
+      assert name == milk.name
     end
   end
 
