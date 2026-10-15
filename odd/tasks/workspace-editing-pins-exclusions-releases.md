@@ -53,10 +53,10 @@ candidate costs are 0, so a budget Deviation from a Pin is proven at the optimiz
 
 | ID | Task | Route | Status |
 |----|------|-------|--------|
-| T1 | Optimizer `fixed_meals` (Python + contract doc) | inline (bounded worker, no sub-delegation) | pending |
-| T2 | Workspace module, `edit_workspace` and `get_workspace` tools | inline | pending |
-| T3 | `run_optimizer` over the Workspace: fixed meals, exclusions, variety cap, release_all, two-meal refinement | inline | pending |
-| T4 | Spend and token caps per Planning Session (docs + cross-turn test) | inline | pending |
+| T1 | Optimizer `fixed_meals` (Python + contract doc) | inline (bounded worker, no sub-delegation) | done (`4ff807a`) |
+| T2 | Workspace module, `edit_workspace` and `get_workspace` tools | inline | done (`e361fb4`, one work unit with T3: same test file and tool seam) |
+| T3 | `run_optimizer` over the Workspace: fixed meals, exclusions, variety cap, release_all, two-meal refinement | inline | done (`e361fb4`) |
+| T4 | Spend and token caps per Planning Session (docs + cross-turn test) | inline | done (`d93a3b3`) |
 
 ## Checks
 
@@ -71,3 +71,22 @@ candidate costs are 0, so a budget Deviation from a Pin is proven at the optimiz
 - T1 RED: `FixedMealTests` 9 tests, 6 failures + 8 errors (subtests); a tie-break
   expectation was relaxed and a free-before-fixed consecutive case added (RED 1 failure);
   GREEN: full Python suite 55/55.
+- T2+T3 RED: `session_workspace_test.exs` 0/12 with the implementation stashed; GREEN 12/12.
+  Planning agent + channel tests 82/82.
+- T4: the ledger already lived in the model state created once per session, so the new
+  test "spend and token caps bound the whole Planning Session, not one request" passed on
+  first run (characterization of the 2026-10-15 decision, no RED); docs and moduledocs now
+  say "per Planning Session" instead of "per execution".
+- Full: `MIX_TEST_PARTITION=99 MYFOOD_TEST_DATABASE=meal_planner_api_test_99 mix precommit`
+  exit 0, 1034 passed, 25 skipped; no warnings from changed files (remaining warnings are
+  pre-existing in unrelated tests).
+
+## Decisions
+
+- `release_all` ("redo the whole week") releases every meal that is not pinned; Pins last
+  for the whole Planning Session (glossary) and are reported as `still_pinned`.
+- Excluding a recipe that is in the last Proposal releases those meals (reported), since an
+  excluded recipe cannot stay fixed.
+- Kept (not released) meals beat the variety cap like Pins, because only Released Meals may
+  change; the agent can release more after asking.
+- Code checks that the optimizer kept every fixed meal (`fixed_meal_moved` otherwise).
