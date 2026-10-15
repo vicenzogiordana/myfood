@@ -7,7 +7,7 @@ defmodule MealPlannerApi.Optimization.ContractPortTest do
 
   use ExUnit.Case, async: true
 
-  alias MealPlannerApi.Optimization.{Contract, OptimizerPortRunner}
+  alias MealPlannerApi.Optimization.{Contract, OptimizerPortRunner, Variety}
   alias MealPlannerApi.Planning.ProposalStatus
 
   @python System.get_env("OPTIMIZER_PYTHON")
@@ -62,6 +62,42 @@ defmodule MealPlannerApi.Optimization.ContractPortTest do
 
     assert payload |> solve() |> Contract.interpret() ==
              {:infeasible, [%{cause: :restriction, slot: "lunch"}]}
+  end
+
+  test "variety holds across the range boundary through the real port" do
+    payload = %{
+      "days" => ["2026-09-07", "2026-09-08"],
+      "slots" => ["lunch"],
+      "constraints" => %{"weekly_budget_cents" => 10_000},
+      "candidates_by_slot" => %{
+        "lunch" => [candidate("cheap", 100, 0), candidate("other", 900, 0)]
+      }
+    }
+
+    # Yesterday's lunch was "cheap", so the range opens with "other".
+    assert {:ok, with_prior} =
+             Variety.put(payload, [
+               %{"day" => "2026-09-06", "slot" => "lunch", "recipe_id" => "cheap"}
+             ])
+
+    assert {:ok, plan} = with_prior |> solve() |> Contract.interpret()
+    assert Enum.map(plan.meals, & &1.recipe_id) == ["other", "cheap"]
+  end
+
+  test "unsatisfiable variety is infeasible with cause variety through the real port" do
+    {:ok, payload} =
+      Variety.put(
+        %{
+          "days" => ["2026-09-07", "2026-09-08", "2026-09-09"],
+          "slots" => ["lunch"],
+          "constraints" => %{"weekly_budget_cents" => 10_000},
+          "candidates_by_slot" => %{"lunch" => [candidate("only-one", 100, 0)]}
+        },
+        []
+      )
+
+    assert payload |> solve() |> Contract.interpret() ==
+             {:infeasible, [%{cause: :variety, slot: nil}]}
   end
 
   defp candidate(id, cost, kcal) do

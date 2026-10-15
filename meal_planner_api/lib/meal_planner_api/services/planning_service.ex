@@ -19,6 +19,7 @@ defmodule MealPlannerApi.Services.PlanningService do
 
   @slots [:breakfast, :lunch, :dinner]
   @default_days ~w(monday tuesday wednesday thursday friday saturday sunday)
+  @weekday_numbers @default_days |> Enum.with_index(1) |> Map.new()
 
   # -------------------------------------------------------------------------
   # Weekly plan generation
@@ -88,17 +89,39 @@ defmodule MealPlannerApi.Services.PlanningService do
       |> build_optimization_payload(candidates_by_slot, user)
       |> Map.put("slots", slots)
 
-    optimizer.select_weekly_menu(payload)
+    # The optimizer works on ISO dates; callers keep the weekday names.
+    day_names = payload["days"] |> Enum.zip(days) |> Map.new()
+
+    case optimizer.select_weekly_menu(payload) do
+      {:ok, %{"meals" => meals} = result} when is_list(meals) ->
+        {:ok, %{result | "meals" => Enum.map(meals, &name_meal_day(&1, day_names))}}
+
+      other ->
+        other
+    end
   end
+
+  defp name_meal_day(%{"day" => day} = meal, day_names),
+    do: %{meal | "day" => Map.get(day_names, day, day)}
+
+  defp name_meal_day(meal, _day_names), do: meal
 
   defp client_module,
     do: Application.get_env(:meal_planner_api, :planning_optimizer_client, OptimizerMock)
 
-  @spec build_optimization_payload([String.t()], map(), planning_user()) ::
+  @doc """
+  Builds the optimizer payload for the selected days.
+
+  Weekday names become the ISO dates of the upcoming Planning Range: the
+  first one is its next occurrence after `today`, and each following one is
+  the next occurrence after the previous day, so the order is kept. Other
+  entries are sent unchanged.
+  """
+  @spec build_optimization_payload([String.t()], map(), planning_user(), Date.t()) ::
           OptimizerPort.optimizer_payload()
-  def build_optimization_payload(days, candidates_by_slot, user) do
+  def build_optimization_payload(days, candidates_by_slot, user, today \\ Date.utc_today()) do
     %{
-      "days" => days,
+      "days" => range_dates(days, today),
       "slots" => Enum.map(@slots, &Atom.to_string/1),
       "constraints" => %{
         "kcal_target" => parse_int(Map.get(user, :kcal_target), 2100),
@@ -355,6 +378,27 @@ defmodule MealPlannerApi.Services.PlanningService do
       day_atom = Enum.at(day_atoms, rem(start_idx + i, 7))
       Atom.to_string(day_atom)
     end)
+  end
+
+  defp range_dates(days, today) do
+    {dates, _last} =
+      Enum.map_reduce(days, today, fn day, previous ->
+        case Map.fetch(@weekday_numbers, day) do
+          {:ok, weekday} ->
+            date = next_date_on(previous, weekday)
+            {Date.to_iso8601(date), date}
+
+          :error ->
+            {day, previous}
+        end
+      end)
+
+    dates
+  end
+
+  # The first date strictly after `date` that falls on `weekday` (1 = Monday).
+  defp next_date_on(date, weekday) do
+    Date.add(date, Integer.mod(weekday - Date.day_of_week(date) - 1, 7) + 1)
   end
 
   defp build_day_plans(meals, days) do
