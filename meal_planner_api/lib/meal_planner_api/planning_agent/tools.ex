@@ -1,7 +1,8 @@
 defmodule MealPlannerApi.PlanningAgent.Tools do
   @moduledoc """
   Agent-callable tool catalog of the planning agent (spec #93). No tool writes
-  persistent data.
+  persistent data, and no tool grants a Deviation Approval or an Absence
+  Exception: those are human-only actions of `MealPlannerApi.PlanningAgent.Session`.
 
     * `search_recipes` — structured search; Restriction-violating recipes are
       excluded by code
@@ -362,7 +363,13 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   defp run("present_proposal", _args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "validating_proposal"})
 
-    case ProposalValidator.validate(ctx.workspace.draft, ctx) do
+    # Approved Absence Exceptions of the Workspace are validator input.
+    exceptions = Map.get(ctx.workspace, :absence_exceptions, [])
+
+    case ProposalValidator.validate(
+           ctx.workspace.draft,
+           Map.put(ctx, :absence_exceptions, exceptions)
+         ) do
       {:valid, meals} ->
         {proposal, purchase} = Proposal.build(meals, ctx)
         status = proposal["status"]

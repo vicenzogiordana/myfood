@@ -14,6 +14,12 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
     * Restrictions — `MealPlannerApi.Planning.RestrictionValidator` over every
       Member, plus ingredients a Member is allergic to
 
+  Approved Absence Exceptions (`ctx.absence_exceptions`, see
+  `MealPlannerApi.PlanningAgent.Session`) lift one Restriction of one Member
+  for exactly their meals. Lifting `{:allergy, tag}` also lifts the
+  Member's allergic ingredients carrying that tag; an allergy to an
+  ingredient without a reviewed allergen tag cannot be lifted.
+
   The budget is not a violation: `present_proposal` compares the Purchase
   (`MealPlannerApi.PlanningAgent.Purchase`) against it and reports overspend
   as a budget Deviation. Violations are generic and never name a Member.
@@ -46,7 +52,13 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
     violations =
       coverage_violations(meals, expected) ++
         availability_violations(meals, recipes) ++
-        restriction_violations(meals, recipes, drafts, ctx.household)
+        restriction_violations(
+          meals,
+          recipes,
+          drafts,
+          ctx.household,
+          Map.get(ctx, :absence_exceptions, [])
+        )
 
     case violations do
       [] ->
@@ -113,7 +125,7 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
     end)
   end
 
-  defp restriction_violations(meals, recipes, drafts, household) do
+  defp restriction_violations(meals, recipes, drafts, household, exceptions) do
     known = Enum.filter(meals, &Map.has_key?(recipes, &1.recipe_id))
 
     used_drafts =
@@ -121,33 +133,26 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
 
     tag_conflicts =
       case RestrictionValidator.validate(known, household.members,
-             tags_by_recipe: RecipeDraft.reviewed_tags(used_drafts)
+             tags_by_recipe: RecipeDraft.reviewed_tags(used_drafts),
+             absence_exceptions: exceptions
            ) do
         :ok -> []
         {:error, conflicts} -> Enum.map(conflicts, &{&1.date, &1.slot, &1.message})
       end
 
     allergic = MapSet.to_list(household.allergic_ingredient_ids)
+    lifted = lifted_allergies(exceptions)
 
-    allergy_recipes =
-      if allergic == [] do
-        MapSet.new()
-      else
-        ids = known |> Enum.map(& &1.recipe_id) |> Enum.uniq()
-
-        from(ri in RecipeIngredient,
-          where: ri.recipe_id in ^ids and ri.ingredient_id in ^allergic,
-          distinct: true,
-          select: ri.recipe_id
-        )
-        |> Repo.all()
-        |> MapSet.new()
-        |> MapSet.union(allergy_drafts(used_drafts, household))
-      end
+    allergic_by_recipe =
+      known
+      |> allergic_by_recipe(allergic)
+      |> Map.merge(allergic_by_draft(used_drafts, household))
 
     allergy_conflicts =
       for meal <- known,
-          MapSet.member?(allergy_recipes, meal.recipe_id),
+          ingredient_id <- Map.get(allergic_by_recipe, meal.recipe_id, []),
+          not lifted_for_everyone?(household.members, ingredient_id, meal, lifted),
+          uniq: true,
           do:
             {meal.date, meal.slot,
              "This meal includes an ingredient that conflicts with a household member's Restriction."}
@@ -159,14 +164,17 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
     end)
   end
 
-  defp allergy_drafts(drafts, household) do
+  # Allergic ingredient ids per Recipe Draft of `drafts`.
+  defp allergic_by_draft(drafts, household) do
     for draft <- drafts,
-        Enum.any?(
-          RecipeDraft.ingredient_ids(draft),
-          &MapSet.member?(household.allergic_ingredient_ids, &1)
-        ),
-        into: MapSet.new(),
-        do: draft.id
+        ids =
+          draft
+          |> RecipeDraft.ingredient_ids()
+          |> Enum.filter(&MapSet.member?(household.allergic_ingredient_ids, &1))
+          |> Enum.uniq(),
+        ids != [],
+        into: %{},
+        do: {draft.id, ids}
   end
 
   defp draft_recipes(meals, drafts) do
@@ -183,6 +191,46 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
              origin: RecipeOrigin.label(draft.source),
              draft: true
            }}
+  end
+
+  # Allergic ingredient ids per recipe of `meals`.
+  defp allergic_by_recipe(_meals, []), do: %{}
+
+  defp allergic_by_recipe(meals, allergic) do
+    ids = meals |> Enum.map(& &1.recipe_id) |> Enum.uniq()
+
+    from(ri in RecipeIngredient,
+      where: ri.recipe_id in ^ids and ri.ingredient_id in ^allergic,
+      distinct: true,
+      select: {ri.recipe_id, ri.ingredient_id}
+    )
+    |> Repo.all()
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+  end
+
+  # An allergic ingredient is allowed at a meal only when every Member
+  # allergic to it has an Absence Exception lifting one of its allergen
+  # tags at that meal. Other allergen tags it carries are still checked by
+  # the tag comparison above. An ingredient no Member claims stays forbidden.
+  defp lifted_for_everyone?(members, ingredient_id, meal, lifted) do
+    holders =
+      for member <- members,
+          {:ok, tags} <- [
+            member |> Map.get(:allergic_ingredients, %{}) |> Map.fetch(ingredient_id)
+          ],
+          do: {member.id, tags}
+
+    holders != [] and
+      Enum.all?(holders, fn {member_id, tags} ->
+        Enum.any?(tags, &MapSet.member?(lifted, {member_id, &1, {meal.date, meal.slot}}))
+      end)
+  end
+
+  defp lifted_allergies(exceptions) do
+    for %{restriction: {:allergy, tag}} = exception <- exceptions,
+        key <- exception.meals,
+        into: MapSet.new(),
+        do: {exception.member_id, tag, key}
   end
 
   defp load_recipes(meals, account_id) do

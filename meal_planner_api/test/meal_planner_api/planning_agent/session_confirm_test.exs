@@ -252,8 +252,8 @@ defmodule MealPlannerApi.PlanningAgent.SessionConfirmTest do
 
       assert [%{"type" => "budget", "budget_cents" => 100}] = recalculated["deviations"]
 
-      # Deviation Approval is a separate human action (#103): until it is
-      # given, a Proposal with Deviations cannot be confirmed.
+      # Deviation Approval is a separate human action (#103): without it a
+      # Proposal with Deviations cannot be confirmed.
       assert {:error, :approval_required} = confirm(h, recalculated["proposal_id"])
       assert planned_meals(h) == []
     end

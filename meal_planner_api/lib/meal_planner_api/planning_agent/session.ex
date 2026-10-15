@@ -22,6 +22,10 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       Recipe Draft as a user-created Household Recipe (see "Recipe Drafts")
     * `confirmation_status/2` — the status of a confirmation, queryable after
       the Planning Session ended.
+    * `approve_deviations/3` — the session Member's Deviation Approval of the
+      exact displayed Proposal (see "Approvals").
+    * `approve_absence_exception/3` — the session Member's Absence Exception
+      for an absent Member (see "Approvals").
     * `whereis/1` — the active session process of a Household, if any.
 
   ## Events
@@ -31,7 +35,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   `proposal`, `recipe_draft`, `recipe_saved`, `optimizer_failed`, `consent_required`, `limit_reached`,
   `agent_unavailable`, `turn_completed`, `run_finished`, `session_cancelled`,
   `session_ended`, `proposal_confirmed`, `proposal_invalidated`,
-  `confirmation_unresolved`.
+  `confirmation_unresolved`, `deviations_approved`, `absence_exception_approved`.
 
   Every run (one request, or one authorized continuation) ends with exactly
   one `run_finished` event whose `outcome` is `complete`, `partial` (stopped
@@ -78,6 +82,26 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   Drafts it uses as private AI-created Household Recipes. A dictated
   (user-created) Draft is never planned or saved by the agent: only
   `save_recipe/3` saves it, as a user-created Household Recipe.
+
+  ## Approvals
+
+  Approvals are human-only actions; the agent can only ask for them, no
+  tool grants them, and a turn can never set or change them in the
+  Workspace.
+
+  A Deviation Approval is one all-or-nothing acceptance of every Deviation
+  of the exact Proposal shown. It is bound to that Proposal's identity and
+  Deviations: any change to the Proposal (a new one from the agent, or one
+  recalculated at confirmation) voids it. A `requires_approval` Proposal is
+  confirmed only with its own approval. Approving never changes the
+  Household's stored budget or Nutrition Goal.
+
+  An Absence Exception lifts one Restriction of one Member, who is absent,
+  for specific meals of the Planning Range. The validator accepts exactly
+  those meals where only that Restriction blocked them, in
+  `present_proposal` and at confirmation. It never edits a profile, lives
+  only in this session's Workspace and so is never inherited when meals are
+  reused.
   """
 
   use GenServer, restart: :temporary
@@ -307,6 +331,57 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   def confirmation_status(account_id, proposal_id),
     do: Confirmation.lookup(Confirmation.store(), account_id, proposal_id)
 
+  @doc """
+  The session Member's Deviation Approval of the Proposal `proposal_id` in
+  the Household `account_id`: accepts every Deviation of that exact
+  Proposal, all or nothing. Refuses with:
+
+    * `:forbidden` — not the session's Member
+    * `:busy` — the agent is working; the shown Proposal may be replaced
+    * `:stale_proposal` — not the current Proposal; the Member is shown it
+      again
+    * `:no_deviations` — the Proposal is valid and needs no approval
+    * `:session_not_active` — no Planning Session is running
+  """
+  @spec approve_deviations(Ecto.UUID.t(), Ecto.UUID.t(), String.t()) ::
+          :ok
+          | {:error, :forbidden | :busy | :stale_proposal | :no_deviations | :session_not_active}
+  def approve_deviations(account_id, membership_id, proposal_id),
+    do: human_action(account_id, {:approve_deviations, membership_id, proposal_id})
+
+  @doc """
+  The session Member's Absence Exception in the Household `account_id`:
+  `%{member_id: user_id, restriction: restriction, meals: [{date, slot}]}`
+  lifts `restriction` (`{:diet, diet}` or `{:allergy, tag}`, as in
+  `MealPlannerApi.Planning.Restrictions`) of the absent Member `user_id` for
+  exactly `meals`. Refuses with:
+
+    * `:forbidden` — not the session's Member
+    * `:busy` — the agent is working
+    * `:invalid_absence_exception` — not a Restriction that Member holds, or
+      meals outside the Planning Range and its slots
+    * `:session_not_active` — no Planning Session is running
+  """
+  @spec approve_absence_exception(Ecto.UUID.t(), Ecto.UUID.t(), map()) ::
+          :ok
+          | {:error, :forbidden | :busy | :invalid_absence_exception | :session_not_active}
+  def approve_absence_exception(account_id, membership_id, exception),
+    do: human_action(account_id, {:approve_absence_exception, membership_id, exception})
+
+  defp human_action(account_id, message) do
+    case whereis(account_id) do
+      nil ->
+        {:error, :session_not_active}
+
+      pid ->
+        try do
+          GenServer.call(pid, message)
+        catch
+          :exit, {reason, _} when reason in [:noproc, :normal] -> {:error, :session_not_active}
+        end
+    end
+  end
+
   defp replayed(account_id, proposal_id) do
     case confirmation_status(account_id, proposal_id) do
       {:confirmed, summary} -> {:ok, summary}
@@ -357,7 +432,13 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       model_state: args.model_state,
       optimizer: args.optimizer,
       messages: [],
-      workspace: %{draft: nil, proposal: nil, recipe_drafts: %{}},
+      workspace: %{
+        draft: nil,
+        proposal: nil,
+        recipe_drafts: %{},
+        deviation_approval: nil,
+        absence_exceptions: []
+      },
       subscribers: %{},
       task: nil,
       deadline_ref: nil,
@@ -490,6 +571,76 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     end
   end
 
+  def handle_call({:approve_deviations, membership_id, _proposal_id}, _from, state)
+      when membership_id != state.membership_id,
+      do: {:reply, {:error, :forbidden}, state}
+
+  def handle_call(
+        {:approve_deviations, _membership_id, _proposal_id},
+        _from,
+        %{task: %Task{}} = state
+      ),
+      do: {:reply, {:error, :busy}, state}
+
+  def handle_call({:approve_deviations, _membership_id, proposal_id}, _from, state) do
+    case state.workspace.proposal do
+      %{"proposal_id" => ^proposal_id, "status" => "requires_approval"} = shown ->
+        approval = %{proposal_id: proposal_id, deviations: shown["deviations"]}
+
+        emit(state, %{
+          "type" => "deviations_approved",
+          "proposal_id" => proposal_id,
+          "deviations" => shown["deviations"]
+        })
+
+        {:reply, :ok, put_in(state.workspace.deviation_approval, approval)}
+
+      %{"proposal_id" => ^proposal_id} ->
+        {:reply, {:error, :no_deviations}, state}
+
+      current ->
+        if current, do: emit(state, current)
+        {:reply, {:error, :stale_proposal}, state}
+    end
+  end
+
+  def handle_call({:approve_absence_exception, membership_id, _exception}, _from, state)
+      when membership_id != state.membership_id,
+      do: {:reply, {:error, :forbidden}, state}
+
+  def handle_call(
+        {:approve_absence_exception, _membership_id, _exception},
+        _from,
+        %{task: %Task{}} = state
+      ),
+      do: {:reply, {:error, :busy}, state}
+
+  def handle_call({:approve_absence_exception, _membership_id, exception}, _from, state) do
+    case absence_exception(state, exception) do
+      {:ok, exception} ->
+        meals =
+          Enum.map(exception.meals, fn {date, slot} ->
+            %{"date" => Date.to_iso8601(date), "slot" => slot}
+          end)
+
+        # Generic: neither the event nor the agent learns whose Restriction
+        # it is or which one.
+        emit(state, %{"type" => "absence_exception_approved", "meals" => meals})
+        notice = %{role: :user, content: absence_notice(meals)}
+
+        state = %{
+          state
+          | workspace: Map.update!(state.workspace, :absence_exceptions, &(&1 ++ [exception])),
+            messages: state.messages ++ [notice]
+        }
+
+        {:reply, :ok, state}
+
+      :error ->
+        {:reply, {:error, :invalid_absence_exception}, state}
+    end
+  end
+
   @impl true
   def handle_info({:agent_event, ref, event}, %{task: %Task{ref: ref}} = state) do
     emit(state, event)
@@ -519,7 +670,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       clear_turn(state)
       | model_state: result.model_state,
         messages: result.messages,
-        workspace: result.workspace,
+        workspace: adopt_workspace(state.workspace, result.workspace),
         allowance: result.allowance
     }
 
@@ -649,13 +800,14 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       range: state.range,
       slots: state.slots,
       household: household,
-      recipe_drafts: state.workspace.recipe_drafts
+      recipe_drafts: state.workspace.recipe_drafts,
+      absence_exceptions: state.workspace.absence_exceptions
     }
 
     with {:valid, meals} <- ProposalValidator.validate(Proposal.meals(shown), ctx),
          {current, purchase} = Proposal.build(meals, ctx),
          true <- Proposal.same_content?(current, shown) || {:stale, current},
-         :ok <- approved(shown) do
+         :ok <- approved(state.workspace, shown) do
       save(state, shown, purchase)
     else
       {:invalid, violations} ->
@@ -666,7 +818,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       # recalculated, as a new Proposal the Member is asked to confirm.
       {:stale, current} ->
         emit(state, current)
-        state = put_in(state.workspace.proposal, current)
+        state = %{state | workspace: show(state.workspace, current)}
         {:reply, {:error, :stale_proposal}, state}
 
       {:error, :approval_required} = error ->
@@ -674,10 +826,37 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     end
   end
 
-  # Deviation Approval is its own human action (#103); until it exists a
-  # Proposal with Deviations cannot be confirmed.
-  defp approved(%{"status" => "valid"}), do: :ok
-  defp approved(_shown), do: {:error, :approval_required}
+  # A Proposal with Deviations is confirmed only with the Deviation Approval
+  # of that exact Proposal: same identity, same Deviations.
+  defp approved(_workspace, %{"status" => "valid"}), do: :ok
+
+  defp approved(
+         %{deviation_approval: %{proposal_id: id, deviations: deviations}},
+         %{"proposal_id" => id, "deviations" => deviations}
+       ),
+       do: :ok
+
+  defp approved(_workspace, _shown), do: {:error, :approval_required}
+
+  # Approvals are human-owned: the Workspace a turn returns never sets or
+  # changes them.
+  @human_owned [:deviation_approval, :absence_exceptions]
+
+  defp adopt_workspace(current, from_turn) do
+    from_turn
+    |> Map.merge(Map.take(current, @human_owned))
+    |> void_stale_approval()
+  end
+
+  defp show(workspace, proposal), do: void_stale_approval(%{workspace | proposal: proposal})
+
+  # Any change to the shown Proposal voids its Deviation Approval.
+  defp void_stale_approval(
+         %{deviation_approval: %{proposal_id: id}, proposal: %{"proposal_id" => id}} = workspace
+       ),
+       do: workspace
+
+  defp void_stale_approval(workspace), do: %{workspace | deviation_approval: nil}
 
   # Recipe Drafts the Proposal uses are saved with it as AI-created
   # Household Recipes; unused Drafts are discarded with the Workspace.
@@ -727,7 +906,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       "violations" => violations
     })
 
-    state = put_in(state.workspace.proposal, nil)
+    state = %{state | workspace: show(state.workspace, nil)}
 
     if state.consent? and state.pending_limit == nil do
       notice = %{role: :user, content: conflict_notice(violations)}
@@ -735,6 +914,35 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     else
       state
     end
+  end
+
+  # An Absence Exception names one Restriction of one Member that Member
+  # holds, for meals of the Planning Range and its slots.
+  defp absence_exception(state, %{member_id: member_id, restriction: restriction, meals: meals})
+       when is_list(meals) and meals != [] do
+    member = Enum.find(state.household.members, &(&1.id == member_id))
+    holds? = member != nil and restriction in member.restrictions
+
+    if holds? and Enum.all?(meals, &in_range?(state, &1)) and Enum.uniq(meals) == meals,
+      do: {:ok, %{member_id: member_id, restriction: restriction, meals: meals}},
+      else: :error
+  end
+
+  defp absence_exception(_state, _exception), do: :error
+
+  defp in_range?(%{range: {from_date, to_date}, slots: slots}, {%Date{} = date, slot}),
+    do:
+      Date.compare(date, from_date) != :lt and Date.compare(date, to_date) != :gt and
+        slot in slots
+
+  defp in_range?(_state, _meal), do: false
+
+  # Code-authored: the Member approved it, so the agent can present again.
+  defp absence_notice(meals) do
+    "[Absence Exception approved by the Member] One household Restriction is lifted for " <>
+      "these meals only: " <>
+      Jason.encode!(meals) <>
+      ". present_proposal now accepts them where only that Restriction blocked them."
   end
 
   # Code-authored: the Member asked to confirm and code found the
@@ -967,7 +1175,9 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     "recipe_saved" => ~w(recipe_id name origin),
     "proposal_confirmed" => ~w(proposal_id meals_count shopping_lines_count),
     "proposal_invalidated" => ~w(proposal_id reason violations),
-    "confirmation_unresolved" => ~w(proposal_id)
+    "confirmation_unresolved" => ~w(proposal_id),
+    "deviations_approved" => ~w(proposal_id deviations),
+    "absence_exception_approved" => ~w(meals)
   }
   @meal_fields ~w(date slot recipe_id name origin draft)
 

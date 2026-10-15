@@ -33,7 +33,14 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
   alias MealPlannerApi.Planning.Restrictions
   alias MealPlannerApi.Repo
 
-  @type member :: %{id: Ecto.UUID.t(), restrictions: [Restrictions.restriction()]}
+  # `allergic_ingredients` maps each ingredient the Member is allergic to
+  # onto the reviewed allergen tags it carries: lifting `{:allergy, tag}`
+  # with an Absence Exception lifts those ingredients too.
+  @type member :: %{
+          id: Ecto.UUID.t(),
+          restrictions: [Restrictions.restriction()],
+          allergic_ingredients: %{Ecto.UUID.t() => MapSet.t(Restrictions.tag())}
+        }
   @type t :: %{
           account_id: Ecto.UUID.t(),
           members: [member()],
@@ -95,7 +102,13 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
               uniq: true,
               do: {:allergy, tag}
 
-        %{id: id, restrictions: diet ++ allergy}
+        allergic_ingredients =
+          for a <- allergies,
+              a.user_id == id,
+              into: %{},
+              do: {a.ingredient_id, Map.fetch!(tags_by_ingredient, a.ingredient_id)}
+
+        %{id: id, restrictions: diet ++ allergy, allergic_ingredients: allergic_ingredients}
       end)
 
     %{
@@ -135,6 +148,7 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
     - Prices are never invented. A missing price is uncertainty: tell the household, never treat it as zero.
     - Ask the human with ask_human only about real conflicts. Never claim that no recipes exist when a search failed.
     - The household is fixed by the session; you cannot plan for another household.
+    - Approvals are human-only: you cannot grant a Deviation Approval or an Absence Exception. When a Proposal requires approval, tell the household its Deviations; when a Restriction blocks a meal for a member who may be away, ask with ask_human. The household decides in the app.
 
     Household facts (enforced by code):
     - Forbidden Ingredient Tags (Restrictions of household members): #{list(context.forbidden_tags)}
