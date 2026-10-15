@@ -153,6 +153,8 @@ review rounds) is split into three more slices:
   Review fixes from #134 kept: freshness before the brand filter, and a
   blank `brand` or `product` is absent in `lookup_prices`, so a
   whitespace-only `product` cannot bypass `ingredients_required`.
+  Commit: the `feat(planning-agent): query prices by brand and Product`
+  commit (ad50c77) on `feat/issue-101-part-5-brand-product-price-queries`.
 - [ ] S5 Purchase steered by Session Brands and Brand Preferences (split
   slice 3/3).
 
