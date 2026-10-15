@@ -1,6 +1,6 @@
 defmodule MealPlannerApi.PlanningAgent.Prices do
   @moduledoc """
-  Stored prices for the planning agent (spec #93, user stories 47, 59).
+  Prices for the planning agent (spec #93, user stories 44-47, 59).
 
   An offer is one Product covering an Ingredient with its latest Price
   Observation: product, brand, presentation (package size), supermarket,
@@ -8,15 +8,23 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   observation of each Product counts. A Product without any observation has
   no offer: prices are never invented or defaulted to zero.
 
-  This slice reads the database only. Live refresh, freshness and brands are
-  added by #101.
+  Freshness is tracked per Product: an offer is fresh when its latest
+  observation is under 24 hours old, and every offer carries its age.
+
+  `lookup/2` reads the database first. An Ingredient whose offers are
+  missing or not all fresh is refreshed through the live scraper, and what
+  the scraper answers is recorded as Price Observations with the scraper's
+  own observation time. A failed refresh records nothing, so the old price
+  keeps its real age, and the failure is reported as a warning.
   """
 
   import Ecto.Query
 
   alias MealPlannerApi.Persistence.Catalog.Ingredient
-  alias MealPlannerApi.Persistence.Shopping.PriceObservation
+  alias MealPlannerApi.Persistence.Shopping.{PriceObservation, Product, Supermarket}
   alias MealPlannerApi.Repo
+
+  @fresh_seconds 24 * 3600
 
   @type offer :: %{
           product_id: Ecto.UUID.t(),
@@ -29,14 +37,27 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
           supermarket: String.t(),
           price_cents: non_neg_integer(),
           currency: String.t(),
-          observed_at: DateTime.t()
+          observed_at: DateTime.t(),
+          age_seconds: non_neg_integer(),
+          fresh?: boolean()
         }
 
-  @doc "Offers of every Product covering `ingredient_ids`, grouped by ingredient id."
-  @spec offers_for([Ecto.UUID.t()]) :: %{Ecto.UUID.t() => [offer()]}
-  def offers_for([]), do: %{}
+  @type refresh :: (String.t() -> {:ok, [map()]} | {:error, term()})
+  @type warning :: %{
+          ingredient: String.t(),
+          reason: :refresh_failed | :still_stale,
+          detail: term()
+        }
 
-  def offers_for(ingredient_ids) do
+  @doc """
+  Offers of every Product covering `ingredient_ids`, grouped by ingredient
+  id, with their age and freshness at `now`.
+  """
+  @spec offers_for([Ecto.UUID.t()], DateTime.t()) :: %{Ecto.UUID.t() => [offer()]}
+  def offers_for(ingredient_ids, now \\ DateTime.utc_now())
+  def offers_for([], _now), do: %{}
+
+  def offers_for(ingredient_ids, now) do
     ids = Enum.uniq(ingredient_ids)
 
     from(o in PriceObservation,
@@ -61,29 +82,36 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
       }
     )
     |> Repo.all()
+    |> Enum.map(&with_age(&1, now))
     |> Enum.sort_by(&{&1.ingredient, &1.price_cents, &1.product, &1.product_id})
     |> Enum.group_by(& &1.ingredient_id)
   end
 
   @doc """
-  Looks prices up by ingredient name (case-insensitive exact match). Names
-  that match no Ingredient, or an Ingredient with no stored price, are
-  reported in `missing` with their reason.
+  Looks prices up by ingredient name (case-insensitive exact match), reading
+  the database first and refreshing missing or stale Ingredients live.
+
+  Options: `:now` (default: the current time) and `:refresh`, a function
+  from an Ingredient name to the scraped items (see
+  `MealPlannerApi.PlanningAgent.PriceScraper`); without it nothing is
+  refreshed. Names that match no Ingredient are never looked up live.
+
+  Returns the offers, the names still without a price in `missing` with
+  their reason, and `warnings` for failed refreshes and prices still stale.
   """
-  @spec lookup_names([String.t()]) :: %{prices: [offer()], missing: [map()]}
-  def lookup_names(names) do
+  @spec lookup([String.t()], keyword()) :: %{
+          prices: [offer()],
+          missing: [map()],
+          warnings: [warning()]
+        }
+  def lookup(names, opts \\ []) do
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+
     wanted = names |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()
-    lowered = Enum.map(wanted, &String.downcase/1)
+    ingredients = ingredients_by_name(wanted)
 
-    ingredients =
-      from(i in Ingredient,
-        where: fragment("lower(?)", i.name) in ^lowered,
-        select: %{id: i.id, name: i.name}
-      )
-      |> Repo.all()
-      |> Map.new(&{String.downcase(&1.name), &1})
-
-    offers = ingredients |> Map.values() |> Enum.map(& &1.id) |> offers_for()
+    {offers, warnings} =
+      ingredients |> Map.values() |> fresh_offers(now, Keyword.get(opts, :refresh))
 
     missing =
       Enum.flat_map(wanted, fn name ->
@@ -98,10 +126,37 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
         end
       end)
 
-    %{prices: offers |> Map.values() |> List.flatten(), missing: missing}
+    %{prices: offers |> Map.values() |> List.flatten(), missing: missing, warnings: warnings}
   end
 
-  @doc "JSON-safe provenance of an offer, as shown to the model and the Member."
+  @doc """
+  Records scraped `items` as Products of `ingredient_id` with their Price
+  Observations, at the scraper's observation time. An observation already
+  stored for the same Product and time is kept as is.
+  """
+  @spec record(Ecto.UUID.t(), [map()]) :: :ok
+  def record(ingredient_id, items) do
+    {:ok, :ok} =
+      Repo.transaction(fn ->
+        Enum.each(items, fn item ->
+          supermarket = supermarket!(item.supermarket)
+          product = product!(ingredient_id, supermarket.id, item)
+
+          %PriceObservation{}
+          |> PriceObservation.changeset(%{
+            product_id: product.id,
+            price_cents: item.price_cents,
+            currency: item.currency,
+            observed_at: item.observed_at
+          })
+          |> Repo.insert!(on_conflict: :nothing, conflict_target: [:product_id, :observed_at])
+        end)
+      end)
+
+    :ok
+  end
+
+  @doc "JSON-safe provenance and age of an offer, as shown to the model and the Member."
   @spec offer_data(offer()) :: map()
   def offer_data(offer) do
     %{
@@ -115,7 +170,135 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
       "supermarket" => offer.supermarket,
       "price_cents" => offer.price_cents,
       "currency" => offer.currency,
-      "observed_at" => DateTime.to_iso8601(offer.observed_at)
+      "observed_at" => DateTime.to_iso8601(offer.observed_at),
+      "age_hours" => div(offer.age_seconds, 3600),
+      "fresh" => offer.fresh?
     }
+  end
+
+  @doc "JSON-safe warning of a lookup."
+  @spec warning_data(warning()) :: map()
+  def warning_data(%{reason: :refresh_failed} = warning) do
+    %{
+      "ingredient" => warning.ingredient,
+      "reason" => "refresh_failed",
+      "detail" => detail(warning.detail)
+    }
+  end
+
+  def warning_data(warning),
+    do: %{"ingredient" => warning.ingredient, "reason" => Atom.to_string(warning.reason)}
+
+  # ---------------------------------------------------------------------------
+
+  # Stored offers of `ingredients`, refreshed live where missing or stale.
+  defp fresh_offers([], _now, _refresh), do: {%{}, []}
+
+  defp fresh_offers(ingredients, now, refresh) do
+    ids = Enum.map(ingredients, & &1.id)
+    stored = offers_for(ids, now)
+    to_refresh = Enum.filter(ingredients, &needs_refresh?(stored, &1.id))
+    failed = refresh_all(to_refresh, refresh)
+    offers = if to_refresh == [] or refresh == nil, do: stored, else: offers_for(ids, now)
+
+    warnings =
+      Enum.flat_map(to_refresh, fn ingredient ->
+        cond do
+          Map.has_key?(failed, ingredient.id) ->
+            [
+              %{
+                ingredient: ingredient.name,
+                reason: :refresh_failed,
+                detail: failed[ingredient.id]
+              }
+            ]
+
+          Map.has_key?(offers, ingredient.id) and needs_refresh?(offers, ingredient.id) ->
+            [%{ingredient: ingredient.name, reason: :still_stale, detail: nil}]
+
+          true ->
+            []
+        end
+      end)
+
+    {offers, Enum.sort_by(warnings, & &1.ingredient)}
+  end
+
+  defp with_age(offer, now) do
+    age = max(DateTime.diff(now, offer.observed_at, :second), 0)
+    Map.merge(offer, %{age_seconds: age, fresh?: age < @fresh_seconds})
+  end
+
+  defp needs_refresh?(offers, ingredient_id) do
+    case Map.get(offers, ingredient_id, []) do
+      [] -> true
+      offers -> not Enum.all?(offers, & &1.fresh?)
+    end
+  end
+
+  # Returns the failed refreshes: ingredient id => failure reason. Without a
+  # refresh function every refresh fails as unavailable.
+  defp refresh_all(ingredients, nil),
+    do: Map.new(ingredients, &{&1.id, :scraper_unavailable})
+
+  defp refresh_all(ingredients, refresh) do
+    Enum.reduce(ingredients, %{}, fn ingredient, failed ->
+      case refresh.(ingredient.name) do
+        {:ok, items} ->
+          :ok = record(ingredient.id, items)
+          failed
+
+        {:error, reason} ->
+          Map.put(failed, ingredient.id, reason)
+      end
+    end)
+  end
+
+  defp detail(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp detail(_reason), do: "scraper_error"
+
+  defp ingredients_by_name([]), do: %{}
+
+  defp ingredients_by_name(names) do
+    lowered = Enum.map(names, &String.downcase/1)
+
+    from(i in Ingredient,
+      where: fragment("lower(?)", i.name) in ^lowered,
+      select: %{id: i.id, name: i.name}
+    )
+    |> Repo.all()
+    |> Map.new(&{String.downcase(&1.name), &1})
+  end
+
+  defp supermarket!(name) do
+    _ =
+      %Supermarket{}
+      |> Supermarket.changeset(%{name: name})
+      |> Repo.insert!(on_conflict: :nothing, conflict_target: :name)
+
+    Repo.get_by!(Supermarket, name: name)
+  end
+
+  defp product!(ingredient_id, supermarket_id, item) do
+    key = [
+      supermarket_id: supermarket_id,
+      ingredient_id: ingredient_id,
+      name: item.product,
+      package_quantity_milli: item.package_quantity_milli,
+      package_unit: item.package_unit
+    ]
+
+    case Repo.get_by(Product, key) do
+      nil ->
+        %Product{}
+        |> Product.changeset(key |> Map.new() |> Map.put(:brand, item.brand))
+        |> Repo.insert!()
+
+      %Product{brand: brand} = product when brand == item.brand ->
+        product
+
+      product ->
+        product |> Product.changeset(%{brand: item.brand}) |> Repo.update!()
+    end
   end
 end

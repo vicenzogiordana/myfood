@@ -22,6 +22,10 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
   price, no Product in the needed unit, or prices only in another currency
   is listed in `missing` with its reason and left out of the total, which is
   then only a lower bound (`complete?: false`). No unit conversion is applied.
+
+  Stale prices are uncertainty too: every line carries the age of its price,
+  and lines priced with an observation 24 hours old or older are listed in
+  `stale_prices` (see `MealPlannerApi.PlanningAgent.Prices`).
   """
 
   import Ecto.Query
@@ -65,14 +69,17 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
   @doc """
   Calculates the Purchase of `meals` (each with a `recipe_id`) for the
   Household `account_id`, net of its Projected Pantry.
+
+  Options: `:now`, the time prices are aged at (default: the current time).
   """
-  @spec for_meals([%{recipe_id: Ecto.UUID.t()}], Ecto.UUID.t()) :: t()
-  def for_meals(meals, account_id) do
+  @spec for_meals([%{recipe_id: Ecto.UUID.t()}], Ecto.UUID.t(), keyword()) :: t()
+  def for_meals(meals, account_id, opts \\ []) do
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
     needs = needs(meals)
     ingredient_ids = needs |> Map.keys() |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
     available = account_id |> ProjectedPantry.load() |> ProjectedPantry.available()
 
-    calculate(needs, available, Prices.offers_for(ingredient_ids), names(ingredient_ids))
+    calculate(needs, available, Prices.offers_for(ingredient_ids, now), names(ingredient_ids))
   end
 
   @doc """
@@ -131,11 +138,26 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
           })
         end),
       "missing_prices" => Enum.map(purchase.missing, &missing_data/1),
+      "stale_prices" =>
+        purchase.lines
+        |> Enum.reject(& &1.offer.fresh?)
+        |> Enum.map(fn line ->
+          %{
+            "ingredient" => line.offer.ingredient,
+            "product" => line.offer.product,
+            "observed_at" => DateTime.to_iso8601(line.offer.observed_at),
+            "age_hours" => div(line.offer.age_seconds, 3600)
+          }
+        end),
       "total_cents" => purchase.total_cents,
       "currency" => purchase.currency,
       "complete" => purchase.complete?
     }
   end
+
+  @doc "Whether any line of the Purchase is priced with a stale observation."
+  @spec stale?(t()) :: boolean()
+  def stale?(purchase), do: Enum.any?(purchase.lines, &(not &1.offer.fresh?))
 
   @doc "JSON-safe consumed-ingredient cost."
   @spec consumed_data(t()) :: map()

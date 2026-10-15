@@ -49,4 +49,5 @@ config :meal_planner_api, MealPlannerApi.Mailer, adapter: Bamboo.LocalAdapter
 # tests unless a test opts in explicitly.
 config :meal_planner_api, :planning_agent,
   model: {MealPlannerApi.PlanningAgent.Model.Scripted, []},
-  optimizer: {MealPlannerApi.PlanningAgent.Optimizer.Unavailable, []}
+  optimizer: {MealPlannerApi.PlanningAgent.Optimizer.Unavailable, []},
+  price_scraper: {MealPlannerApi.PlanningAgent.PriceScraper.Unavailable, []}

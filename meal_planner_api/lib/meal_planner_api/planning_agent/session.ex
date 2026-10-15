@@ -102,6 +102,11 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       retry budgets (see `MealPlannerApi.PlanningAgent.CallBounds`)
     * `:recipe_search` — `{module, opts}` replacing the recipe search read
       tool (`module.search(household, filters, opts)`), for tests
+    * `:price_scraper` — `{module, opts}` implementing
+      `MealPlannerApi.PlanningAgent.PriceScraper` for live price lookups
+      (default from config)
+    * `:clock` — a 0-arity function returning the current `DateTime`, used
+      to age prices (default: `DateTime.utc_now/0`)
   """
   @spec start(attrs(), keyword()) ::
           {:ok, %{session_id: Ecto.UUID.t(), pid: pid()}}
@@ -129,7 +134,9 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         max_iterations: Keyword.get(opts, :max_iterations, @default_max_iterations),
         deadline_ms: Keyword.get(opts, :deadline_ms, @default_deadline_ms),
         call_policies: Keyword.get(opts, :call_policies, %{}),
-        recipe_search: Keyword.get(opts, :recipe_search)
+        recipe_search: Keyword.get(opts, :recipe_search),
+        price_scraper: Keyword.get_lazy(opts, :price_scraper, fn -> config(:price_scraper) end),
+        clock: Keyword.get(opts, :clock, &DateTime.utc_now/0)
       }
 
       case DynamicSupervisor.start_child(@supervisor, {__MODULE__, init_args}) do
@@ -244,6 +251,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       deadline_ms: args.deadline_ms,
       call_policies: CallBounds.policies(args.call_policies),
       recipe_search: args.recipe_search,
+      price_scraper: args.price_scraper,
+      clock: args.clock,
       # Read by the running turn without a message round trip: no retry
       # starts while no Member is connected.
       presence: :atomics.new(1, [])
@@ -475,6 +484,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         household: state.household,
         optimizer: state.optimizer,
         recipe_search: state.recipe_search,
+        price_scraper: state.price_scraper,
+        clock: state.clock,
         workspace: state.workspace
       }
     }

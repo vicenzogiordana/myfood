@@ -16,6 +16,7 @@ defmodule MealPlannerApi.PlanningAgent.PurchaseToolsTest do
 
   @monday ~D[2026-11-02]
   @tuesday ~D[2026-11-03]
+  @now ~U[2026-10-14 12:00:00.000000Z]
 
   setup do
     sandbox_sessions!()
@@ -36,6 +37,8 @@ defmodule MealPlannerApi.PlanningAgent.PurchaseToolsTest do
       Session.start(attrs,
         model: {Scripted, script: script, notify: self()},
         optimizer: {FakeOptimizer, Keyword.merge([notify: self()], opts)},
+        # Fixture prices are observed on 2026-10-14 10:00 UTC: fresh here.
+        clock: fn -> @now end,
         subscriber: self()
       )
 
@@ -184,7 +187,7 @@ defmodule MealPlannerApi.PlanningAgent.PurchaseToolsTest do
         package: {500_000, :g},
         price_cents: 1_000,
         supermarket: "Fictitious Market North",
-        observed_at: ~U[2026-10-13 09:30:00.000000Z]
+        observed_at: ~U[2026-10-14 09:30:00.000000Z]
       )
 
       product!(rice, name: "Fictitious rice 500 g", package: {500_000, :g}, price_cents: 800)
@@ -242,7 +245,7 @@ defmodule MealPlannerApi.PlanningAgent.PurchaseToolsTest do
                "supermarket" => "Fictitious Market North",
                "price_cents" => 1_000,
                "currency" => "ARS",
-               "observed_at" => "2026-10-13T09:30:00.000000Z",
+               "observed_at" => "2026-10-14T09:30:00.000000Z",
                "total_cents" => 1_000
              } = line_for(proposal, pasta)
 

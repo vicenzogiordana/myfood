@@ -1,7 +1,8 @@
 defmodule MealPlannerApi.PlanningAgent.Tools do
   @moduledoc """
   Agent-callable tool catalog of the planning agent (spec #93). No tool writes
-  persistent data.
+  household data; `lookup_prices` records the Price Observations a live
+  lookup returns.
 
     * `search_recipes` — structured search; Restriction-violating recipes are
       excluded by code
@@ -13,8 +14,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       failures are typed errors, never a fallback plan
     * `get_pantry` — the Projected Pantry (Pantry minus stock committed to
       not-yet-cooked Planned Meals)
-    * `lookup_prices` — stored prices with provenance; missing prices are
-      reported, never invented
+    * `lookup_prices` — prices with provenance and age, read from the
+      database first and refreshed live through the scraper when missing or
+      24 hours old or older; missing prices are reported, never invented,
+      and a failed refresh keeps the old price with its real age
     * `present_proposal` — always validates the latest optimizer plan; only a
       valid plan is shown to the Member, otherwise violations go back. A
       shown Proposal always carries its Purchase (`MealPlannerApi.PlanningAgent.Purchase`),
@@ -22,7 +25,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       over the budget is a budget Deviation (`requires_approval`)
     * `ask_human` — one question; ends the turn
 
-  Read calls (recipe search) and solver calls run within
+  Read calls (recipe search, live price lookups) and solver calls run within
   `MealPlannerApi.PlanningAgent.CallBounds`: their own deadline and retry
   budget, clipped by the turn's global deadline.
 
@@ -37,6 +40,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     CallBounds,
     MealPlan,
     Prices,
+    PriceScraper,
     ProjectedPantry,
     ProposalValidator,
     Purchase,
@@ -138,9 +142,11 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       %{
         name: "lookup_prices",
         description:
-          "Read stored prices of the Products covering the named ingredients, with product, " <>
-            "presentation, supermarket, currency and observation date. Ingredients without a " <>
-            "stored price are listed as missing; never assume a price for them.",
+          "Read prices of the Products covering the named ingredients, with product, " <>
+            "presentation, supermarket, currency, observation date and age. Missing or stale " <>
+            "prices are refreshed live; when that fails the old price keeps its real age and a " <>
+            "warning is returned. Ingredients without a price are listed as missing; never " <>
+            "assume a price for them, and tell the household when a price is stale.",
         parameters: %{
           "type" => "object",
           "properties" => %{
@@ -299,7 +305,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
     case ProposalValidator.validate(ctx.workspace.draft, ctx) do
       {:valid, meals} ->
-        purchase = Purchase.for_meals(meals, ctx.account_id)
+        purchase = Purchase.for_meals(meals, ctx.account_id, now: now(ctx))
         deviations = budget_deviations(purchase, ctx.household.budget_cents)
         status = ProposalStatus.classify([], deviations) |> Atom.to_string()
 
@@ -357,19 +363,26 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
         {%{"error" => "ingredients_required"}, ctx.workspace, :continue}
 
       names ->
-        %{prices: prices, missing: missing} =
-          names |> Enum.take(@max_price_lookups) |> Prices.lookup_names()
+        %{prices: prices, missing: missing, warnings: warnings} =
+          names
+          |> Enum.take(@max_price_lookups)
+          |> Prices.lookup(now: now(ctx), refresh: &scrape(ctx, &1))
 
         result = %{
           "prices" => Enum.map(prices, &Prices.offer_data/1),
           "missing" =>
             Enum.map(missing, fn m ->
               %{"ingredient" => m.ingredient, "reason" => Atom.to_string(m.reason)}
-            end)
+            end),
+          "warnings" => Enum.map(warnings, &Prices.warning_data/1)
         }
 
-        # Missing prices are named, never zero: the lookup is then partial.
-        result = if missing == [], do: result, else: Map.put(result, "outcome", "partial")
+        # Missing prices are named, never zero, and stale or unrefreshed
+        # prices are flagged: the lookup is then partial.
+        result =
+          if missing == [] and warnings == [],
+            do: result,
+            else: Map.put(result, "outcome", "partial")
 
         {result, ctx.workspace, :continue}
     end
@@ -423,7 +436,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       "budget_cents" => budget_cents,
       "purchase_total_cents" => purchase.total_cents,
       "within_budget" => within,
-      "uncertain" => not purchase.complete?
+      "uncertain" => uncertain?(purchase)
     }
   end
 
@@ -432,9 +445,12 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       "budget_cents" => nil,
       "purchase_total_cents" => purchase.total_cents,
       "within_budget" => nil,
-      "uncertain" => not purchase.complete?
+      "uncertain" => uncertain?(purchase)
     }
   end
+
+  # Missing and stale prices both make the Purchase total uncertain.
+  defp uncertain?(purchase), do: not purchase.complete? or Purchase.stale?(purchase)
 
   # ---------------------------------------------------------------------------
   # Optimizer
@@ -551,6 +567,34 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       {:ok, recipes, _} -> {:ok, recipes}
       {:error, :timeout, _} -> {:error, :search_timeout}
       {:error, reason, _} -> {:error, reason}
+    end
+  end
+
+  # A live scraper lookup is a read call: bounded and retried on transient
+  # failure. It is not a model call, so it uses no iteration or spend.
+  defp scrape(ctx, query) do
+    {module, opts} = Map.get(ctx, :price_scraper) || {PriceScraper.Unavailable, []}
+
+    attempt = fn state, call ->
+      opts = Keyword.put(opts, :receive_timeout, call.timeout_ms)
+
+      case module.fetch(query, opts) do
+        {:ok, items} -> {:ok, items, state}
+        {:error, reason} -> {:error, reason, state}
+      end
+    end
+
+    case CallBounds.run(Map.get(ctx, :bounds), :read, nil, attempt) do
+      {:ok, items, _} -> {:ok, items}
+      {:error, :timeout, _} -> {:error, :scraper_timeout}
+      {:error, reason, _} -> {:error, reason}
+    end
+  end
+
+  defp now(ctx) do
+    case Map.get(ctx, :clock) do
+      clock when is_function(clock, 0) -> clock.()
+      _ -> DateTime.utc_now()
     end
   end
 
