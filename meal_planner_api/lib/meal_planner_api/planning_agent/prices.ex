@@ -76,8 +76,8 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   """
   @type refresh_memo :: %{Ecto.UUID.t() => %{at: DateTime.t(), failure: term() | nil}}
   @type warning :: %{
-          ingredient: String.t(),
-          reason: :refresh_failed | :still_stale | :offers_truncated,
+          ingredient: String.t() | nil,
+          reason: :refresh_failed | :still_stale | :offers_truncated | :ingredients_truncated,
           detail: term()
         }
 
@@ -131,7 +131,10 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
       (case-insensitive); with names it only narrows their offers, without
       names it searches every stored Product
 
-  At most `max_ingredients/0` Ingredients are read and refreshed.
+  At most `max_ingredients/0` Ingredients are read and refreshed. A Product
+  search without names applies the brand before that cap, and when more
+  Ingredients match than the cap it adds an `:ingredients_truncated`
+  warning with a `nil` Ingredient.
 
   Other options: `:now` (default: the current time), `:refresh`, a
   function from an Ingredient name to the scraped items (see
@@ -177,13 +180,12 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
 
     # With names, a Product query only narrows their offers; without names,
     # it searches every stored Product.
-    ingredients =
-      if(wanted == [],
-        do: product_ingredients(product),
-        else: Enum.sort_by(Map.values(named), & &1.name)
-      )
-      |> Enum.uniq_by(& &1.id)
-      |> Enum.take(@max_ingredients)
+    {candidates, ingredients_truncated?} =
+      if wanted == [],
+        do: product_ingredients(product, brand),
+        else: {Enum.sort_by(Map.values(named), & &1.name), false}
+
+    ingredients = candidates |> Enum.uniq_by(& &1.id) |> Enum.take(@max_ingredients)
 
     matches? = &(brand_match?(&1, brand) and product_match?(&1, product))
 
@@ -205,7 +207,11 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
     warnings =
       Enum.sort_by(
         warnings ++
-          Enum.map(truncated, &%{ingredient: &1, reason: :offers_truncated, detail: nil}),
+          Enum.map(truncated, &%{ingredient: &1, reason: :offers_truncated, detail: nil}) ++
+          if(ingredients_truncated?,
+            do: [%{ingredient: nil, reason: :ingredients_truncated, detail: nil}],
+            else: []
+          ),
         &{&1.ingredient, &1.reason}
       )
 
@@ -468,21 +474,31 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   defp any_offer?(ingredient_id, now),
     do: Map.has_key?(offers_for([ingredient_id], now), ingredient_id)
 
-  # Ingredients with a stored Product whose name or brand contains the text.
-  defp product_ingredients(nil), do: []
+  # At most `@max_ingredients` Ingredients with a stored Product whose name
+  # or brand contains the text and, when asked, of the brand (as
+  # `brand_match?/2` judges it), and whether more matched than the cap.
+  defp product_ingredients(nil, _brand), do: {[], false}
 
-  defp product_ingredients(product) do
+  defp product_ingredients(product, brand) do
     pattern = "%" <> escape_like(product) <> "%"
 
-    from(p in Product,
-      join: i in assoc(p, :ingredient),
-      where: ilike(p.name, ^pattern) or ilike(p.brand, ^pattern),
-      distinct: true,
-      order_by: [asc: i.name, asc: i.id],
-      limit: ^@max_ingredients,
-      select: %{id: i.id, name: i.name}
-    )
-    |> Repo.all()
+    query =
+      from(p in Product,
+        join: i in assoc(p, :ingredient),
+        where: ilike(p.name, ^pattern) or ilike(p.brand, ^pattern),
+        distinct: true,
+        order_by: [asc: i.name, asc: i.id],
+        limit: ^(@max_ingredients + 1),
+        select: %{id: i.id, name: i.name}
+      )
+
+    query =
+      if brand,
+        do: where(query, [p], fragment("lower(?)", p.brand) == ^String.downcase(brand)),
+        else: query
+
+    ingredients = Repo.all(query)
+    {Enum.take(ingredients, @max_ingredients), length(ingredients) > @max_ingredients}
   end
 
   defp escape_like(text), do: String.replace(text, ~r/[\\%_]/, "\\\\\\0")

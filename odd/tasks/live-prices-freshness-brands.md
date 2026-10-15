@@ -301,6 +301,23 @@ review rounds) is split into three more slices:
     precommit run had one failure that did not reproduce on two reruns;
     it was logged next to a "session lost its lock" warning, outside this
     change).
+- S4 review round 2 (Jorge el Curioso on PR #136), route: inline, one
+  confirmed medium-severity finding in `Prices.lookup/2`:
+  - A Product search without names took the first 50 Ingredients by name
+    before the brand filter, and silently: with more than 50 matching
+    Ingredients, a branded one sorted past the 50th was never looked up
+    (`no_matching_product` for a Product that exists) and up to 50
+    Ingredients of other brands were scraped. RED: `PricesTest` "with a
+    brand finds the branded Ingredient past the lookup cap" (56 matching
+    Ingredients, the brand only on the last) returned no prices, and the
+    60-Ingredient search had no `:ingredients_truncated` warning. GREEN:
+    the search applies the brand (case-insensitive, as `brand_match?/2`)
+    in SQL before the cap, fetches cap + 1 rows, and adds
+    `%{ingredient: nil, reason: :ingredients_truncated}` when more matched;
+    exactly 50 matching Ingredients add no warning.
+  - Focused `PricesTest` 19 passed.
+    `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1308 passed,
+    25 skipped; `mix precommit` 1308 passed, 25 skipped.
 
 ## Next step
 

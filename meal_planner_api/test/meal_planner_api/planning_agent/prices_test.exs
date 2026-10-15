@@ -76,7 +76,60 @@ defmodule MealPlannerApi.PlanningAgent.PricesTest do
 
       assert refreshed == Prices.max_ingredients()
       assert length(result.prices) <= Prices.max_offers()
-      assert length(result.warnings) == Prices.max_ingredients()
+
+      assert Enum.count(result.warnings, &(&1.reason == :refresh_failed)) ==
+               Prices.max_ingredients()
+
+      assert %{ingredient: nil, reason: :ingredients_truncated, detail: nil} in result.warnings
+    end
+
+    test "does not report truncation when the matching Ingredients fit the cap" do
+      search = "fitting search #{System.unique_integer([:positive])}"
+
+      for n <- 1..Prices.max_ingredients() do
+        ingredient = ingredient!("Fictitious fitting #{n}")
+        product!(ingredient, name: "#{search} #{n}", observed_at: hours_ago(2))
+      end
+
+      result = Prices.lookup([], product: search, now: @now, refresh: fn _ -> {:ok, []} end)
+
+      refute Enum.any?(result.warnings, &(&1.reason == :ingredients_truncated))
+    end
+
+    test "with a brand finds the branded Ingredient past the lookup cap" do
+      search = "branded search #{System.unique_integer([:positive])}"
+      brand = "Fictitious Hacendado #{System.unique_integer([:positive])}"
+
+      for n <- 1..(Prices.max_ingredients() + 5) do
+        ingredient = ingredient!("Fictitious branded a#{n}")
+        product!(ingredient, name: "#{search} #{n}", observed_at: hours_ago(2))
+      end
+
+      last = ingredient!("Fictitious branded z#{System.unique_integer([:positive])}")
+      product!(last, name: "#{search} last", brand: brand, observed_at: hours_ago(2))
+
+      test_pid = self()
+
+      refresh = fn name ->
+        send(test_pid, {:refreshed, name})
+        {:ok, []}
+      end
+
+      result =
+        Prices.lookup([],
+          product: search,
+          brand: String.upcase(brand),
+          now: @now,
+          refresh: refresh
+        )
+
+      {:messages, messages} = Process.info(self(), :messages)
+
+      assert [%{ingredient: name, brand: ^brand}] = result.prices
+      assert name == last.name
+      assert result.missing == []
+      refute Enum.any?(messages, &match?({:refreshed, _}, &1))
+      refute Enum.any?(result.warnings, &(&1.reason == :ingredients_truncated))
     end
 
     test "with names narrows the named Ingredients instead of adding others" do
