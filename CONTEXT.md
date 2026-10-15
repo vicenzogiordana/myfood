@@ -86,6 +86,10 @@ _Avoid_: Pause, abort
 Ending a Planning Session without confirming: its Workspace is discarded and the Household can start a new Planning Session.
 _Avoid_: Stop, leave, close
 
+**Absence Grace**:
+The 15 minutes a Planning Session, its Workspace, its last Proposal and the Household's slot are kept after its Member leaves or disconnects, also across a server restart. Nothing runs or is saved while the Member is absent; only that Member, still active in the Household, can return. When it expires the Workspace is discarded and the slot released. A restart never resets it.
+_Avoid_: Timeout, idle period
+
 **Spend Cap**:
 The most a Planning Session may spend on the paid AI provider, in money and in cumulative tokens, across all of its turns. Stop and new messages never reset it. Separate from the Household's grocery budget.
 _Avoid_: Budget, execution cap

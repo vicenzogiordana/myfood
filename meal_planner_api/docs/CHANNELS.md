@@ -201,18 +201,30 @@ membership, never from a payload.
 One Planning Session per Household: while one is active, any other Member's
 `start_session` is refused with `session_already_active` (also when its range overlaps
 the active one; `overlapping_range` is only the store's last-resort guard). The session ends when it is
-cancelled or when its Member's socket leaves (grace and recovery come later).
+cancelled, confirmed, or when its absence grace expires.
+
+**Absence grace and recovery (issue #107).** When the Member's socket leaves or
+drops, the session, its Workspace, the last Proposal and the Household's slot are
+kept for 15 minutes. While the Member is absent no new model call starts (a call in
+flight may finish; its run ends with `run_finished` outcome `interrupted`) and nothing
+is saved. Within the grace the Member rejoins with `resume_session`, which replies with
+the authoritative state; after a server restart the same event restores the session
+from recoverable storage (a `session_recovered` event follows). There is no unattended
+restart, a request that was running is never replayed, and neither the grace nor any
+limit resets. A Member no longer active in the Household cannot resume. When the
+grace expires the work is cancelled, the Workspace discarded and the slot released.
 
 #### Incoming Events
 
 | Event | Payload | Reply |
 |-------|---------|-------|
 | `start_session` | `{range_from, range_to, slots?}` — ISO dates, at most 31 days of unplanned days; `slots` from `breakfast`, `lunch`, `snack`, `dinner` (default `lunch`, `dinner`) | `{session_id}` or `{reason}`: `session_already_active`, `range_already_planned`, `overlapping_range`, `invalid_range`, `invalid_slots`, `subscription_required`, `spend_caps_unconfigured`, `pricing_unconfigured`, `provider_unconfigured`, `internal_error` |
+| `resume_session` | `{}` — only the session's Member, within the absence grace (also after a server restart) | `{session_id, proposal}` (the last valid Proposal or `null`) or `{reason}`: `forbidden` (another Member, or no longer an active Member), `no_session` (none, or its grace expired) |
 | `give_consent` | `{}` — explicit consent before the first external AI use | `ok` |
 | `send_message` | `{text}` — a non-blank string of at most 4,000 bytes | `ok`, or `{reason}`: `invalid_message` (missing, non-string or blank `text`), `message_too_long`, `consent_required`, `busy`, `authorization_required` (a limit was reached), `no_active_session`, `internal_error` |
 | `authorize_continuation` | `{}` — only the session's Member, after `limit_reached` | `ok` (the request resumes with that limit extended) or `{reason}`: `forbidden`, `no_limit_reached`, `no_active_session` |
 | `save_recipe` | `{recipe_id}` — only the session's Member, for a `recipe_draft` with `origin: "user_created"` (a dictated recipe) | `{recipe_id, name, origin: "user_created"}` — saved as a user-created Household Recipe — or `{reason}`: `forbidden`, `busy`, `not_found`, `not_dictated` (AI-created Drafts are saved only by confirming a Proposal that uses them), `no_active_session` |
-| `cancel_session` | `{}` — the session's Member or the Household Owner | `{status: "cancelled"}` or `{reason}`: `forbidden`, `no_active_session` |
+| `cancel_session` | `{}` — the session's Member or the Household Owner; also cancels a session waiting for recovery after a restart | `{status: "cancelled"}` or `{reason}`: `forbidden`, `no_active_session` |
 | any other event | — | `{reason}`: `invalid_payload` |
 
 #### Outgoing Events
@@ -232,7 +244,8 @@ Every event is pushed as `agent_event` with `type` and `session_id`:
 | `limit_reached` | `{limit, requires_authorization: true}` — `iterations`, `no_progress` or `time` | Execution stopped: 10 iterations per Planning Session (new messages do not reset them), 3 consecutive attempts without new evidence, or 5 minutes per request. Nothing runs until the Member sends `authorize_continuation` |
 | `agent_unavailable` | `{reason}` | The AI provider cannot be used now: `provider_unavailable` / `provider_timeout` after up to 5 retries, or at once for `provider_unauthorized`, `provider_rejected_request`, `provider_conflict`, `spend_cap_reached`, `token_cap_reached` |
 | `turn_completed` | `{}` | The agent finished answering |
-| `run_finished` | `{outcome}` — `complete`, `partial`, `failure`, `cancelled`, `unknown` | Exactly one per request or authorized continuation; `partial` means stopped by a limit, `unknown` that the run crashed |
+| `run_finished` | `{outcome}` — `complete`, `partial`, `failure`, `cancelled`, `interrupted`, `unknown` | Exactly one per request or authorized continuation; `partial` means stopped by a limit, `interrupted` that the Member left and no new model call started, `unknown` that the run crashed |
+| `session_recovered` | `{interrupted}` | The session was restored after a server restart; `interrupted: true` means a request was running and was not resumed — the Member asks again |
 | `session_cancelled` / `session_ended` | `{}` | The Planning Session is over |
 
 #### Proposal Purchase

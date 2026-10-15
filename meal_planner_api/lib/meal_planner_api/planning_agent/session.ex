@@ -1587,7 +1587,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   rescue
     # Storage being unavailable never stops the session; the next change
     # retries the write.
-    error in [DBConnection.ConnectionError, Postgrex.Error] ->
+    error in [DBConnection.ConnectionError, DBConnection.OwnershipError, Postgrex.Error] ->
       Logger.warning("planning agent snapshot not stored: #{Exception.message(error)}")
       state
   end
