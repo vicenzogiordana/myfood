@@ -86,6 +86,10 @@ _Avoid_: Pause, abort
 Ending a Planning Session without confirming: its Workspace is discarded and the Household can start a new Planning Session.
 _Avoid_: Stop, leave, close
 
+**Spend Cap**:
+The most a Planning Session may spend on the paid AI provider, in money and in cumulative tokens, across all of its turns. Stop and new messages never reset it. Separate from the Household's grocery budget.
+_Avoid_: Budget, execution cap
+
 ### Recipes
 
 **Catalog Recipe**:

@@ -14,11 +14,13 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
   usage is missing or invalid. The reserved state is reported through the
   request's optional `:checkpoint` callback before the call is made.
 
-  The caps bound the whole Planning Session: `init/1` runs once when the
-  session starts and the ledger travels in the model state across every
-  Member message; every attempt of every model call, retries included,
-  draws on the same ledger. The numeric caps are a human decision and are
-  not set by default.
+  The ledger is created once by `init/1`, when the Planning Session starts,
+  and travels in the model state across every turn, so the caps bound the
+  whole Planning Session: Stop and new Member messages never reset them.
+
+  The numeric caps are a human decision and are not set by default. Caps
+  apply per Planning Session: every attempt of every model call, retries
+  included, draws on the same ledger.
 
   Provider failures are typed: `:provider_unauthorized` (401/403),
   `:provider_rejected_request` (other 4xx), `:provider_conflict` (409),

@@ -2,12 +2,10 @@ defmodule MealPlannerApi.PlanningAgent.SpendLedger do
   @moduledoc """
   Paid-service spend and cumulative token accounting for one Planning
   Session (spec #93, user stories 102 and 103). Separate from the grocery
-  budget.
-
-  The caps bound every OpenAI call of the whole Planning Session: the ledger
-  is created when the session starts and is never reset between Member
-  messages, so a second request spends from what the first one left. A new
-  Planning Session starts with a fresh ledger (product decision, 2026-10-15).
+  budget. The caps bound every model call of the Planning Session together:
+  the session keeps one ledger from start to end, so neither Stop nor a new
+  Member message resets it. A new Planning Session starts with a fresh
+  ledger (product decision, 2026-10-15).
 
   Before every paid call the worst-case cost and tokens are reserved; a call
   whose reservation would exceed either cap is refused before it is made.
