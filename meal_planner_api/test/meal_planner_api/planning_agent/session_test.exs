@@ -10,7 +10,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
   import MealPlannerApi.PlanningAgentFixtures
 
   alias MealPlannerApi.Persistence.Planning.PlanningSession
-  alias MealPlannerApi.PlanningAgent.Model.Scripted
+  alias MealPlannerApi.PlanningAgent.Model.{OpenAIResponses, Scripted}
   alias MealPlannerApi.PlanningAgent.Session
   alias MealPlannerApi.Repo
 
@@ -197,6 +197,38 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
       refute_receive {:planning_agent_event, ^session_id, %{"type" => "assistant_message"}}, 700
     end
 
+    test "spend reserved by a turn killed at the deadline stays counted",
+         %{household: h, owner: owner} do
+      consent!(h, owner)
+
+      # The provider never answers, so every turn is killed at the deadline.
+      # One worst-case reservation (~400_000 micro-USD) fits the cap; two do not.
+      model_opts = [
+        api_key: "test-key",
+        spend_cap_micros: 600_000,
+        token_cap: 100_000_000,
+        input_price_micros_per_mtok: 1_000_000,
+        output_price_micros_per_mtok: 4_000_000,
+        max_output_tokens: 100_000,
+        req_options: [plug: fn _conn -> Process.sleep(:infinity) end]
+      ]
+
+      {session_id, pid} =
+        start!(h, owner, [], model: {OpenAIResponses, model_opts}, deadline_ms: 100)
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "time"}},
+                     1_000
+
+      :ok = Session.send_message(pid, "Plan again")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "agent_unavailable", "reason" => "spend_cap_reached"}},
+                     1_000
+    end
+
     test "a provider failure tells the Member planning is not possible now",
          %{household: h, owner: owner} do
       consent!(h, owner)
@@ -238,6 +270,30 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
 
       assert Session.whereis(h.account_id) == pid
       assert :ok = Session.cancel(pid, %{membership_id: owner.membership_id, owner?: true})
+    end
+
+    test "a cancel the store refuses still expires the session and frees the Household",
+         %{household: h, owner: owner} do
+      member = member!(h)
+      other = member!(h)
+      {session_id, pid} = start!(h, member, [])
+      ref = Process.monitor(pid)
+
+      # The stored lock owner no longer matches, so cancel_session refuses.
+      Repo.update_all(from(s in PlanningSession, where: s.id == ^session_id),
+        set: [lock_owner_membership_id: other.membership_id]
+      )
+
+      assert :ok = Session.cancel(pid, %{membership_id: member.membership_id, owner?: false})
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}
+
+      assert %PlanningSession{status: :expired} = Repo.get!(PlanningSession, session_id)
+
+      assert {:ok, _} =
+               Session.start(session_attrs(h, owner, {@monday, @tuesday}),
+                 model: {Scripted, []},
+                 subscriber: self()
+               )
     end
   end
 

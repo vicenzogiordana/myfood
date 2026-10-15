@@ -11,8 +11,13 @@ defmodule MealPlannerApi.PlanningAgent.Model do
       %{
         instructions: String.t(),   # built by code only, never from tool output
         messages: [message()],
-        tools: [tool()]
+        tools: [tool()],
+        checkpoint: (state -> any())  # optional
       }
+
+  A paid adapter calls `checkpoint` with its updated state after reserving
+  spend and before the paid call, so the session keeps the reservation even
+  when it kills the turn mid-call.
 
   ## Messages
 
@@ -33,7 +38,12 @@ defmodule MealPlannerApi.PlanningAgent.Model do
           %{role: :user | :assistant, content: String.t()}
           | %{role: :tool_call, id: String.t(), name: String.t(), arguments: map()}
           | %{role: :tool_result, id: String.t(), name: String.t(), content: map()}
-  @type request :: %{instructions: String.t(), messages: [message()], tools: [tool()]}
+  @type request :: %{
+          required(:instructions) => String.t(),
+          required(:messages) => [message()],
+          required(:tools) => [tool()],
+          optional(:checkpoint) => (term() -> any())
+        }
   @type usage :: %{input_tokens: non_neg_integer(), output_tokens: non_neg_integer()}
   @type response :: %{text: String.t() | nil, tool_calls: [tool_call()], usage: usage()}
 

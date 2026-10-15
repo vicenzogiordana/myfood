@@ -6,18 +6,23 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
   Runs inside a task owned by `MealPlannerApi.PlanningAgent.Session`, which
   enforces the global deadline by killing the task. Progress is reported
   through the `emit` callback; tool output never reaches the instructions.
+
+  The optional `checkpoint` callback receives every model state the turn
+  produces (including the adapter's mid-call reservations), so the owner
+  keeps paid usage even when it kills the turn.
   """
 
   alias MealPlannerApi.PlanningAgent.Tools
 
   @type turn :: %{
-          model: module(),
-          model_state: term(),
-          instructions: String.t(),
-          messages: [map()],
-          tool_context: Tools.context(),
-          max_iterations: pos_integer(),
-          emit: (map() -> any())
+          required(:model) => module(),
+          required(:model_state) => term(),
+          required(:instructions) => String.t(),
+          required(:messages) => [map()],
+          required(:tool_context) => Tools.context(),
+          required(:max_iterations) => pos_integer(),
+          required(:emit) => (map() -> any()),
+          optional(:checkpoint) => (term() -> any())
         }
 
   @type outcome :: :completed | {:limit_reached, String.t()} | {:failed, term()}
@@ -39,13 +44,20 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
   defp iterate(turn, iteration) do
     turn.emit.(%{"type" => "progress", "step" => "thinking"})
 
+    checkpoint = Map.get(turn, :checkpoint, fn _model_state -> :ok end)
+
     request = %{
       instructions: turn.instructions,
       messages: turn.messages,
-      tools: Tools.definitions()
+      tools: Tools.definitions(),
+      checkpoint: checkpoint
     }
 
-    case turn.model.respond(turn.model_state, request) do
+    response = turn.model.respond(turn.model_state, request)
+    {_status, _result, model_state} = response
+    checkpoint.(model_state)
+
+    case response do
       {:ok, %{tool_calls: [_ | _] = calls}, model_state} ->
         turn = %{turn | model_state: model_state}
 

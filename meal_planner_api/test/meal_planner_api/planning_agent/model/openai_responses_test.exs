@@ -181,5 +181,48 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponsesTest do
       assert %{reserved_micros: 0, spent_micros: spent} = OpenAIResponses.spend(state)
       assert spent >= 4_000
     end
+
+    test "a 200 response without usage keeps the reservation as spent" do
+      stub_response(%{
+        "output" => [
+          %{"type" => "message", "content" => [%{"type" => "output_text", "text" => "hi"}]}
+        ]
+      })
+
+      {:ok, state} = OpenAIResponses.init(opts())
+
+      assert {:ok, %{text: "hi"}, state} = OpenAIResponses.respond(state, @request)
+      assert %{reserved_micros: 0, spent_micros: spent} = OpenAIResponses.spend(state)
+      # Worst case output alone is 1_000 tokens at 4 USD/Mtok = 4_000 micro-USD.
+      assert spent >= 4_000
+    end
+
+    test "a 200 response with invalid token counts keeps the reservation as spent" do
+      stub_response(text_response("hi", %{"input_tokens" => "100", "output_tokens" => "50"}))
+      {:ok, state} = OpenAIResponses.init(opts())
+
+      assert {:ok, %{text: "hi"}, state} = OpenAIResponses.respond(state, @request)
+      assert %{reserved_micros: 0, spent_micros: spent} = OpenAIResponses.spend(state)
+      assert spent >= 4_000
+    end
+
+    test "reports the reserved state through the request checkpoint before calling" do
+      test = self()
+
+      Req.Test.stub(@stub, fn conn ->
+        send(test, :provider_called)
+        Req.Test.json(conn, text_response("ok", %{"input_tokens" => 1, "output_tokens" => 1}))
+      end)
+
+      {:ok, state} = OpenAIResponses.init(opts())
+      checkpoint = fn model_state -> send(test, {:checkpoint, model_state}) end
+
+      assert {:ok, _, _} =
+               OpenAIResponses.respond(state, Map.put(@request, :checkpoint, checkpoint))
+
+      assert_received {:checkpoint, reserved}
+      assert OpenAIResponses.spend(reserved).reserved_micros >= 4_000
+      assert_received :provider_called
+    end
   end
 end

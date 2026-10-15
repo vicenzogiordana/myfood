@@ -10,7 +10,9 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
   call the worst-case cost is reserved in a `MealPlannerApi.PlanningAgent.SpendLedger`
   (every request byte counted as one input token, plus `max_output_tokens`)
   and the call is refused when a cap would be exceeded; afterwards the
-  reservation is settled to the reported usage.
+  reservation is settled to the reported usage, or kept as spent when the
+  usage is missing or invalid. The reserved state is reported through the
+  request's optional `:checkpoint` callback before the call is made.
 
   The numeric caps are a human decision and are not set by default.
 
@@ -69,12 +71,20 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
     case SpendLedger.reserve(state.ledger, reservation) do
       {:ok, ledger} ->
         state = %{state | ledger: ledger}
+        # The owner keeps the reserved state, so a turn killed mid-call still
+        # counts the reservation.
+        checkpoint(request, state)
 
         case post(state.config, body) do
           {:ok, response} ->
-            usage = usage(response)
-            ledger = SpendLedger.settle(state.ledger, reservation, cost(state.config, usage))
-            state = %{state | ledger: ledger}
+            {usage, actual} =
+              case usage(response) do
+                {:ok, usage} -> {usage, cost(state.config, usage)}
+                # Usage is unknown: the worst case stays spent.
+                :unknown -> {%{input_tokens: 0, output_tokens: 0}, reservation}
+              end
+
+            state = %{state | ledger: SpendLedger.settle(state.ledger, reservation, actual)}
 
             case parse(response) do
               {:ok, text, tool_calls} ->
@@ -190,14 +200,16 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
 
   defp decode_arguments(_raw), do: %{}
 
-  defp usage(response) do
-    usage = Map.get(response, "usage") || %{}
+  defp usage(%{"usage" => %{"input_tokens" => input, "output_tokens" => output}})
+       when is_integer(input) and input >= 0 and is_integer(output) and output >= 0,
+       do: {:ok, %{input_tokens: input, output_tokens: output}}
 
-    %{
-      input_tokens: non_neg(usage["input_tokens"]),
-      output_tokens: non_neg(usage["output_tokens"])
-    }
-  end
+  defp usage(_response), do: :unknown
+
+  defp checkpoint(%{checkpoint: checkpoint}, state) when is_function(checkpoint, 1),
+    do: checkpoint.(state)
+
+  defp checkpoint(_request, _state), do: :ok
 
   # ---------------------------------------------------------------------------
   # Spend
@@ -236,6 +248,4 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
   end
 
   defp non_neg_integer?(value), do: is_integer(value) and value >= 0
-  defp non_neg(value) when is_integer(value) and value >= 0, do: value
-  defp non_neg(_value), do: 0
 end

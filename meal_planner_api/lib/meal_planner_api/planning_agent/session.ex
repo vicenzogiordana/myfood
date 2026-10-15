@@ -223,13 +223,21 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     if actor == state.membership_id or owner? == true do
       state = stop_turn(state)
 
-      case PlanningRepo.cancel_session(state.account_id, state.session_id, actor, owner?) do
-        {:ok, _} -> :ok
-        {:error, reason} -> Logger.warning("planning agent cancel: #{inspect(reason)}")
-      end
+      # When the store refuses the cancel, session_id is kept so terminate/2
+      # falls back to expire_session and the Household is not left blocked
+      # until the lease lapses.
+      session_id =
+        case PlanningRepo.cancel_session(state.account_id, state.session_id, actor, owner?) do
+          {:ok, _} ->
+            nil
+
+          {:error, reason} ->
+            Logger.warning("planning agent cancel: #{inspect(reason)}")
+            state.session_id
+        end
 
       emit(state, %{"type" => "session_cancelled"})
-      {:stop, :normal, :ok, %{state | session_id: nil}}
+      {:stop, :normal, :ok, %{state | session_id: session_id}}
     else
       {:reply, {:error, :forbidden}, state}
     end
@@ -243,6 +251,13 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   # Events of a killed turn arrive late: they are discarded.
   def handle_info({:agent_event, _stale_ref, _event}, state), do: {:noreply, state}
+
+  # Model state checkpoints carry paid usage (spend ledger), so the session
+  # keeps it even when the turn is later killed or crashes.
+  def handle_info({:model_state, ref, model_state}, %{task: %Task{ref: ref}} = state),
+    do: {:noreply, %{state | model_state: model_state}}
+
+  def handle_info({:model_state, _stale_ref, _model_state}, state), do: {:noreply, state}
 
   def handle_info({ref, result}, %{task: %Task{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
@@ -335,9 +350,13 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       Task.Supervisor.async_nolink(@task_supervisor, fn ->
         ref = receive(do: ({^holder, ref} -> ref))
         emit_fun = fn event -> send(session, {:agent_event, ref, event}) end
+        checkpoint = fn model_state -> send(session, {:model_state, ref, model_state}) end
         tool_context = Map.put(turn.tool_context, :emit, emit_fun)
 
-        Loop.run(%{turn | tool_context: tool_context} |> Map.put(:emit, emit_fun))
+        %{turn | tool_context: tool_context}
+        |> Map.put(:emit, emit_fun)
+        |> Map.put(:checkpoint, checkpoint)
+        |> Loop.run()
       end)
 
     send(task.pid, {holder, task.ref})
@@ -349,7 +368,17 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   defp stop_turn(%{task: task} = state) do
     _ = Task.shutdown(task, :brutal_kill)
-    clear_turn(state)
+    # The task is dead, so every checkpoint it sent is already queued: adopt
+    # the latest one so the killed turn's paid usage stays counted.
+    clear_turn(%{state | model_state: latest_checkpoint(task.ref, state.model_state)})
+  end
+
+  defp latest_checkpoint(ref, model_state) do
+    receive do
+      {:model_state, ^ref, newer} -> latest_checkpoint(ref, newer)
+    after
+      0 -> model_state
+    end
   end
 
   defp clear_turn(state) do

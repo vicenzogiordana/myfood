@@ -71,6 +71,7 @@ with its tests at once; commits stay reviewable work units).
 | T3 | Port optimizer adapter over the port runner (no fallback), port-boundary tests with a fake script | inline | done (`23542aa, 086808b`) |
 | T4 | OpenAI Responses adapter + spend ledger | inline | done (`49a307b`) |
 | T5 | Phoenix channel adapter, config, docs | inline | done (`f35cb9b`) |
+| R1 | Jorge round 1 (PR #114): ledger survives killed turns, unknown usage settles at the reservation, refused cancel still expires | inline | done (see Review round 1) |
 
 ## Checks
 
@@ -92,6 +93,25 @@ with its tests at once; commits stay reviewable work units).
 - Full suite (`MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test_96 mix precommit`):
   exit 0, 971 passed, 20 skipped. Remaining compiler warnings are pre-existing in unrelated test files.
 
+## Review round 1 (Jorge el Curioso, PR #114)
+
+Confirmed findings and fixes (each RED first, then GREEN):
+
+1. Spend ledger lost when a turn is killed or crashes (medium). The model request now
+   carries an optional `checkpoint` callback; the OpenAI adapter reports its reserved state
+   before the paid call, the loop reports every returned model state, and the Session adopts
+   checkpoints (draining queued ones after `Task.shutdown/2`). RED: `session_test.exs`
+   "spend reserved by a turn killed at the deadline stays counted" got `limit_reached` twice
+   instead of `spend_cap_reached`; `openai_responses_test.exs` checkpoint test got no message.
+2. A 200 response with missing or invalid usage settled at zero (low). Unknown usage now keeps
+   the reservation as spent, like the error branch. RED: spent 0 vs >= 4_000 for both the
+   no-usage and string-token cases.
+3. A refused `cancel_session` cleared `session_id`, so `terminate/2` skipped
+   `expire_session` (low). The id is now kept on error. RED: row stayed `:active`.
+
+Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix test`
+976 passed, 20 skipped; `mix precommit` exit 0, 976 passed, 20 skipped.
+
 ## Known limits handed to later slices of #93
 
 - Purchase calculation and budget deviations (`requires_approval`), Nutrition Goal in the
@@ -103,4 +123,4 @@ with its tests at once; commits stay reviewable work units).
 
 ## Next step
 
-Open the PR (Closes #96, Part of #93) and hand it to the Jorge review gate.
+Re-run the Jorge review gate on PR #114 after review round 1.
