@@ -191,6 +191,17 @@ PR #126 was split into four chained PRs to main (strategy
   - Focused `PricesTest` 12 passed.
     `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1279 passed,
     25 skipped; `mix precommit` 1279 passed, 25 skipped.
+- S2 review round 2 (Jorge el Curioso on PR #133), route: inline, one
+  confirmed low-severity finding in `Prices`:
+  - `product!/3` overwrote a stored `Product.brand` with `nil` when a later
+    scrape omitted the brand, losing input for slice-3 Brand Preferences.
+    RED: recording an item with brand "Acme" and then the same key with
+    brand `nil` left the stored brand `nil`. GREEN: `product!/3` keeps the
+    stored brand when the scraped brand is `nil`; a different non-nil brand
+    still replaces it ("Globex").
+  - Focused `PricesTest` 13 passed. `MYFOOD_TEST_DATABASE=meal_planner_api_test101
+    mix precommit` (compile with warnings as errors, format, full suite)
+    1280 passed, 25 skipped.
 
 ## Next step
 

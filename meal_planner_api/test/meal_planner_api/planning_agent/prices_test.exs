@@ -171,6 +171,21 @@ defmodule MealPlannerApi.PlanningAgent.PricesTest do
       assert Repo.aggregate(where(Product, ingredient_id: ^ingredient.id), :count) == 1
     end
 
+    test "keeps the stored brand when a later scrape omits it, and updates a new one" do
+      ingredient = ingredient!("Fictitious brand record")
+      item = FakeScraper.item(product: "Fictitious branded product", brand: "Acme")
+      brand = fn -> Repo.get_by!(Product, ingredient_id: ingredient.id).brand end
+
+      assert :ok = Prices.record(ingredient.id, [item], @now)
+      assert brand.() == "Acme"
+
+      assert :ok = Prices.record(ingredient.id, [%{item | brand: nil}], @now)
+      assert brand.() == "Acme"
+
+      assert :ok = Prices.record(ingredient.id, [%{item | brand: "Globex"}], @now)
+      assert brand.() == "Globex"
+    end
+
     test "rejects an observation dated after now, recording nothing" do
       ingredient = ingredient!("Fictitious future record")
       good = FakeScraper.item(product: "Fictitious present product", observed_at: @now)

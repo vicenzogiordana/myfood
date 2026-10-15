@@ -488,8 +488,10 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
           product
       end
 
+    # A scrape without a brand keeps the stored one; only a different
+    # known brand replaces it.
     case product do
-      %Product{brand: brand} = product when brand == item.brand ->
+      %Product{brand: brand} = product when is_nil(item.brand) or brand == item.brand ->
         product
 
       product ->
