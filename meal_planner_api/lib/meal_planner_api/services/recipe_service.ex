@@ -35,6 +35,7 @@ defmodule MealPlannerApi.Services.RecipeService do
 
       {:ok,
        Map.merge(detail, %{
+         origin: recipe_origin(detail.source),
          version: version.number,
          recipe_version_id: version.id,
          successor_recipe_id: recipe.superseded_by_id
@@ -148,9 +149,13 @@ defmodule MealPlannerApi.Services.RecipeService do
       prep_time_minutes: r.prep_time_minutes,
       cook_time_minutes: r.cook_time_minutes,
       calories_per_serving: r.calories_per_serving,
+      origin: recipe_origin(r.source),
       suitable_for_slots: Enum.map(r.suitable_for_slots || [], &to_string/1)
     }
   end
+
+  # Recipe Origin is shown wherever recipes are.
+  defp recipe_origin(source), do: MealPlannerApi.Planning.RecipeOrigin.label(source)
 
   defp serialize_ingredient(i) do
     %{

@@ -18,6 +18,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     * `confirm/3` — the session Member's confirmation of the exact displayed
       Proposal: saves its Planned Meals and appends its Purchase to the
       Shopping List (see "Confirmation").
+    * `save_recipe/3` — the session Member's explicit save of a dictated
+      Recipe Draft as a user-created Household Recipe (see "Recipe Drafts")
     * `confirmation_status/2` — the status of a confirmation, queryable after
       the Planning Session ended.
     * `whereis/1` — the active session process of a Household, if any.
@@ -26,7 +28,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   Subscribers receive `{:planning_agent_event, session_id, event}` where
   `event["type"]` is one of `progress`, `assistant_message`, `question`,
-  `proposal`, `recipe_draft`, `optimizer_failed`, `consent_required`, `limit_reached`,
+  `proposal`, `recipe_draft`, `recipe_saved`, `optimizer_failed`, `consent_required`, `limit_reached`,
   `agent_unavailable`, `turn_completed`, `run_finished`, `session_cancelled`,
   `session_ended`, `proposal_confirmed`, `proposal_invalidated`,
   `confirmation_unresolved`.
@@ -67,6 +69,15 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   Planning Session then ends as committed and releases the Household's slot.
   A replay of the same confirmation returns the original result, even after
   the session ended, and never saves twice.
+
+  ## Recipe Drafts
+
+  `create_recipe` keeps Recipe Drafts in the Workspace only
+  (`MealPlannerApi.PlanningAgent.RecipeDraft`); a session that ends
+  unconfirmed discards them. Confirming a Proposal saves the AI-created
+  Drafts it uses as private AI-created Household Recipes. A dictated
+  (user-created) Draft is never planned or saved by the agent: only
+  `save_recipe/3` saves it, as a user-created Household Recipe.
   """
 
   use GenServer, restart: :temporary
@@ -82,8 +93,12 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     HouseholdContext,
     Loop,
     Proposal,
-    ProposalValidator
+    ProposalValidator,
+    RecipeDraft
   }
+
+  alias MealPlannerApi.Planning.RecipeOrigin
+  alias MealPlannerApi.Repo
 
   @registry MealPlannerApi.PlanningAgent.Registry
   @supervisor MealPlannerApi.PlanningAgent.SessionSupervisor
@@ -270,6 +285,20 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   end
 
   @doc """
+  The session Member's explicit save of the dictated Recipe Draft
+  `recipe_id`: it becomes a user-created Household Recipe with the same id
+  and leaves the Workspace. Refuses with `:forbidden` for anyone else,
+  `:busy` while the agent is working, `:not_found` when no such Draft is in
+  the Workspace, and `:not_dictated` for an AI-created Draft, which only a
+  confirmation saves.
+  """
+  @spec save_recipe(GenServer.server(), Ecto.UUID.t(), String.t()) ::
+          {:ok, %{recipe_id: Ecto.UUID.t(), name: String.t(), origin: String.t()}}
+          | {:error, :forbidden | :busy | :not_found | :not_dictated | :invalid_recipe}
+  def save_recipe(session, membership_id, recipe_id),
+    do: GenServer.call(session, {:save_recipe, membership_id, recipe_id})
+
+  @doc """
   The status of the confirmation `proposal_id` in the Household:
   `{:confirmed, summary}`, `:not_found`, or `:unknown` while it cannot be read.
   """
@@ -438,6 +467,26 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
       _not_confirmed ->
         confirm_current(state, proposal_id)
+    end
+  end
+
+  def handle_call({:save_recipe, membership_id, _recipe_id}, _from, state)
+      when membership_id != state.membership_id,
+      do: {:reply, {:error, :forbidden}, state}
+
+  def handle_call({:save_recipe, _membership_id, _recipe_id}, _from, %{task: %Task{}} = state),
+    do: {:reply, {:error, :busy}, state}
+
+  def handle_call({:save_recipe, _membership_id, recipe_id}, _from, state) do
+    case Map.fetch(state.workspace.recipe_drafts, recipe_id) do
+      :error ->
+        {:reply, {:error, :not_found}, state}
+
+      {:ok, %{source: :user_created} = draft} ->
+        save_dictated(state, draft)
+
+      {:ok, _ai_created} ->
+        {:reply, {:error, :not_dictated}, state}
     end
   end
 
@@ -711,6 +760,36 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     {:stop, :normal, {:ok, summary}, %{state | session_id: nil}}
   end
 
+  defp save_dictated(state, draft) do
+    Repo.transaction(fn ->
+      case RecipeDraft.persist(Repo, draft, state.account_id, state.user_id) do
+        {:ok, recipe} -> recipe
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+    |> case do
+      {:ok, recipe} ->
+        saved = %{
+          recipe_id: recipe.id,
+          name: recipe.name,
+          origin: RecipeOrigin.label(recipe.source)
+        }
+
+        emit(state, %{
+          "type" => "recipe_saved",
+          "recipe_id" => saved.recipe_id,
+          "name" => saved.name,
+          "origin" => saved.origin
+        })
+
+        state = update_in(state.workspace.recipe_drafts, &Map.delete(&1, draft.id))
+        {:reply, {:ok, saved}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
   # ===========================================================================
   # Turn management
   # ===========================================================================
@@ -885,6 +964,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     "run_finished" => ~w(outcome),
     "session_cancelled" => [],
     "session_ended" => [],
+    "recipe_saved" => ~w(recipe_id name origin),
     "proposal_confirmed" => ~w(proposal_id meals_count shopping_lines_count),
     "proposal_invalidated" => ~w(proposal_id reason violations),
     "confirmation_unresolved" => ~w(proposal_id)

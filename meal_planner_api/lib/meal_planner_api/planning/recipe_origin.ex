@@ -7,9 +7,20 @@ defmodule MealPlannerApi.Planning.RecipeOrigin do
 
   @labels %{traditional: "traditional", ai_generated: "ai_created", user_created: "user_created"}
 
-  @doc "The Recipe Origin label of a stored recipe `source`."
-  @spec label(:traditional | :ai_generated | :user_created | nil) :: String.t()
+  @doc """
+  The Recipe Origin label of a stored recipe `source`, as an atom or as the
+  string a recipe snapshot keeps.
+  """
+  @spec label(atom() | String.t() | nil) :: String.t()
   def label(source) when is_map_key(@labels, source), do: Map.fetch!(@labels, source)
+
+  def label(source) when is_binary(source) do
+    case Enum.find(@labels, fn {stored, _} -> Atom.to_string(stored) == source end) do
+      {_, label} -> label
+      nil -> "traditional"
+    end
+  end
+
   # A recipe without a recorded source predates Recipe Origin: the catalog.
   def label(nil), do: "traditional"
 

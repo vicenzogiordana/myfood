@@ -211,6 +211,7 @@ cancelled or when its Member's socket leaves (grace and recovery come later).
 | `give_consent` | `{}` — explicit consent before the first external AI use | `ok` |
 | `send_message` | `{text}` — a non-blank string of at most 4,000 bytes | `ok`, or `{reason}`: `invalid_message` (missing, non-string or blank `text`), `message_too_long`, `consent_required`, `busy`, `authorization_required` (a limit was reached), `no_active_session`, `internal_error` |
 | `authorize_continuation` | `{}` — only the session's Member, after `limit_reached` | `ok` (the request resumes with that limit extended) or `{reason}`: `forbidden`, `no_limit_reached`, `no_active_session` |
+| `save_recipe` | `{recipe_id}` — only the session's Member, for a `recipe_draft` with `origin: "user_created"` (a dictated recipe) | `{recipe_id, name, origin: "user_created"}` — saved as a user-created Household Recipe — or `{reason}`: `forbidden`, `busy`, `not_found`, `not_dictated` (AI-created Drafts are saved only by confirming a Proposal that uses them), `no_active_session` |
 | `cancel_session` | `{}` — the session's Member or the Household Owner | `{status: "cancelled"}` or `{reason}`: `forbidden`, `no_active_session` |
 | any other event | — | `{reason}`: `invalid_payload` |
 
@@ -225,6 +226,7 @@ Every event is pushed as `agent_event` with `type` and `session_id`:
 | `question` | `{text}` | The agent asks one question; the turn ended |
 | `proposal` | `{proposal_id, status, meals: [{date, slot, recipe_id, name, origin, draft}], purchase, consumed_cost, budget, deviations}` | A Proposal validated by code; `status` is code-owned (`valid` or `requires_approval`). Every meal shows its Recipe Origin (`traditional`, `ai_created`, `user_created`); `draft: true` marks an unsaved AI-created Recipe Draft, saved as a private Household Recipe only if this Proposal is confirmed. See "Proposal Purchase" below |
 | `recipe_draft` | `{recipe_id, name, origin, draft: true, servings, slots, ingredients: [{ingredient, quantity_milli, unit}], steps, nutrition, cost}` | The agent built a Recipe Draft from catalog Ingredients. `origin` is `ai_created` (disclose as AI-made, possibly imperfect) or `user_created` (a dictated recipe). See "Recipe Drafts" below |
+| `recipe_saved` | `{recipe_id, name, origin}` | The Member saved a dictated recipe as a Household Recipe |
 | `optimizer_failed` | `{reason}` | The optimizer failed; no fallback plan is produced |
 | `consent_required` | `{}` | Consent must be given before the agent can call the AI provider |
 | `limit_reached` | `{limit, requires_authorization: true}` — `iterations`, `no_progress` or `time` | Execution stopped: 10 iterations per Planning Session (new messages do not reset them), 3 consecutive attempts without new evidence, or 5 minutes per request. Nothing runs until the Member sends `authorize_continuation` |
