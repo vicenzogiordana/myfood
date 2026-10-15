@@ -80,6 +80,23 @@ Out of scope: #108 execution bounds hardening, #109 battery.
 - Full suite: `MYFOOD_TEST_DATABASE=meal_planner_api_test107 mix test` →
   1199 passed, 25 skipped. `mix precommit` → passed.
 
+## Review round 1 (Jorge el Curioso, PR #129)
+
+- [x] R1 `ad53c72` — `rejoin` let crash/timeout exits escape instead of
+  falling back to recovery (CD-1 + TR-1, low). Route: inline (one function
+  plus its tests). Fix: any exit other than a timeout maps to `:no_session`
+  (recovery runs); `{:timeout, _}` maps to `:session_busy` and never recovers
+  a live session. The answer timeout is `opts[:rejoin_timeout]` (default 5 s,
+  as before). The channel replies `session_busy` through its generic atom
+  mapping.
+  - RED: 2 new `session_recovery_test` cases failed (the killed call exited
+    the caller; the suspended session exited with `time out`).
+  - GREEN: recovery + channel suites 30 passed (incl. new channel
+    `session_busy` case).
+  - Full: `mix precommit` (with `MYFOOD_TEST_DATABASE=meal_planner_api_test107`)
+    → 1202 passed, 25 skipped. A first run had 1 failure that passed on
+    `mix test --failed` and on a full rerun (flaky, not identified).
+
 ## Decisions
 
 - The grace deadline is the `planning_sessions.lease_expires_at`: while the
