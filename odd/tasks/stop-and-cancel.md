@@ -84,6 +84,22 @@ Note: `config/test.exs` does not append `MIX_TEST_PARTITION` to the database nam
 - Checks: planning agent + channel suites 83/83 passed 5 runs in a row; `mix precommit`
   exit 0, 1034 passed, 25 skipped (warnings are pre-existing in unrelated test files).
 
+## Review round 1 (Jorge el Curioso, PR #121)
+
+- Finding (low, confirmed): `stop_turn/1` dropped the `Task.shutdown/2` return value, so a
+  Stop, Cancel or time deadline that raced a turn whose reply was already in the session
+  mailbox lost the final assistant/tool messages and the settled model state.
+- Fix — commit `53f277c` (`fix(planning-agent): keep a finished turn's result when Stop races
+  its reply`): `stop_turn/1` adopts `{:ok, result}` from `Task.shutdown/2` (messages, model
+  state, Workspace) after the checkpoints, through `adopt_finished_turn/2`. No
+  `turn_completed` event is emitted; Stop/Cancel semantics and reply shapes are unchanged.
+- RED: new test "a Stop racing a turn that already replied keeps that turn's messages and
+  model state" (suspends the session, queues the Stop ahead of the turn reply) failed with
+  last message `%{role: :user, content: "Plan"}`. GREEN: 8/8 in
+  `session_stop_cancel_test.exs`, 5 runs in a row; RED re-confirmed with the fix stashed.
+- Checks: `MIX_TEST_PARTITION=106 MYFOOD_TEST_DATABASE=meal_planner_api_test106 mix
+  precommit` exit 0, 1035 passed, 25 skipped.
+
 ## Next step
 
-Open the PR (Closes #106, Part of #93); review by the pipeline gate.
+Re-review by the pipeline gate.
