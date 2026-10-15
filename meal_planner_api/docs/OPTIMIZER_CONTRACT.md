@@ -19,7 +19,7 @@ contract between the planning code and the solver (spec #93, issues #97 and #98)
 
 | Field | Meaning |
 |---|---|
-| `days`, `slots` | The Planning Range: every day × slot gets exactly one meal. Days are ISO dates (`YYYY-MM-DD`) |
+| `days`, `slots` | The Planning Range: every day × slot gets exactly one meal. Days are a non-empty list of ISO dates (`YYYY-MM-DD`); `PlanningService` turns weekday names into the dates of the upcoming range before sending them |
 | `candidates_by_slot` | `{slot: [candidate]}`; candidates carry `recipe_id`, `estimated_cost_cents`, per-serving `calories_per_serving`, `protein_g_per_serving`, `carbs_g_per_serving`, `fat_g_per_serving`, `inventory_hit_count`, and `violates_restriction: true` when code found the recipe unsafe for a Member |
 | `constraints.weekly_budget_cents` | Budget for the whole range |
 | `constraints.macro_bounds` | Optional daily `{min, max}` for `calories`, `protein_g`, `carbs_g`, `fat_g`; built from the Household Nutrition Goal by `MealPlannerApi.Optimization.Contract.nutrition_bounds/1` |

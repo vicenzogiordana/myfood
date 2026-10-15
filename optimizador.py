@@ -13,7 +13,8 @@ Protocol (JSON lines over stdio):
      → {"type":"error","id":"<uuid>","error":"<reason>","details":{...}}
 
 Payload:
-  days                         the Planning Range as ISO dates (YYYY-MM-DD)
+  days                         the Planning Range as a non-empty list of ISO
+                               dates (YYYY-MM-DD)
   slots                        list of non-empty strings
   candidates_by_slot           {slot: [candidate, ...]}; a candidate carries
                                recipe_id, estimated_cost_cents, per-serving
@@ -163,7 +164,7 @@ def _validate_payload(payload):
     constraints = payload.get("constraints")
     candidates_by_slot = payload.get("candidates_by_slot")
 
-    if not isinstance(days, list) or not all(_is_iso_day(day) for day in days):
+    if not isinstance(days, list) or not days or not all(_is_iso_day(day) for day in days):
         return "invalid_days"
 
     if not isinstance(slots, list) or not all(isinstance(slot, str) and slot for slot in slots):

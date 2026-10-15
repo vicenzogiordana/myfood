@@ -58,6 +58,7 @@ cap (#99).
 |----|------|-------|--------|
 | T1 | Python variety rules + port-contract tests | inline (bounded worker; single writer) | done |
 | T2 | Elixir `Variety` context/builder + `Contract` variety cause + docs, test-first | inline (bounded worker; single writer) | done |
+| R1 | Review round 1 (Jorge): weekly path sends weekday names; empty `days` crashes | inline (bounded worker; single writer) | done |
 
 ## Checks
 
@@ -79,6 +80,25 @@ cap (#99).
   full runs passed 953/953, so those 3 were intermittent and not reproduced.
 - Note: `config/test.exs` does not append `MIX_TEST_PARTITION` to the DB name; isolation
   comes from `MYFOOD_TEST_DATABASE=meal_planner_api_test98`.
+
+## Review round 1 (Jorge el Curioso)
+
+Finding (high): strict ISO `days` validation broke the live `PlanningService` weekly path,
+which sent weekday names (`@default_days`) to `OptimizerServer`; `days: []` also raised
+`IndexError` at `range_dates[0]` in `_add_variety_rules`.
+
+Fix (option a): `PlanningService.build_optimization_payload/4` turns weekday names into the
+ISO dates of the upcoming range (first day = next occurrence after today, each following day
+= next occurrence after the previous one; order kept, other entries unchanged), and
+`run_optimizer/4` maps the returned meal days back to the weekday names, so callers keep
+their shape. `_validate_payload` rejects empty `days` with `invalid_days`.
+
+- [x] R1 — RED: Python `test_days_must_not_be_empty` crashed the port (exit 1); ExUnit
+  `the default weekly payload passes the real optimizer validation` returned `"invalid_days"`,
+  plus 3 tests calling the new `/4` arity undefined. GREEN: Python 45/45 OK;
+  `planning_service_test.exs` 18/18; full `mix test` 956 passed, 20 skipped;
+  `mix precommit` exit 0 (956 passed, 20 skipped). Commit: the `fix(planning)` commit after
+  T2 on this branch.
 
 ## Integration note
 

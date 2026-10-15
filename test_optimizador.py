@@ -531,6 +531,14 @@ class VarietyValidationTests(unittest.TestCase):
 
         self.assertEqual(frame, {"type": "error", "id": "req-1", "error": "invalid_days"})
 
+    def test_days_must_not_be_empty(self):
+        problem = payload([recipe("a")])
+        problem["days"] = []
+
+        frame = solve_over_port(problem)
+
+        self.assertEqual(frame, {"type": "error", "id": "req-1", "error": "invalid_days"})
+
     def test_variety_cap_must_be_a_positive_integer(self):
         for cap in [0, -1, 1.5, "2", True]:
             problem = payload([recipe("a")])

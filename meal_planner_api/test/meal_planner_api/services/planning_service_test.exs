@@ -2,7 +2,10 @@ defmodule MealPlannerApi.Services.PlanningServiceTest do
   use ExUnit.Case, async: true
 
   alias MealPlannerApi.Services.PlanningService
-  alias MealPlannerApi.Optimization.OptimizerPort
+  alias MealPlannerApi.Optimization.{OptimizerPort, OptimizerPortRunner}
+
+  @python System.get_env("OPTIMIZER_PYTHON")
+  @weekdays ~w(monday tuesday wednesday thursday friday)
 
   describe "generate_weekly_plan/3" do
     test "accepts user map, params map, and optimizer module" do
@@ -32,7 +35,12 @@ defmodule MealPlannerApi.Services.PlanningServiceTest do
         "dinner" => []
       }
 
-      assert {:ok, %{"meals" => [%{"recipe_id" => "existing-breakfast", "slot" => "breakfast"}]}} =
+      assert {:ok,
+              %{
+                "meals" => [
+                  %{"recipe_id" => "existing-breakfast", "slot" => "breakfast", "day" => "monday"}
+                ]
+              }} =
                PlanningService.run_optimizer(
                  MealPlannerApi.Optimization.OptimizerMock,
                  ["monday"],
@@ -52,13 +60,51 @@ defmodule MealPlannerApi.Services.PlanningServiceTest do
         subscription_tier: "free"
       }
 
-      payload = PlanningService.build_optimization_payload(days, candidates, user)
+      payload = PlanningService.build_optimization_payload(days, candidates, user, ~D[2026-10-15])
 
-      assert payload["days"] == days
+      assert payload["days"] == ["2026-10-19", "2026-10-20"]
       assert payload["slots"] == ["breakfast", "lunch", "dinner"]
       assert payload["constraints"]["kcal_target"] == 2100
       assert payload["constraints"]["weekly_budget_cents"] == 50000
       assert payload["constraints"]["account_type"] == "individual"
+    end
+
+    test "sends the selected weekdays as the ISO dates of the upcoming range" do
+      # 2026-10-15 is a Thursday: the range starts on the next Monday.
+      payload = PlanningService.build_optimization_payload(@weekdays, %{}, %{}, ~D[2026-10-15])
+
+      assert payload["days"] == [
+               "2026-10-19",
+               "2026-10-20",
+               "2026-10-21",
+               "2026-10-22",
+               "2026-10-23"
+             ]
+    end
+
+    test "keeps the weekday order when the range wraps past Sunday" do
+      payload =
+        PlanningService.build_optimization_payload(
+          ~w(saturday sunday monday),
+          %{},
+          %{},
+          ~D[2026-10-15]
+        )
+
+      assert payload["days"] == ["2026-10-17", "2026-10-18", "2026-10-19"]
+    end
+
+    if is_nil(@python) do
+      @tag skip: "set OPTIMIZER_PYTHON to an interpreter with OR-Tools installed"
+    end
+
+    test "the default weekly payload passes the real optimizer validation" do
+      candidate = %{"recipe_id" => "r-1", "estimated_cost_cents" => 500}
+      candidates = Map.new(~w(breakfast lunch dinner), &{&1, [candidate]})
+
+      payload = PlanningService.build_optimization_payload(@weekdays, candidates, %{})
+
+      assert optimizer_validation_error(payload) == nil
     end
 
     test "uses defaults when user lacks kcal_target" do
@@ -144,5 +190,18 @@ defmodule MealPlannerApi.Services.PlanningServiceTest do
     test "accepts session_id and content" do
       assert is_function(&PlanningService.add_chat_message/2)
     end
+  end
+
+  defp optimizer_validation_error(payload) do
+    script = """
+    import json, sys
+    sys.path.insert(0, sys.argv[1])
+    import optimizador
+    print(json.dumps(optimizador._validate_payload(json.loads(sys.argv[2]))))
+    """
+
+    root = Path.dirname(OptimizerPortRunner.default_script_path())
+    {out, 0} = System.cmd(@python, ["-c", script, root, Jason.encode!(payload)])
+    Jason.decode!(out)
   end
 end
