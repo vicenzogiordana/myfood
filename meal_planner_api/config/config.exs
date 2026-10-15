@@ -32,7 +32,9 @@ config :meal_planner_api,
 # config/runtime.exs); the numeric caps are a human decision.
 config :meal_planner_api, :planning_agent,
   model: {MealPlannerApi.PlanningAgent.Model.OpenAIResponses, []},
-  optimizer: {MealPlannerApi.PlanningAgent.Optimizer.Port, []}
+  optimizer: {MealPlannerApi.PlanningAgent.Optimizer.Port, []},
+  # Live price lookups over HTTP (base URL: the :go_scraper_url env).
+  price_scraper: {MealPlannerApi.PlanningAgent.PriceScraper.Http, []}
 
 config :meal_planner_api,
   social_verifier: MealPlannerApi.Auth.SocialVerifier,

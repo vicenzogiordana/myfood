@@ -1,7 +1,8 @@
 defmodule MealPlannerApi.PlanningAgent.Tools do
   @moduledoc """
   Agent-callable tool catalog of the planning agent (spec #93). No tool writes
-  persistent data.
+  household data; `lookup_prices` records the Price Observations a live
+  lookup returns.
 
     * `search_recipes` — structured search; Restriction-violating recipes are
       excluded by code
@@ -13,16 +14,27 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       failures are typed errors, never a fallback plan
     * `get_pantry` — the Projected Pantry (Pantry minus stock committed to
       not-yet-cooked Planned Meals)
-    * `lookup_prices` — stored prices with provenance; missing prices are
-      reported, never invented
+    * `lookup_prices` — prices with provenance and age, read from the
+      database first and refreshed live through the scraper when missing or
+      24 hours old or older; missing prices are reported, never invented,
+      and a failed refresh keeps the old price with its real age
     * `present_proposal` — always validates the latest optimizer plan; only a
       valid plan is shown to the Member, otherwise violations go back. A
       shown Proposal always carries its Purchase (`MealPlannerApi.PlanningAgent.Purchase`),
       the consumed-ingredient cost and the budget comparison; a Purchase
       over the budget is a budget Deviation (`requires_approval`)
+    * `set_session_brand` — sets or clears the Session Brand of an
+      ingredient in the Workspace (never household settings); every change
+      is shown to the Member as a `session_brand_changed` event
     * `ask_human` — one question; ends the turn
 
-  Read calls (recipe search) and solver calls run within
+  Brands steer the Purchase softly: a Session Brand, else the Household's
+  Brand Preference, is bought when it can be; when it cannot, the Proposal
+  lists the substitution, and when the Purchase breaks the budget the
+  result lists cheaper brand alternatives with their price difference for
+  the agent to offer. Code never swaps a chosen brand on its own.
+
+  Read calls (recipe search, live price lookups) and solver calls run within
   `MealPlannerApi.PlanningAgent.CallBounds`: their own deadline and retry
   budget, clipped by the turn's global deadline.
 
@@ -37,6 +49,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     CallBounds,
     MealPlan,
     Prices,
+    PriceScraper,
     ProjectedPantry,
     ProposalValidator,
     Purchase,
@@ -138,9 +151,12 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       %{
         name: "lookup_prices",
         description:
-          "Read stored prices of the Products covering the named ingredients, with product, " <>
-            "presentation, supermarket, currency and observation date. Ingredients without a " <>
-            "stored price are listed as missing; never assume a price for them.",
+          "Read prices of the Products covering the named ingredients, with product, " <>
+            "presentation, supermarket, currency, observation date and age. Missing or stale " <>
+            "prices are refreshed live; when that fails the old price keeps its real age and a " <>
+            "warning is returned. Ingredients without a price are listed as missing; never " <>
+            "assume a price for them, and tell the household when a price is stale. Give " <>
+            "ingredients, a product text, or both; brand narrows either.",
         parameters: %{
           "type" => "object",
           "properties" => %{
@@ -150,9 +166,19 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
               "minItems" => 1,
               "maxItems" => @max_price_lookups,
               "description" => "Ingredient names, as returned by search_recipes"
+            },
+            "brand" => %{
+              "type" => "string",
+              "description" =>
+                "Only Products of this brand, e.g. to answer how much a brand costs"
+            },
+            "product" => %{
+              "type" => "string",
+              "description" =>
+                "Only Products whose name or brand contains this text; without ingredients " <>
+                  "it searches every stored Product"
             }
           },
-          "required" => ["ingredients"],
           "additionalProperties" => false
         }
       },
@@ -163,6 +189,27 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "with its Purchase (packages to buy net of the Projected Pantry) and budget check. " <>
             "Returns the status (valid, requires_approval with Deviations) or the violations to fix.",
         parameters: %{"type" => "object", "properties" => %{}, "additionalProperties" => false}
+      },
+      %{
+        name: "set_session_brand",
+        description:
+          "Set the brand to buy for one ingredient in this Planning Session only (a Session " <>
+            "Brand), or clear it with brand null. It overrides the household's Brand " <>
+            "Preference for this session and never changes household settings. The brand " <>
+            "must be one a stored Product of the ingredient has (use lookup_prices with brand " <>
+            "first). The household sees every change. Only set it when the household asks.",
+        parameters: %{
+          "type" => "object",
+          "properties" => %{
+            "ingredient" => %{"type" => "string", "description" => "Ingredient name"},
+            "brand" => %{
+              "type" => ["string", "null"],
+              "description" => "Brand to buy; null clears the Session Brand"
+            }
+          },
+          "required" => ["ingredient", "brand"],
+          "additionalProperties" => false
+        }
       },
       %{
         name: "ask_human",
@@ -299,7 +346,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
     case ProposalValidator.validate(ctx.workspace.draft, ctx) do
       {:valid, meals} ->
-        purchase = Purchase.for_meals(meals, ctx.account_id)
+        purchase =
+          Purchase.for_meals(meals, ctx.account_id, now: now(ctx), brands: brand_choices(ctx))
+
         deviations = budget_deviations(purchase, ctx.household.budget_cents)
         status = ProposalStatus.classify([], deviations) |> Atom.to_string()
 
@@ -333,7 +382,12 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
           "consumed_cost_cents" => purchase.consumed.total_cents,
           "currency" => purchase.currency,
           "budget" => proposal["budget"],
-          "deviations" => deviations
+          "deviations" => deviations,
+          "brand_substitutions" => proposal["purchase"]["brand_substitutions"],
+          # A budget conflict is answered with the cheaper brand options and
+          # their price difference; the agent offers them, never applies them.
+          "brand_alternatives" =>
+            if(deviations == [], do: [], else: Purchase.brand_alternatives(purchase))
         }
 
         {result, %{ctx.workspace | proposal: proposal}, :continue}
@@ -352,26 +406,78 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   defp run("lookup_prices", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "looking_up_prices"})
 
-    case args |> Map.get("ingredients") |> List.wrap() |> Enum.filter(&is_binary/1) do
-      [] ->
+    names = args |> Map.get("ingredients") |> List.wrap() |> Enum.filter(&is_binary/1)
+    product = string_arg(args, "product")
+
+    case {names, product} do
+      {[], nil} ->
         {%{"error" => "ingredients_required"}, ctx.workspace, :continue}
 
-      names ->
-        %{prices: prices, missing: missing} =
-          names |> Enum.take(@max_price_lookups) |> Prices.lookup_names()
+      {names, product} ->
+        %{prices: prices, missing: missing, warnings: warnings} =
+          names
+          |> Enum.take(@max_price_lookups)
+          |> Prices.lookup(
+            now: now(ctx),
+            refresh: &scrape(ctx, &1),
+            brand: string_arg(args, "brand"),
+            product: product
+          )
 
         result = %{
           "prices" => Enum.map(prices, &Prices.offer_data/1),
-          "missing" =>
-            Enum.map(missing, fn m ->
-              %{"ingredient" => m.ingredient, "reason" => Atom.to_string(m.reason)}
-            end)
+          "missing" => Enum.map(missing, &Prices.missing_data/1),
+          "warnings" => Enum.map(warnings, &Prices.warning_data/1)
         }
 
-        # Missing prices are named, never zero: the lookup is then partial.
-        result = if missing == [], do: result, else: Map.put(result, "outcome", "partial")
+        # Missing prices are named, never zero, and stale or unrefreshed
+        # prices are flagged: the lookup is then partial.
+        result =
+          if missing == [] and warnings == [],
+            do: result,
+            else: Map.put(result, "outcome", "partial")
 
         {result, ctx.workspace, :continue}
+    end
+  end
+
+  defp run("set_session_brand", args, ctx) do
+    with {:ok, name} <- required_string(args, "ingredient", "ingredient_required"),
+         {:ok, ingredient} <- find_ingredient(name),
+         {:ok, brand} <- requested_brand(args, ingredient) do
+      before = effective_brand(ctx, ingredient.id)
+      session_brands = Map.get(ctx.workspace, :session_brands, %{})
+
+      session_brands =
+        case brand do
+          nil ->
+            Map.delete(session_brands, ingredient.id)
+
+          brand ->
+            Map.put(session_brands, ingredient.id, %{ingredient: ingredient.name, brand: brand})
+        end
+
+      workspace = Map.put(ctx.workspace, :session_brands, session_brands)
+      now = effective_brand(%{ctx | workspace: workspace}, ingredient.id)
+
+      emit(ctx, %{
+        "type" => "session_brand_changed",
+        "ingredient" => ingredient.name,
+        "brand" => brand_name(now),
+        "source" => brand_source(now),
+        "previous_brand" => brand_name(before),
+        "previous_source" => brand_source(before)
+      })
+
+      {%{
+         "status" => "ok",
+         "ingredient" => ingredient.name,
+         "brand" => brand_name(now),
+         "source" => brand_source(now),
+         "previous_brand" => brand_name(before)
+       }, workspace, :continue}
+    else
+      {:error, reason} -> {%{"error" => reason}, ctx.workspace, :continue}
     end
   end
 
@@ -388,6 +494,71 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
   defp run(_name, _arguments, ctx),
     do: {%{"error" => "unknown_tool"}, ctx.workspace, :continue}
+
+  # ---------------------------------------------------------------------------
+  # Brands
+  # ---------------------------------------------------------------------------
+
+  # The chosen brand per ingredient id: a Session Brand beats the Household's
+  # Brand Preference.
+  defp brand_choices(ctx) do
+    household =
+      ctx.household
+      |> Map.get(:brand_preferences, [])
+      |> Map.new(&{&1.ingredient_id, %{brand: &1.brand, source: :household}})
+
+    session =
+      ctx.workspace
+      |> Map.get(:session_brands, %{})
+      |> Map.new(fn {id, %{brand: brand}} -> {id, %{brand: brand, source: :session}} end)
+
+    Map.merge(household, session)
+  end
+
+  defp effective_brand(ctx, ingredient_id), do: Map.get(brand_choices(ctx), ingredient_id)
+
+  defp brand_name(nil), do: nil
+  defp brand_name(%{brand: brand}), do: brand
+  defp brand_source(nil), do: nil
+  defp brand_source(%{source: source}), do: Atom.to_string(source)
+
+  defp required_string(args, key, error) do
+    case string_arg(args, key) do
+      nil -> {:error, error}
+      value -> {:ok, String.trim(value)}
+    end
+  end
+
+  defp find_ingredient(name) do
+    case Prices.ingredient_by_name(name) do
+      nil -> {:error, "unknown_ingredient"}
+      ingredient -> {:ok, ingredient}
+    end
+  end
+
+  # nil clears the Session Brand; any other brand must be one a stored
+  # Product of the ingredient has, spelled as stored.
+  defp requested_brand(args, ingredient) do
+    case Map.fetch(args, "brand") do
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, brand} when is_binary(brand) ->
+        case String.trim(brand) do
+          "" ->
+            {:error, "brand_required"}
+
+          brand ->
+            case Prices.stored_brand(ingredient.id, brand) do
+              nil -> {:error, "unknown_brand"}
+              stored -> {:ok, stored}
+            end
+        end
+
+      _ ->
+        {:error, "brand_required"}
+    end
+  end
 
   # ---------------------------------------------------------------------------
   # Budget
@@ -423,7 +594,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       "budget_cents" => budget_cents,
       "purchase_total_cents" => purchase.total_cents,
       "within_budget" => within,
-      "uncertain" => not purchase.complete?
+      "uncertain" => uncertain?(purchase)
     }
   end
 
@@ -432,9 +603,12 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       "budget_cents" => nil,
       "purchase_total_cents" => purchase.total_cents,
       "within_budget" => nil,
-      "uncertain" => not purchase.complete?
+      "uncertain" => uncertain?(purchase)
     }
   end
+
+  # Missing and stale prices both make the Purchase total uncertain.
+  defp uncertain?(purchase), do: not purchase.complete? or Purchase.stale?(purchase)
 
   # ---------------------------------------------------------------------------
   # Optimizer
@@ -551,6 +725,34 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       {:ok, recipes, _} -> {:ok, recipes}
       {:error, :timeout, _} -> {:error, :search_timeout}
       {:error, reason, _} -> {:error, reason}
+    end
+  end
+
+  # A live scraper lookup is a read call: bounded and retried on transient
+  # failure. It is not a model call, so it uses no iteration or spend.
+  defp scrape(ctx, query) do
+    {module, opts} = Map.get(ctx, :price_scraper) || {PriceScraper.Unavailable, []}
+
+    attempt = fn state, call ->
+      opts = Keyword.put(opts, :receive_timeout, call.timeout_ms)
+
+      case module.fetch(query, opts) do
+        {:ok, items} -> {:ok, items, state}
+        {:error, reason} -> {:error, reason, state}
+      end
+    end
+
+    case CallBounds.run(Map.get(ctx, :bounds), :read, nil, attempt) do
+      {:ok, items, _} -> {:ok, items}
+      {:error, :timeout, _} -> {:error, :scraper_timeout}
+      {:error, reason, _} -> {:error, reason}
+    end
+  end
+
+  defp now(ctx) do
+    case Map.get(ctx, :clock) do
+      clock when is_function(clock, 0) -> clock.()
+      _ -> DateTime.utc_now()
     end
   end
 
