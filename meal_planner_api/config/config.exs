@@ -33,7 +33,8 @@ config :meal_planner_api,
 config :meal_planner_api, :planning_agent,
   model: {MealPlannerApi.PlanningAgent.Model.OpenAIResponses, []},
   optimizer: {MealPlannerApi.PlanningAgent.Optimizer.Port, []},
-  # Live price lookups over HTTP (base URL: the :go_scraper_url env).
+  # Live price lookups over HTTP (base URL: the :go_scraper_url env). In prod
+  # config/runtime.exs sets it from GO_SCRAPER_URL, or Unavailable without it.
   price_scraper: {MealPlannerApi.PlanningAgent.PriceScraper.Http, []}
 
 config :meal_planner_api,

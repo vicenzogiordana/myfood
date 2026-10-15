@@ -84,6 +84,20 @@ if config_env() != :test do
     output_price_micros_per_mtok: optional_integer.("OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK")
 end
 
+# Planning agent live prices. Production reads the price scraper URL from
+# GO_SCRAPER_URL; without it no live refresh is attempted (Unavailable) rather
+# than calling a localhost default. The URL goes in the adapter options, not
+# :go_scraper_url, which GoScraperClient reads at compile time.
+if config_env() == :prod do
+  price_scraper =
+    case String.trim(System.get_env("GO_SCRAPER_URL", "")) do
+      "" -> {MealPlannerApi.PlanningAgent.PriceScraper.Unavailable, []}
+      url -> {MealPlannerApi.PlanningAgent.PriceScraper.Http, [base_url: url]}
+    end
+
+  config :meal_planner_api, :planning_agent, price_scraper: price_scraper
+end
+
 config :meal_planner_api,
   gemini_model: System.get_env("GEMINI_MODEL", "gemini-2.5-flash-lite"),
   gemini_base_url: System.get_env("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"),

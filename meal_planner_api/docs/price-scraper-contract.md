@@ -19,6 +19,10 @@ Nothing is assumed.
 GET <GO_SCRAPER_URL>/?q=<lowercased ingredient name>
 ```
 
+In production `GO_SCRAPER_URL` must be set (read in `config/runtime.exs`);
+without it the planning agent uses the `Unavailable` scraper and every
+refresh fails as `scraper_unavailable`, instead of calling a localhost default.
+
 ## Response
 
 ```json

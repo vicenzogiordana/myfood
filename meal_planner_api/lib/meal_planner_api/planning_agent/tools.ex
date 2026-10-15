@@ -414,12 +414,13 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
         {%{"error" => "ingredients_required"}, ctx.workspace, :continue}
 
       {names, product} ->
-        %{prices: prices, missing: missing, warnings: warnings} =
+        %{prices: prices, missing: missing, warnings: warnings, refresh_memo: memo} =
           names
           |> Enum.take(@max_price_lookups)
           |> Prices.lookup(
             now: now(ctx),
             refresh: &scrape(ctx, &1),
+            refresh_memo: Map.get(ctx.workspace, :price_refreshes, %{}),
             brand: string_arg(args, "brand"),
             product: product
           )
@@ -437,7 +438,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             do: result,
             else: Map.put(result, "outcome", "partial")
 
-        {result, ctx.workspace, :continue}
+        # Recent refreshes are kept in the Workspace so the session does not
+        # scrape the same Ingredient again on every lookup.
+        {result, Map.put(ctx.workspace, :price_refreshes, memo), :continue}
     end
   end
 
@@ -459,6 +462,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
       workspace = Map.put(ctx.workspace, :session_brands, session_brands)
       now = effective_brand(%{ctx | workspace: workspace}, ingredient.id)
+
+      # The Member is told about the change right away, so the session keeps
+      # it even when this turn is later cut by the deadline or crashes.
+      report_workspace(ctx, workspace)
 
       emit(ctx, %{
         "type" => "session_brand_changed",
@@ -833,6 +840,11 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
   defp emit(%{emit: emit}, event) when is_function(emit, 1), do: emit.(event)
   defp emit(_ctx, _event), do: :ok
+
+  defp report_workspace(%{report_workspace: report}, workspace) when is_function(report, 1),
+    do: report.(workspace)
+
+  defp report_workspace(_ctx, _workspace), do: :ok
 
   defp reason_string(reason, _default) when is_atom(reason), do: Atom.to_string(reason)
   defp reason_string(_reason, default), do: default

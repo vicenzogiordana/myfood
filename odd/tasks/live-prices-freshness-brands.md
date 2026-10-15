@@ -140,6 +140,41 @@ Route: inline (one source file plus tests, findings already mapped).
 - Checks: `MIX_TEST_PARTITION=101 MYFOOD_TEST_DATABASE=meal_planner_api_test101
   mix test` 1146 passed, 25 skipped; `mix precommit` 1146 passed, 25 skipped.
 
+## Review round 2 (Jorge el Curioso, PR #126)
+
+Route: inline (findings already mapped with repair contracts; three small
+source edits plus tests). Caps stay per Planning Session and count only
+OpenAI model calls; scraper calls remain read calls under `CallBounds`.
+
+- [x] R3 No refresh memo: a stale or unmatched Ingredient was re-scraped on
+  every `lookup_prices` (CD-1, TR-3, SP-1). `Prices.lookup/2` takes and
+  returns a `refresh_memo` (ingredient id => attempt time and failure); an
+  Ingredient refreshed in the last 15 minutes is not scraped again and its
+  `refresh_failed` or `still_stale` warning is reported again. The memo
+  lives in the Workspace (`price_refreshes`). RED: `LivePricesTest` "refresh
+  memo" saw 2 scrapes for one 30-hour-old Ingredient answered `{:ok, []}`,
+  2 for a failed refresh, and 6 for brand `zzz` on 3 Ingredients; GREEN: 1,
+  1 and 3.
+- [x] R4 `session_brand_changed` was shown but lost when the turn was cut by
+  the deadline (TR-1). `set_session_brand` now checkpoints the Workspace
+  (`{:workspace, ref, ws}`, like the allowance checkpoint), and `stop_turn`
+  adopts the latest one. RED: `BrandsTest` with a slow model step after
+  `set_session_brand` and a 300 ms deadline found no Session Brand in the
+  session state after `limit_reached` time; GREEN after the checkpoint.
+- [x] R5 Production silently targeted `http://localhost:3000` (SP-2).
+  `config/runtime.exs` (prod) sets the planning agent price scraper to
+  `{Http, base_url: GO_SCRAPER_URL}`, or `Unavailable` when it is unset or
+  blank. The URL goes in the adapter options rather than `:go_scraper_url`,
+  which `GoScraperClient` reads with `compile_env`. RED:
+  `RuntimePriceScraperConfigTest` read no prod price scraper; GREEN with
+  both cases. Follow-up (out of scope): `GoScraperClient`'s compile-time
+  localhost default.
+- Checks: `MIX_TEST_PARTITION=101 MYFOOD_TEST_DATABASE=meal_planner_api_test101
+  mix precommit` (compile with warnings as errors, format, full test suite)
+  1152 passed, 25 skipped. Note: `config/test.exs` does not append
+  `MIX_TEST_PARTITION` to the database name; isolation comes from
+  `MYFOOD_TEST_DATABASE`.
+
 ## Next step
 
 Review gate (Jorge el Curioso) re-runs separately on the updated PR.

@@ -243,7 +243,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       optimizer: args.optimizer,
       messages: [],
       # Session Brands live here only: discarded with the Planning Session.
-      workspace: %{draft: nil, proposal: nil, session_brands: %{}},
+      workspace: %{draft: nil, proposal: nil, session_brands: %{}, price_refreshes: %{}},
       subscribers: %{},
       task: nil,
       deadline_ref: nil,
@@ -361,6 +361,13 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     do: {:noreply, %{state | allowance: allowance}}
 
   def handle_info({:allowance, _stale_ref, _allowance}, state), do: {:noreply, state}
+
+  # Workspace checkpoints keep changes already shown to the Member (a
+  # Session Brand) when the turn is later killed or crashes.
+  def handle_info({:workspace, ref, workspace}, %{task: %Task{ref: ref}} = state),
+    do: {:noreply, %{state | workspace: workspace}}
+
+  def handle_info({:workspace, _stale_ref, _workspace}, state), do: {:noreply, state}
 
   def handle_info({ref, result}, %{task: %Task{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
@@ -497,6 +504,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         emit_fun = fn event -> send(session, {:agent_event, ref, event}) end
         checkpoint = fn model_state -> send(session, {:model_state, ref, seal(model_state)}) end
         report_allowance = fn allowance -> send(session, {:allowance, ref, allowance}) end
+        report_workspace = fn workspace -> send(session, {:workspace, ref, workspace}) end
 
         bounds =
           CallBounds.new(
@@ -513,7 +521,11 @@ defmodule MealPlannerApi.PlanningAgent.Session do
             end
           )
 
-        tool_context = turn.tool_context |> Map.put(:emit, emit_fun) |> Map.put(:bounds, bounds)
+        tool_context =
+          turn.tool_context
+          |> Map.put(:emit, emit_fun)
+          |> Map.put(:bounds, bounds)
+          |> Map.put(:report_workspace, report_workspace)
 
         result =
           %{turn | tool_context: tool_context, model_state: unseal(turn.model_state)}
@@ -535,11 +547,12 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     _ = Task.shutdown(task, :brutal_kill)
     # The task is dead, so every checkpoint it sent is already queued: adopt
     # the latest ones so the killed turn's paid usage and iterations stay
-    # counted.
+    # counted, and its Workspace changes shown to the Member stay applied.
     clear_turn(%{
       state
       | model_state: latest_checkpoint(:model_state, task.ref, state.model_state),
-        allowance: latest_checkpoint(:allowance, task.ref, state.allowance)
+        allowance: latest_checkpoint(:allowance, task.ref, state.allowance),
+        workspace: latest_checkpoint(:workspace, task.ref, state.workspace)
     })
   end
 

@@ -38,6 +38,7 @@ defmodule MealPlannerApi.PlanningAgent.BrandsTest do
         optimizer: {FakeOptimizer, Keyword.get(opts, :optimizer, [])},
         price_scraper: {FakeScraper, responses: %{}, notify: self()},
         clock: fn -> @now end,
+        deadline_ms: Keyword.get(opts, :deadline_ms, 300_000),
         subscriber: self()
       )
 
@@ -368,6 +369,32 @@ defmodule MealPlannerApi.PlanningAgent.BrandsTest do
 
       assert errors == ["unknown_ingredient", "unknown_brand", "brand_required"]
       assert drain_brand_events(session_id, []) == []
+    end
+
+    test "a Session Brand shown to the Member survives a turn cut by the deadline",
+         %{household: h} do
+      %{pasta: pasta} = pasta_world!(h)
+      slow = fn _request -> Process.sleep(1_000) && {:text, "late"} end
+
+      script = [
+        {:tool_calls,
+         [{"set_session_brand", %{"ingredient" => pasta.name, "brand" => "Fictitious Luchetti"}}]},
+        slow
+      ]
+
+      {session_id, pid} = start!(h, script, deadline_ms: 300)
+      :ok = Session.send_message(pid, "Brands")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "session_brand_changed", "brand" => "Fictitious Luchetti"}},
+                     1_000
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "time"}},
+                     1_000
+
+      assert %{workspace: %{session_brands: brands}} = :sys.get_state(pid)
+      assert %{brand: "Fictitious Luchetti"} = brands[pasta.id]
     end
   end
 end

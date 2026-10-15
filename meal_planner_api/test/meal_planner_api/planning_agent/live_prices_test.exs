@@ -381,6 +381,89 @@ defmodule MealPlannerApi.PlanningAgent.LivePricesTest do
     end
   end
 
+  # Runs `calls` (one model step each) in one turn and returns every tool
+  # result the model received, in order, and every scraper query made.
+  defp run_tools(household, calls, opts \\ []) do
+    script = Enum.map(calls, &{:tool_calls, [&1]}) ++ [{:text, "done"}]
+    {session_id, pid} = start!(household, script, opts)
+
+    :ok = Session.send_message(pid, "Go")
+    assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+    :ok = Session.cancel(pid, %{membership_id: household.owner.membership_id, owner?: true})
+
+    requests =
+      for _ <- 0..length(calls) do
+        assert_receive {:scripted_model_request, request}
+        request
+      end
+
+    results =
+      requests
+      |> tl()
+      |> Enum.map(fn %{messages: messages} -> List.last(messages).content end)
+
+    {results, drain_fetches([])}
+  end
+
+  defp drain_fetches(acc) do
+    receive do
+      {:fake_scraper_fetch, query} -> drain_fetches(acc ++ [query])
+    after
+      0 -> acc
+    end
+  end
+
+  describe "refresh memo" do
+    test "a refresh that brings nothing new is not repeated in the session",
+         %{household: h} do
+      rice = ingredient!("Fictitious rice")
+      product!(rice, price_cents: 700, observed_at: hours_ago(30))
+      call = {"lookup_prices", %{"ingredients" => [rice.name]}}
+
+      {[first, second], fetches} = run_tools(h, [call, call])
+
+      assert fetches == [rice.name]
+
+      # The stale price is still flagged on every lookup.
+      for result <- [first, second] do
+        assert [%{"price_cents" => 700, "fresh" => false}] = result["prices"]
+        assert [%{"reason" => "still_stale"}] = result["warnings"]
+      end
+    end
+
+    test "a failed refresh is not repeated and is still reported", %{household: h} do
+      rice = ingredient!("Fictitious rice")
+      product!(rice, observed_at: hours_ago(30))
+      call = {"lookup_prices", %{"ingredients" => [rice.name]}}
+      responses = %{String.downcase(rice.name) => {:error, :scraper_unavailable}}
+
+      {[_first, second], fetches} = run_tools(h, [call, call], responses: responses)
+
+      assert fetches == [rice.name]
+
+      assert [%{"reason" => "refresh_failed", "detail" => "scraper_unavailable"}] =
+               second["warnings"]
+    end
+
+    test "a brand query that matches nothing scrapes each Ingredient once", %{household: h} do
+      ingredients =
+        for name <- ["Fictitious beans", "Fictitious corn", "Fictitious peas"] do
+          ingredient = ingredient!(name)
+          product!(ingredient, brand: "Fictitious Brand", observed_at: hours_ago(2))
+          ingredient
+        end
+
+      call =
+        {"lookup_prices", %{"ingredients" => Enum.map(ingredients, & &1.name), "brand" => "zzz"}}
+
+      {[_first, second], fetches} = run_tools(h, [call, call])
+
+      assert Enum.sort(fetches) == Enum.map(ingredients, & &1.name)
+      assert second["prices"] == []
+      assert length(second["missing"]) == 3
+    end
+  end
+
   describe "present_proposal" do
     test "shows stale purchase prices with their age and marks the budget uncertain",
          %{household: h} do
