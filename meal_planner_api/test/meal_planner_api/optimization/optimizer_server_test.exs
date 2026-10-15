@@ -9,6 +9,7 @@ defmodule MealPlannerApi.Optimization.OptimizerServerTest do
 
   import ExUnit.CaptureLog
 
+  alias MealPlannerApi.Optimization.Contract
   alias MealPlannerApi.Optimization.OptimizerServer
   alias MealPlannerApi.Optimization.TestSupport.FakePortRunner
 
@@ -393,6 +394,44 @@ defmodule MealPlannerApi.Optimization.OptimizerServerTest do
     end
   end
 
+  describe "contract outcomes through the server" do
+    test "an infeasible error frame interprets as named infeasible causes" do
+      {pid, port, _name} = start_and_ready!()
+
+      reply =
+        error_frame_reply(pid, port, "infeasible", %{
+          "causes" => [%{"cause" => "restriction", "slot" => "lunch"}]
+        })
+
+      assert Contract.interpret(reply) ==
+               {:infeasible, [%{cause: :restriction, slot: "lunch"}]}
+    end
+
+    test "an inconclusive error frame interprets as a solver time limit" do
+      {pid, port, _name} = start_and_ready!()
+
+      reply = error_frame_reply(pid, port, "inconclusive", %{"reason" => "time_limit"})
+
+      assert Contract.interpret(reply) == {:inconclusive, :time_limit}
+    end
+
+    test "inconclusive and infeasible frames do not count toward the circuit breaker" do
+      {pid, port, _name} = start_and_ready!()
+
+      for _ <- 1..3 do
+        error_frame_reply(pid, port, "inconclusive", %{"reason" => "time_limit"})
+      end
+
+      error_frame_reply(pid, port, "infeasible", %{
+        "causes" => [%{"cause" => "coverage", "slot" => "dinner"}]
+      })
+
+      state = :sys.get_state(pid)
+      assert state.circuit_state == :closed
+      assert state.consecutive_failures == 0
+    end
+  end
+
   describe "public error atoms" do
     test "GenServer.call/3 timeout still maps to :optimizer_timeout (caller-visible)" do
       # Configure the caller's GenServer.call timeout short, but keep the
@@ -446,6 +485,27 @@ defmodule MealPlannerApi.Optimization.OptimizerServerTest do
     :ok = await_handshake_ready(pid)
 
     {pid, port, name}
+  end
+
+  defp error_frame_reply(pid, port, error, details) do
+    {reply, _log} =
+      with_log(fn ->
+        reply_task = async_select()
+        request_id = await_pending(pid)
+
+        frame =
+          Jason.encode!(%{
+            "type" => "error",
+            "id" => request_id,
+            "error" => error,
+            "details" => details
+          })
+
+        send(pid, {port, {:data, frame <> "\n"}})
+        Task.await(reply_task, 500)
+      end)
+
+    reply
   end
 
   defp async_select do

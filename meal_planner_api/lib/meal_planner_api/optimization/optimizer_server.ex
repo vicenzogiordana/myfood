@@ -32,6 +32,7 @@ defmodule MealPlannerApi.Optimization.OptimizerServer do
   @default_handshake_attempts 3
   @default_handshake_timeout_ms 3_000
   @default_frame_max_bytes 4 * 1024 * 1024
+  @solver_verdicts ["infeasible", "inconclusive"]
 
   @enforce_keys []
   defstruct port: nil,
@@ -502,8 +503,15 @@ defmodule MealPlannerApi.Optimization.OptimizerServer do
         reply_to(from, {:error, normalize_optimizer_error(reason, details)})
 
         new_state = %{state | pending_requests: new_pending}
-        new_state = %{new_state | consecutive_failures: new_state.consecutive_failures + 1}
-        maybe_open_circuit(new_state)
+
+        # Infeasible and inconclusive are verdicts from a healthy solver, not
+        # failures, so they never move the circuit breaker.
+        if reason in @solver_verdicts do
+          new_state
+        else
+          new_state = %{new_state | consecutive_failures: new_state.consecutive_failures + 1}
+          maybe_open_circuit(new_state)
+        end
     end
   end
 
@@ -515,6 +523,9 @@ defmodule MealPlannerApi.Optimization.OptimizerServer do
 
   defp normalize_optimizer_error("abnormal", details) when is_map(details),
     do: {:abnormal, details}
+
+  defp normalize_optimizer_error("inconclusive", details) when is_map(details),
+    do: {:inconclusive, details}
 
   defp normalize_optimizer_error(_, _), do: :optimizer_error
 

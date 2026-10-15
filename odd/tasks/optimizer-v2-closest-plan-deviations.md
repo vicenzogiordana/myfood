@@ -66,12 +66,27 @@ ships the seam they call (see "Integration note").
 - [x] T2 — RED: 0/13 (`Contract`/`ProposalStatus` undefined). GREEN: 13/13. A real-port test
   (`contract_port_test.exs`, runs when `OPTIMIZER_PYTHON` is set) passes 2/2 against `optimizador.py`.
 
+## Review round 1 (Jorge el Curioso, PR #115)
+
+| ID | Task | Route | Status |
+|----|------|-------|--------|
+| R1 | `Contract.interpret/1` reaches `infeasible`/`inconclusive` through real `OptimizerServer` replies | inline (bounded worker; single writer) | done |
+
+- [x] R1 — Finding: `OptimizerServer` replies `{:error, {:infeasible, details}}` and mapped
+  `inconclusive` to `:optimizer_error`, so `Contract.interpret/1` only ever returned
+  `{:error, :optimizer_error}` for them on the server path; both verdicts also counted toward
+  the circuit breaker. Fix: `interpret/1` accepts the server's `{:error, {reason, details}}`
+  shape; `normalize_optimizer_error/2` preserves `{:inconclusive, details}`; `handle_error_frame`
+  no longer counts `infeasible`/`inconclusive` (healthy solver verdicts) as failures.
+  RED: 3 new `optimizer_server_test.exs` tests failed (16/19; two returned
+  `{:error, :optimizer_error}`, the circuit test hit the open-circuit fallback). GREEN: 19/19.
+
 ## Integration note
 
 `run_optimizer` should pass `Contract.nutrition_bounds(NutritionGoals.get(account_id))`
 as `constraints.macro_bounds` and interpret the reply with `Contract.interpret/1`
-(the #114 port adapter must also pass the `inconclusive` error through instead of
-mapping it to `:optimizer_error`);
+(`OptimizerServer` now passes `inconclusive` through as `{:inconclusive, details}`; the #114
+port adapter must do the same instead of mapping it to `:optimizer_error`);
 `present_proposal` should emit `ProposalStatus.classify(violations, deviations)`.
 Wire this in whichever of #96/#97 merges second.
 
@@ -87,3 +102,7 @@ Wire this in whichever of #96/#97 merges second.
 - T2 commit: the `feat(planning)` commit that follows T1 on this branch
 - Python: `.venv-ortools/bin/python -m unittest test_optimizador` → 24 tests OK
 - `mix precommit` (partitioned DB, `OPTIMIZER_PYTHON` set) → 938 passed, 20 skipped
+- R1 commit: the `fix(optimizer)` commit that follows T2 on this branch
+- R1: `mix test` and `mix precommit` (partitioned DB, `OPTIMIZER_PYTHON` set) → 941 passed, 20 skipped
+- Note: `config/test.exs` does not append `MIX_TEST_PARTITION` to the DB name; isolation
+  comes from `MYFOOD_TEST_DATABASE=meal_planner_api_test97`.
