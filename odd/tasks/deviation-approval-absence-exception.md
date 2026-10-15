@@ -49,7 +49,7 @@ OpenAI spend/token caps (already per Planning Session, unchanged here).
 - [x] Changing the Proposal voids the approval
 - [x] Stored budget and Nutrition Goal are unchanged after approving
 - [x] An Absence Exception lets the validator accept exactly the approved meals
-- [ ] The agent has no tool to grant either approval
+- [x] The agent has no tool to grant either approval
 
 ## Tasks
 
@@ -62,7 +62,7 @@ OpenAI spend/token caps (already per Planning Session, unchanged here).
   - validation of member, Restriction and meals
   - validator accepts exactly the approved meals (tag and exact-ingredient allergies)
   - revalidated at confirm; not inherited by reuse
-- [ ] **T3** Human-only guarantee (route: inline)
+- [x] **T3** Human-only guarantee (route: inline)
   - no tool grants either approval; a turn result cannot set them
   - instructions tell the agent it can only ask
 
@@ -76,11 +76,12 @@ OpenAI spend/token caps (already per Planning Session, unchanged here).
 | Task | Commit | Tests |
 |------|--------|-------|
 | T1   | feaa930 | RED 0/5 (approve_deviations/3 undefined); GREEN 5/5; planning_agent suite 160 passed |
-| T2   | (this commit) | RED 5/10 (approve_absence_exception/3 undefined); GREEN 10/10; planning + planning_agent suites 185 passed |
+| T2   | f5e8e21 | RED 5/10 (approve_absence_exception/3 undefined); GREEN 10/10; planning + planning_agent suites 185 passed |
+| T3   | (this commit) | No true RED: characterization tests (no approval tool exists; an agent calling one gets unknown_tool and confirm stays approval_required), green 12/12; planning_agent suite 167 passed x3; `mix precommit` first run 1127/1130 (3 failures not reproduced, not captured), then 1130 passed, 25 skipped twice |
 
 Note: `config/test.exs` does not append `MIX_TEST_PARTITION` to the DB name;
 isolation uses `MYFOOD_TEST_DATABASE=meal_planner_api_test103`.
 
 ## Next step
 
-T3.
+Open the PR; review by Jorge el Curioso.

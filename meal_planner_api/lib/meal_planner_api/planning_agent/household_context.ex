@@ -148,6 +148,7 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
     - Prices are never invented. A missing price is uncertainty: tell the household, never treat it as zero.
     - Ask the human with ask_human only about real conflicts. Never claim that no recipes exist when a search failed.
     - The household is fixed by the session; you cannot plan for another household.
+    - Approvals are human-only: you cannot grant a Deviation Approval or an Absence Exception. When a Proposal requires approval, tell the household its Deviations; when a Restriction blocks a meal for a member who may be away, ask with ask_human. The household decides in the app.
 
     Household facts (enforced by code):
     - Forbidden Ingredient Tags (Restrictions of household members): #{list(context.forbidden_tags)}

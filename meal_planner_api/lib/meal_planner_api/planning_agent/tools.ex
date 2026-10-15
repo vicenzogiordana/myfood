@@ -1,7 +1,8 @@
 defmodule MealPlannerApi.PlanningAgent.Tools do
   @moduledoc """
   Agent-callable tool catalog of the planning agent (spec #93). No tool writes
-  persistent data.
+  persistent data, and no tool grants a Deviation Approval or an Absence
+  Exception: those are human-only actions of `MealPlannerApi.PlanningAgent.Session`.
 
     * `search_recipes` — structured search; Restriction-violating recipes are
       excluded by code

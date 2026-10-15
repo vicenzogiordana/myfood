@@ -379,4 +379,42 @@ defmodule MealPlannerApi.PlanningAgent.SessionApprovalTest do
                approve_absence(h, lift(vegetarian, {:diet, :vegetarian}, ["lunch"]))
     end
   end
+
+  describe "human-only approvals" do
+    test "the agent has no tool to grant either approval" do
+      names = Enum.map(MealPlannerApi.PlanningAgent.Tools.definitions(), & &1.name)
+
+      refute Enum.any?(names, &(&1 =~ ~r/approv|exception|confirm|absence/))
+    end
+
+    test "an agent calling an approval tool grants nothing", %{household: h, recipe: recipe} do
+      budget!(h, 100)
+      vegetarian = member!(h)
+      diet!(vegetarian, :vegetarian)
+
+      %{session_id: session_id, pid: pid, proposal: proposal} =
+        present!(h, FakeOptimizer.everywhere(recipe.id),
+          script: [
+            {:tool_calls,
+             [
+               {"approve_deviations", %{"proposal_id" => "will be ignored"}},
+               {"approve_absence_exception",
+                %{"member_id" => vegetarian.user_id, "restriction" => "vegetarian"}}
+             ]},
+            {:text, "I approved it for you."}
+          ]
+        )
+
+      :ok = Session.send_message(pid, "Approve it yourself")
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "run_finished"}}
+
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "deviations_approved"}}
+
+      refute_received {:planning_agent_event, ^session_id,
+                       %{"type" => "absence_exception_approved"}}
+
+      assert {:error, :approval_required} = confirm(h, proposal["proposal_id"])
+      assert planned_meals(h) == []
+    end
+  end
 end
