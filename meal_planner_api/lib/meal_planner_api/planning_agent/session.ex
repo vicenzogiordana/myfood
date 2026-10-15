@@ -431,8 +431,13 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   def handle_call({:confirm, _membership_id, proposal_id}, _from, state) do
     case Confirmation.lookup(state.confirmation_store, state.account_id, proposal_id) do
-      {:confirmed, summary} -> confirmed(state, proposal_id, summary)
-      _not_confirmed -> confirm_current(state, proposal_id)
+      {:confirmed, summary} ->
+        if own_proposal?(state, proposal_id),
+          do: confirmed(state, proposal_id, summary),
+          else: {:reply, {:ok, summary}, state}
+
+      _not_confirmed ->
+        confirm_current(state, proposal_id)
     end
   end
 
@@ -558,6 +563,13 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   # ===========================================================================
   # Confirmation
   # ===========================================================================
+
+  # A confirmed Proposal ends this session only when it is this session's
+  # own current one (a lost acknowledgement retried in the same process). A
+  # replay of a Proposal from an earlier, already ended session of the
+  # Household is answered with its summary and leaves this session running.
+  defp own_proposal?(%{workspace: %{proposal: %{"proposal_id" => id}}}, id), do: true
+  defp own_proposal?(_state, _proposal_id), do: false
 
   defp confirm_current(%{task: %Task{}} = state, _proposal_id),
     do: {:reply, {:error, :busy}, state}

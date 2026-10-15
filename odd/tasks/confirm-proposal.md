@@ -62,6 +62,11 @@ grace/restart recovery (#107).
   - Replay (live session or after it ended) returns the original confirmation
   - Lost acknowledgement reconciled by status for up to 30 s, then `:unresolved`
   - Status stays queryable
+- [x] **R1** Review round 1 (Jorge el Curioso, PR #125) (route: inline)
+  - A replay of an already-confirmed Proposal from an ended session no
+    longer stops the Household's next live Planning Session: only the
+    session's own current Proposal ends it; any other replay replies with
+    the summary and leaves the session running
 
 ## Checks
 
@@ -74,7 +79,11 @@ grace/restart recovery (#107).
 |------|--------|-------|
 | T1   | b58251a | RED 3/5 (confirm/3 undefined; 2 no-persist characterization tests already green); GREEN 5/5; planning_agent suite 144 passed |
 | T2   | 5cb59bb | RED 6/9 (stale/budget/conflict); GREEN 9/9; planning_agent suite 148 passed |
-| T3   | this commit | No true RED: reconciliation and replay were written with T1; mutation check (disable reconcile + replay) failed 4/15, restored GREEN 15/15; `mix precommit` 1117 passed, 25 skipped |
+| T3   | 00e65e0 | No true RED: reconciliation and replay were written with T1; mutation check (disable reconcile + replay) failed 4/15, restored GREEN 15/15; `mix precommit` 1117 passed, 25 skipped |
+| R1   | see PR #125 review comment | RED 15/16 (next session S2 stopped by replay of S1's Proposal); GREEN 16/16; full suite 1118 passed, 25 skipped; `mix precommit` 1118 passed, 25 skipped |
+
+Note: `config/test.exs` does not append `MIX_TEST_PARTITION` to the DB name;
+isolation uses `MYFOOD_TEST_DATABASE=meal_planner_api_test102`.
 
 ## Next step
 

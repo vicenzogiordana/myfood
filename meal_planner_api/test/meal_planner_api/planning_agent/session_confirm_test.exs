@@ -337,6 +337,33 @@ defmodule MealPlannerApi.PlanningAgent.SessionConfirmTest do
       assert length(shopping_lines(h)) == first.shopping_lines_count
     end
 
+    test "replaying a confirmation from an ended session leaves the next session running",
+         %{household: h} = ctx do
+      %{pid: first_pid, proposal: proposal} = present!(h, ctx.recipe)
+      ref = Process.monitor(first_pid)
+
+      assert {:ok, summary} = confirm(h, proposal["proposal_id"])
+      assert_receive {:DOWN, ^ref, :process, ^first_pid, :normal}
+
+      tuesday = Date.add(@monday, 1)
+
+      {:ok, %{session_id: session_id, pid: pid}} =
+        Session.start(session_attrs(h, h.owner, {tuesday, tuesday}),
+          model: {Scripted, script: []},
+          subscriber: self()
+        )
+
+      # A late retry of the first Proposal reaches the Household's new session.
+      assert {:ok, ^summary} = confirm(h, proposal["proposal_id"])
+
+      assert Process.alive?(pid)
+      assert Session.info(pid).session_id == session_id
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "proposal_confirmed"}}
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "session_ended"}}
+      assert Repo.get!(PlanningSession, session_id).status == :active
+      assert length(planned_meals(h)) == 2
+    end
+
     test "concurrent confirmations of the same Proposal save once", %{household: h} = ctx do
       %{proposal: proposal} = present!(h, ctx.recipe)
 
