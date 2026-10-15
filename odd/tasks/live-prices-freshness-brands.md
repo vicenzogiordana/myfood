@@ -57,14 +57,14 @@ are rejected as unusable, never assumed.
 
 ## Acceptance criteria
 
-- [ ] Fresh prices (under 24 h) come from the database without a live call
-- [ ] Missing or stale prices trigger a live lookup; failures keep the old
+- [x] Fresh prices (under 24 h) come from the database without a live call
+- [x] Missing or stale prices trigger a live lookup; failures keep the old
   price with its real age and a warning
-- [ ] Brand and Product queries return matching Products with prices
-- [ ] Session Brands live only in the Workspace; Brand Preferences come from
+- [x] Brand and Product queries return matching Products with prices
+- [x] Session Brands live only in the Workspace; Brand Preferences come from
   household settings
-- [ ] The agent never substitutes a chosen brand without telling the Member
-- [ ] Tests use a fake scraper; the scraper prerequisite is tracked and
+- [x] The agent never substitutes a chosen brand without telling the Member
+- [x] Tests use a fake scraper; the scraper prerequisite is tracked and
   referenced
 
 ## Tasks
@@ -79,8 +79,10 @@ are rejected as unusable, never assumed.
 - [x] T3 Household Brand Preferences in settings and the Household context
   (route: inline). Commit: the `feat(settings): add Household Brand
   Preferences` commit on this branch.
-- [ ] T4 Session Brands in the Workspace, brand-steered Purchase, disclosed
-  substitutions and budget alternatives (route: inline).
+- [x] T4 Session Brands in the Workspace, brand-steered Purchase, disclosed
+  substitutions and budget alternatives (route: inline). Commit: the
+  `feat(planning-agent): steer the Purchase with Session Brands ...` commit
+  on this branch.
 
 ## Checks
 
@@ -102,7 +104,17 @@ are rejected as unusable, never assumed.
 - T3: RED observed for 7 controller tests and 2 session tests (missing
   module and routes); GREEN after the table, context, controller and the
   Household context line in the instructions.
+- T4: RED observed for 9 of 11 `BrandsTest` session tests; GREEN after the
+  `set_session_brand` tool, Workspace `session_brands`, the
+  `session_brand_changed` event and brand-steered Purchase lines. The
+  rejection test was reshaped because three rejected calls in a row hit the
+  no-progress limit before present_proposal (expected behaviour).
+  Planning agent and web suites: 487 passed. Full suite (partition 101):
+  first `mix precommit` run had 3 failures in the untouched
+  `PlanningCandidateBuilderTest` (`plan_not_found` from its own setup);
+  the same seed (490195) and a fresh seed both pass 1141/1141 (25 skipped),
+  so it is an order-dependent flake outside this change.
 
 ## Next step
 
-T4.
+Push the branch and open the PR; review gate (Jorge el Curioso) runs separately.

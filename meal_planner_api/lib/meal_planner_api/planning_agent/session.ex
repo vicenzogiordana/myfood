@@ -21,7 +21,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   Subscribers receive `{:planning_agent_event, session_id, event}` where
   `event["type"]` is one of `progress`, `assistant_message`, `question`,
-  `proposal`, `optimizer_failed`, `consent_required`, `limit_reached`,
+  `proposal`, `optimizer_failed`, `session_brand_changed`, `consent_required`, `limit_reached`,
   `agent_unavailable`, `turn_completed`, `run_finished`, `session_cancelled`,
   `session_ended`.
 
@@ -242,7 +242,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       model_state: args.model_state,
       optimizer: args.optimizer,
       messages: [],
-      workspace: %{draft: nil, proposal: nil},
+      # Session Brands live here only: discarded with the Planning Session.
+      workspace: %{draft: nil, proposal: nil, session_brands: %{}},
       subscribers: %{},
       task: nil,
       deadline_ref: nil,
@@ -625,6 +626,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     "question" => ~w(text),
     "proposal" => ~w(proposal_id status meals purchase consumed_cost budget deviations),
     "optimizer_failed" => ~w(reason),
+    "session_brand_changed" => ~w(ingredient brand source previous_brand previous_source),
     "consent_required" => [],
     "limit_reached" => ~w(limit requires_authorization),
     "agent_unavailable" => ~w(reason),

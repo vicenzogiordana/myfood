@@ -23,6 +23,15 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
   is listed in `missing` with its reason and left out of the total, which is
   then only a lower bound (`complete?: false`). No unit conversion is applied.
 
+  Brands steer Product choice softly. A chosen brand for an ingredient (a
+  Session Brand, else a Household Brand Preference) is bought whenever a
+  usable Product of it exists, even when another brand is cheaper; the
+  cheaper option is kept on the line as `alternative` with its price
+  difference. A chosen brand that cannot be bought (no Product of it in the
+  needed unit and currency) falls back to the cheapest Product and is listed
+  in `brand_substitutions`, so the Member is always told: a chosen brand is
+  never swapped silently.
+
   Stale prices are uncertainty too: every line carries the age of its price,
   and lines priced with an observation 24 hours old or older are listed in
   `stale_prices` (see `MealPlannerApi.PlanningAgent.Prices`).
@@ -38,13 +47,22 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
   @currency "ARS"
 
   @type key :: {Ecto.UUID.t(), :g | :ml | :unit}
+  @type brand_choice :: %{brand: String.t(), source: :session | :household}
+  @type option :: %{
+          offer: Prices.offer(),
+          packages: pos_integer(),
+          total_cents: non_neg_integer()
+        }
   @type line :: %{
           required(:ingredient_id) => Ecto.UUID.t(),
           required(:quantity_milli) => pos_integer(),
           required(:unit) => :g | :ml | :unit,
           required(:packages) => pos_integer(),
           required(:total_cents) => non_neg_integer(),
-          required(:offer) => Prices.offer()
+          required(:offer) => Prices.offer(),
+          required(:brand_choice) => brand_choice() | nil,
+          required(:brand_honoured?) => boolean() | nil,
+          required(:alternative) => option() | nil
         }
   @type missing :: %{
           ingredient_id: Ecto.UUID.t(),
@@ -70,7 +88,8 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
   Calculates the Purchase of `meals` (each with a `recipe_id`) for the
   Household `account_id`, net of its Projected Pantry.
 
-  Options: `:now`, the time prices are aged at (default: the current time).
+  Options: `:now`, the time prices are aged at (default: the current time),
+  and `:brands`, the chosen brand per ingredient id (`brand_choice()`).
   """
   @spec for_meals([%{recipe_id: Ecto.UUID.t()}], Ecto.UUID.t(), keyword()) :: t()
   def for_meals(meals, account_id, opts \\ []) do
@@ -79,20 +98,28 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
     ingredient_ids = needs |> Map.keys() |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
     available = account_id |> ProjectedPantry.load() |> ProjectedPantry.available()
 
-    calculate(needs, available, Prices.offers_for(ingredient_ids, now), names(ingredient_ids))
+    calculate(
+      needs,
+      available,
+      Prices.offers_for(ingredient_ids, now),
+      names(ingredient_ids),
+      Keyword.get(opts, :brands, %{})
+    )
   end
 
   @doc """
   Pure Purchase calculation over aggregated `needs`, `available` stock,
-  offers grouped by ingredient id and ingredient names.
+  offers grouped by ingredient id, ingredient names and the chosen brand
+  per ingredient id.
   """
   @spec calculate(
           %{key() => pos_integer()},
           %{key() => non_neg_integer()},
           %{Ecto.UUID.t() => [Prices.offer()]},
-          %{Ecto.UUID.t() => String.t()}
+          %{Ecto.UUID.t() => String.t()},
+          %{Ecto.UUID.t() => brand_choice()}
         ) :: t()
-  def calculate(needs, available, offers_by_ingredient, names) do
+  def calculate(needs, available, offers_by_ingredient, names, brands \\ %{}) do
     sorted = Enum.sort_by(needs, fn {{id, unit}, _} -> {Map.get(names, id), id, unit} end)
 
     {lines, missing} =
@@ -103,8 +130,11 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
           {lines, missing}
         else
           case usable_offers(offers_by_ingredient, id, unit) do
-            {:ok, offers} -> {[line(id, unit, to_buy, offers) | lines], missing}
-            {:error, reason} -> {lines, [gap(id, unit, to_buy, reason, names) | missing]}
+            {:ok, offers} ->
+              {[line(id, unit, to_buy, offers, Map.get(brands, id)) | lines], missing}
+
+            {:error, reason} ->
+              {lines, [gap(id, unit, to_buy, reason, names) | missing]}
           end
         end
       end)
@@ -134,9 +164,12 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
             "quantity_milli" => line.quantity_milli,
             "unit" => Atom.to_string(line.unit),
             "packages" => line.packages,
-            "total_cents" => line.total_cents
+            "total_cents" => line.total_cents,
+            "brand_choice" => brand_choice_data(line),
+            "cheaper_alternative" => alternative_data(line.alternative, line.total_cents)
           })
         end),
+      "brand_substitutions" => brand_substitutions(purchase),
       "missing_prices" => Enum.map(purchase.missing, &missing_data/1),
       "stale_prices" =>
         purchase.lines
@@ -153,6 +186,45 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
       "currency" => purchase.currency,
       "complete" => purchase.complete?
     }
+  end
+
+  @doc """
+  Lines whose chosen brand could not be bought, as shown to the Member and
+  the model: the chosen brand, where it came from and what is bought instead.
+  """
+  @spec brand_substitutions(t()) :: [map()]
+  def brand_substitutions(purchase) do
+    for %{brand_honoured?: false} = line <- purchase.lines do
+      %{
+        "ingredient" => line.offer.ingredient,
+        "chosen_brand" => line.brand_choice.brand,
+        "source" => Atom.to_string(line.brand_choice.source),
+        "bought_brand" => line.offer.brand,
+        "bought_product" => line.offer.product,
+        "reason" => "brand_unavailable"
+      }
+    end
+  end
+
+  @doc """
+  Cheaper options for lines that follow a chosen brand: what the chosen
+  brand costs, the cheaper Product and the price difference. Offered to the
+  Member when the Purchase breaks the budget; never applied by code.
+  """
+  @spec brand_alternatives(t()) :: [map()]
+  def brand_alternatives(purchase) do
+    for %{brand_honoured?: true, alternative: %{} = alternative} = line <- purchase.lines do
+      %{
+        "ingredient" => line.offer.ingredient,
+        "chosen_brand" => line.brand_choice.brand,
+        "source" => Atom.to_string(line.brand_choice.source),
+        "chosen_total_cents" => line.total_cents,
+        "alternative_product" => alternative.offer.product,
+        "alternative_brand" => alternative.offer.brand,
+        "alternative_total_cents" => alternative.total_cents,
+        "difference_cents" => line.total_cents - alternative.total_cents
+      }
+    end
   end
 
   @doc "Whether any line of the Purchase is priced with a stale observation."
@@ -172,24 +244,68 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
 
   # ---------------------------------------------------------------------------
 
-  defp line(id, unit, to_buy, offers) do
-    {offer, packages, total} =
-      offers
-      |> Enum.map(fn offer ->
-        packages = ceil_div(to_buy, offer.package_quantity_milli)
-        {offer, packages, packages * offer.price_cents}
-      end)
-      |> Enum.min_by(fn {offer, _packages, total} ->
-        {total, offer.price_cents, offer.product, offer.product_id}
-      end)
+  defp line(id, unit, to_buy, offers, choice) do
+    options = Enum.map(offers, &option(&1, to_buy))
+    cheapest = cheapest(options)
+
+    {chosen, honoured?} =
+      case choice do
+        nil ->
+          {cheapest, nil}
+
+        %{brand: brand} ->
+          case Enum.filter(options, &brand?(&1.offer, brand)) do
+            [] -> {cheapest, false}
+            branded -> {cheapest(branded), true}
+          end
+      end
 
     %{
       ingredient_id: id,
       quantity_milli: to_buy,
       unit: unit,
-      packages: packages,
-      total_cents: total,
-      offer: offer
+      packages: chosen.packages,
+      total_cents: chosen.total_cents,
+      offer: chosen.offer,
+      brand_choice: choice,
+      brand_honoured?: honoured?,
+      alternative: if(cheapest.total_cents < chosen.total_cents, do: cheapest)
+    }
+  end
+
+  defp option(offer, to_buy) do
+    packages = ceil_div(to_buy, offer.package_quantity_milli)
+    %{offer: offer, packages: packages, total_cents: packages * offer.price_cents}
+  end
+
+  defp cheapest(options) do
+    Enum.min_by(options, fn %{offer: offer, total_cents: total} ->
+      {total, offer.price_cents, offer.product, offer.product_id}
+    end)
+  end
+
+  defp brand?(%{brand: nil}, _brand), do: false
+  defp brand?(offer, brand), do: String.downcase(offer.brand) == String.downcase(brand)
+
+  defp brand_choice_data(%{brand_choice: nil}), do: nil
+
+  defp brand_choice_data(line) do
+    %{
+      "brand" => line.brand_choice.brand,
+      "source" => Atom.to_string(line.brand_choice.source),
+      "honoured" => line.brand_honoured?
+    }
+  end
+
+  defp alternative_data(nil, _total), do: nil
+
+  defp alternative_data(alternative, total) do
+    %{
+      "product" => alternative.offer.product,
+      "brand" => alternative.offer.brand,
+      "packages" => alternative.packages,
+      "total_cents" => alternative.total_cents,
+      "difference_cents" => total - alternative.total_cents
     }
   end
 

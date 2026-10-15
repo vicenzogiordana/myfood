@@ -225,6 +225,7 @@ Every event is pushed as `agent_event` with `type` and `session_id`:
 | `question` | `{text}` | The agent asks one question; the turn ended |
 | `proposal` | `{proposal_id, status, meals: [{date, slot, recipe_id, name}], purchase, consumed_cost, budget, deviations}` | A Proposal validated by code; `status` is code-owned (`valid` or `requires_approval`). See "Proposal Purchase" below |
 | `optimizer_failed` | `{reason}` | The optimizer failed; no fallback plan is produced |
+| `session_brand_changed` | `{ingredient, brand, source, previous_brand, previous_source}` — `source` is `session`, `household` or `null` | The agent set or cleared a Session Brand (this Planning Session only; household settings are unchanged). `brand` is the brand now bought for the ingredient |
 | `consent_required` | `{}` | Consent must be given before the agent can call the AI provider |
 | `limit_reached` | `{limit, requires_authorization: true}` — `iterations`, `no_progress` or `time` | Execution stopped: 10 iterations per Planning Session (new messages do not reset them), 3 consecutive attempts without new evidence, or 5 minutes per request. Nothing runs until the Member sends `authorize_continuation` |
 | `agent_unavailable` | `{reason}` | The AI provider cannot be used now: `provider_unavailable` / `provider_timeout` after up to 5 retries, or at once for `provider_unauthorized`, `provider_rejected_request`, `provider_conflict`, `spend_cap_reached`, `token_cap_reached` |
@@ -239,7 +240,7 @@ computed by code from the Proposal's meals net of the Projected Pantry
 (Pantry minus stock committed to not-yet-cooked Planned Meals, inside or
 outside the range). Needs are aggregated once per ingredient and unit, then
 rounded up to whole packages of the stored Product with the lowest package
-total.
+total, unless a brand was chosen for the ingredient (see "Brands" below).
 
 ```json
 {
@@ -248,9 +249,16 @@ total.
                "packages": 1, "total_cents": 800, "product": "…", "brand": "…",
                "presentation": {"quantity_milli": 500000, "unit": "g"},
                "supermarket": "…", "price_cents": 800, "currency": "ARS",
-               "observed_at": "2026-10-13T09:30:00.000000Z"}],
+               "observed_at": "2026-10-13T09:30:00.000000Z",
+               "age_hours": 50, "fresh": false,
+               "brand_choice": {"brand": "…", "source": "household", "honoured": true},
+               "cheaper_alternative": {"product": "…", "brand": "…", "packages": 1,
+                                       "total_cents": 600, "difference_cents": 200}}],
     "missing_prices": [{"ingredient": "…", "quantity_milli": 2000, "unit": "g",
                         "reason": "no_stored_price"}],
+    "stale_prices": [{"ingredient": "…", "product": "…",
+                      "observed_at": "2026-10-13T09:30:00.000000Z", "age_hours": 50}],
+    "brand_substitutions": [],
     "total_cents": 800, "currency": "ARS", "complete": false
   },
   "consumed_cost": {"total_cents": 480, "currency": "ARS", "complete": false,
@@ -269,6 +277,31 @@ total.
   becomes a lower bound (`complete: false`, `uncertain: true`); then
   `within_budget` is `null` unless the lower bound already overspends.
 - `budget_cents` is `null` when the Household has no budget set.
+- Every line carries the age of its price. A price is fresh under 24 hours;
+  lines priced with an older observation are listed in `stale_prices` and
+  make the budget `uncertain`. Prices are refreshed live by `lookup_prices`
+  (see `docs/price-scraper-contract.md`); a failed refresh keeps the old
+  price with its real age.
+
+#### Brands
+
+A chosen brand for an ingredient is the Session Brand (set from the chat,
+this Planning Session only) or else the Household's Brand Preference (set in
+household settings: `GET`, `PUT`, `DELETE
+/api/accounts/:account_id/settings/brand-preferences[/:ingredient_id]` with
+`{"brand": "…"}`; this is also the target of a "keep this brand" shortcut).
+
+- A chosen brand is bought whenever a Product of it exists in the needed
+  unit and currency, even when another brand is cheaper; `brand_choice`
+  says so and `cheaper_alternative` names the cheaper Product and the
+  difference.
+- When it cannot be bought, the cheapest Product is bought instead and the
+  line appears in `brand_substitutions` (`ingredient`, `chosen_brand`,
+  `source`, `bought_brand`, `bought_product`, `reason: brand_unavailable`).
+  A chosen brand is never swapped silently.
+- When the Purchase breaks the budget, the agent is given the cheaper brand
+  alternatives with their price difference to offer the Member; code never
+  applies them.
 
 Paid execution requires `OPENAI_API_KEY`, `PLANNING_AGENT_SPEND_CAP_MICROS`,
 `PLANNING_AGENT_TOKEN_CAP`, `OPENAI_INPUT_PRICE_MICROS_PER_MTOK` and

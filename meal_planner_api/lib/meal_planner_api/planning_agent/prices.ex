@@ -136,6 +136,30 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
     %{prices: offers |> Map.values() |> List.flatten(), missing: missing, warnings: warnings}
   end
 
+  @doc "The Ingredient named `name` (case-insensitive exact match), or `nil`."
+  @spec ingredient_by_name(String.t()) :: %{id: Ecto.UUID.t(), name: String.t()} | nil
+  def ingredient_by_name(name) do
+    name = String.trim(name)
+    Map.get(ingredients_by_name([name]), String.downcase(name))
+  end
+
+  @doc """
+  The brand of a stored Product of `ingredient_id` matching `brand`
+  (case-insensitive), spelled as stored, or `nil` when none has it.
+  """
+  @spec stored_brand(Ecto.UUID.t(), String.t()) :: String.t() | nil
+  def stored_brand(ingredient_id, brand) do
+    lowered = String.downcase(brand)
+
+    from(p in Product,
+      where: p.ingredient_id == ^ingredient_id and fragment("lower(?)", p.brand) == ^lowered,
+      order_by: [asc: p.brand],
+      limit: 1,
+      select: p.brand
+    )
+    |> Repo.one()
+  end
+
   @doc "JSON-safe entry of a lookup's `missing` list."
   @spec missing_data(map()) :: map()
   def missing_data(missing) do
