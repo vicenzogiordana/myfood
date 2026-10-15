@@ -10,7 +10,8 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
 
     * `start_session` — `%{"range_from", "range_to", "slots"}` (slots default
       to lunch and dinner). Replies `%{session_id}` or
-      `%{reason: "session_already_active" | "range_already_planned" | ...}`.
+      `%{reason: "session_already_active" | "range_already_planned" | ...}`;
+      a failure without a typed reason replies `internal_error`.
     * `give_consent` — records the Member's consent to external AI use.
     * `send_message` — `%{"text"}`; replies `:ok` or
       `%{reason: "consent_required" | "busy" | "invalid_message" | "message_too_long"}`.
@@ -76,8 +77,10 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
     with_own_session(socket, fn pid -> Session.record_consent(pid) end)
   end
 
-  def handle_in("send_message", %{"text" => text}, socket) when is_binary(text) do
-    with_own_session(socket, fn pid -> Session.send_message(pid, text) end)
+  # A missing or non-binary text still reaches the session, which refuses it
+  # with invalid_message as documented.
+  def handle_in("send_message", payload, socket) when is_map(payload) do
+    with_own_session(socket, fn pid -> Session.send_message(pid, Map.get(payload, "text")) end)
   end
 
   def handle_in("cancel_session", _payload, socket) do
@@ -139,6 +142,9 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
     if AccountAccess.eligible?(account_id), do: :ok, else: {:error, :subscription_required}
   end
 
+  # Typed refusals are atoms. Anything else (a changeset or an unexpected
+  # tuple) is an internal failure, never blamed on the payload, and its
+  # detail stays on the server.
   defp reason_string(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp reason_string(_reason), do: "invalid_payload"
+  defp reason_string(_reason), do: "internal_error"
 end

@@ -94,7 +94,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         attrs: attrs,
         session_id: row.id,
         model: model,
-        model_state: model_state,
+        model_state: seal(model_state),
         optimizer: Keyword.get_lazy(opts, :optimizer, fn -> config(:optimizer) end),
         subscriber: Keyword.get(opts, :subscriber),
         max_iterations: Keyword.get(opts, :max_iterations, @default_max_iterations),
@@ -269,8 +269,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   # Model state checkpoints carry paid usage (spend ledger), so the session
   # keeps it even when the turn is later killed or crashes.
-  def handle_info({:model_state, ref, model_state}, %{task: %Task{ref: ref}} = state),
-    do: {:noreply, %{state | model_state: model_state}}
+  def handle_info({:model_state, ref, sealed}, %{task: %Task{ref: ref}} = state),
+    do: {:noreply, %{state | model_state: sealed}}
 
   def handle_info({:model_state, _stale_ref, _model_state}, state), do: {:noreply, state}
 
@@ -349,6 +349,26 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     :ok
   end
 
+  # The Household chat is reduced to its length and a Member message to a
+  # marker wherever OTP prints this callback's result (`:sys.get_status/1`
+  # and crash reports). The model state, which holds the provider API key,
+  # is sealed instead (see `seal/1`): OTP 29 appends the raw stacktrace,
+  # whose top frame can carry the state, outside this callback.
+  @impl true
+  def format_status(status) do
+    status
+    |> Map.replace_lazy(:state, &redact_state/1)
+    |> Map.replace_lazy(:message, &redact_message/1)
+  end
+
+  defp redact_state(%{messages: messages} = state),
+    do: %{state | messages: {:redacted, length(messages)}}
+
+  defp redact_state(state), do: state
+
+  defp redact_message({:send_message, _text}), do: {:send_message, :redacted}
+  defp redact_message(message), do: message
+
   # ===========================================================================
   # Turn management
   # ===========================================================================
@@ -378,13 +398,16 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       Task.Supervisor.async_nolink(@task_supervisor, fn ->
         ref = receive(do: ({^holder, ref} -> ref))
         emit_fun = fn event -> send(session, {:agent_event, ref, event}) end
-        checkpoint = fn model_state -> send(session, {:model_state, ref, model_state}) end
+        checkpoint = fn model_state -> send(session, {:model_state, ref, seal(model_state)}) end
         tool_context = Map.put(turn.tool_context, :emit, emit_fun)
 
-        %{turn | tool_context: tool_context}
-        |> Map.put(:emit, emit_fun)
-        |> Map.put(:checkpoint, checkpoint)
-        |> Loop.run()
+        result =
+          %{turn | tool_context: tool_context, model_state: unseal(turn.model_state)}
+          |> Map.put(:emit, emit_fun)
+          |> Map.put(:checkpoint, checkpoint)
+          |> Loop.run()
+
+        %{result | model_state: seal(result.model_state)}
       end)
 
     send(task.pid, {holder, task.ref})
@@ -417,6 +440,13 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   # ===========================================================================
   # Helpers
   # ===========================================================================
+
+  # The model state holds the provider API key. It travels and is stored
+  # sealed in a closure, which inspects as `#Function<...>`, so status
+  # output, crash reports and stacktrace arguments never print the key.
+  # Only the turn process unseals it, right before calling the model.
+  defp seal(model_state), do: fn -> model_state end
+  defp unseal(sealed) when is_function(sealed, 0), do: sealed.()
 
   defp add_subscriber(state, pid) do
     if Map.has_key?(state.subscribers, pid) do

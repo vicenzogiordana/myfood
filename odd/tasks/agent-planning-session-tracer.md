@@ -75,6 +75,7 @@ with its tests at once; commits stay reviewable work units).
 | R2 | Jorge round 2 (PR #114): bound Member message size; stop claiming code enforces budget and Nutrition Goal | inline | done (see Review round 2) |
 | R3 | Jorge round 3 (PR #114): reap the optimizer when the turn is brutally killed; drop the draft on failed re-runs; 14-digit consent migration version | inline | done (see Review round 3) |
 | R4 | Jorge round 4 (PR #114): trap exits so shutdown releases the lock; stop a Session whose lease renewal finds its row expired | inline | done (see Review round 4) |
+| R5 | Jorge round 5 (PR #114): keep the provider API key out of status output and crash reports; align channel error replies with the documented contract | inline | done (see Review round 5) |
 
 ## Checks
 
@@ -181,6 +182,37 @@ Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix 
 `config/test.exs` does not append `MIX_TEST_PARTITION` to the DB name, so isolation relies
 on `MYFOOD_TEST_DATABASE`.
 
+## Review round 5 (Jorge el Curioso, PR #114)
+
+Route: inline (two source files, their tests and `docs/CHANNELS.md`; each fix is small and
+already understood). Confirmed findings and fixes:
+
+1. SP-1 (medium): the OpenAI API key (`model_state.config.api_key`) and the Household chat
+   lived in the Session state with no redaction, and OTP prints that state in
+   `:sys.get_status/1` and crash reports. The Session now stores the model state sealed in a
+   closure (`seal/1`, inspected as `#Function<...>`) from `start/2` onward, including
+   checkpoints and the turn result; only the turn process unseals it before calling the
+   model. A `format_status/1` callback reduces the chat to its length and a Member message
+   to a marker. Plain `format_status/1` redaction was not enough: OTP 29 appends the raw
+   stacktrace, whose `handle_call/3` frame carries the full state, outside the callback.
+   The model behaviour and the spend ledger are unchanged. RED: new `session_test.exs`
+   cases "the provider API key is absent from the session's status output" and "... from a
+   crashed session's report" (forced `FunctionClauseError`, logger translator at
+   `limit: :infinity`) both printed `sk-test-secret`; GREEN.
+2. CD-3 (low): `send_message` without a binary `text` fell to the catch-all and replied
+   `invalid_payload`, and every non-atom error became `invalid_payload`. `send_message` now
+   always reaches the Session, which replies `invalid_message`; non-atom reasons reply
+   `internal_error`. `docs/CHANNELS.md` now lists `invalid_message`, `message_too_long`,
+   `overlapping_range`, `pricing_unconfigured`, `provider_unconfigured`, `internal_error`
+   and the catch-all `invalid_payload`. RED: new channel cases "a message without text is
+   refused with invalid_message" and "a non-atom failure is replied as internal_error"
+   both got `invalid_payload`; GREEN. The overlapping-range case passed before the fix: the
+   Household lock check runs first, so an overlap is reported as `session_already_active`,
+   which the docs now state (`overlapping_range` stays the store's last-resort guard).
+
+Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix test`
+989 passed, 20 skipped; `mix precommit` exit 0, 989 passed, 20 skipped.
+
 ## Known limits handed to later slices of #93
 
 - Purchase calculation and budget deviations (`requires_approval`), Nutrition Goal in the
@@ -191,4 +223,4 @@ on `MYFOOD_TEST_DATABASE`.
 
 ## Next step
 
-Re-run the Jorge review gate on PR #114 after review round 4.
+Re-run the Jorge review gate on PR #114 after review round 5.

@@ -7,6 +7,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
   use ExUnit.Case, async: false
 
   import Ecto.Query
+  import ExUnit.CaptureLog
   import MealPlannerApi.PlanningAgentFixtures
 
   alias MealPlannerApi.Data.PlanningRepo
@@ -343,6 +344,60 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, _}
       assert_receive {:planning_agent_event, ^session_id, %{"type" => "session_ended"}}
       assert %PlanningSession{status: :expired} = Repo.get!(PlanningSession, session_id)
+    end
+  end
+
+  describe "secrets in process state" do
+    @secret "sk-test-secret"
+
+    setup do
+      # Print states and stacktraces in full, so a truncated report cannot
+      # hide the secret and make the assertion pass for the wrong reason.
+      previous = Application.get_env(:logger, :translator_inspect_opts)
+      Application.put_env(:logger, :translator_inspect_opts, limit: :infinity)
+      on_exit(fn -> Application.put_env(:logger, :translator_inspect_opts, previous || []) end)
+    end
+
+    defp start_with_secret!(household, member) do
+      model_opts = [
+        api_key: @secret,
+        spend_cap_micros: 1_000,
+        token_cap: 1_000,
+        input_price_micros_per_mtok: 1,
+        output_price_micros_per_mtok: 1
+      ]
+
+      start!(household, member, [], model: {OpenAIResponses, model_opts})
+    end
+
+    test "the provider API key is absent from the session's status output",
+         %{household: h, owner: owner} do
+      {_session_id, pid} = start_with_secret!(h, owner)
+
+      status = inspect(:sys.get_status(pid), limit: :infinity, printable_limit: :infinity)
+
+      assert status =~ "model_state"
+      refute status =~ @secret
+
+      :ok = Session.cancel(pid, %{membership_id: owner.membership_id, owner?: true})
+    end
+
+    test "the provider API key is absent from a crashed session's report",
+         %{household: h, owner: owner} do
+      {_session_id, pid} = start_with_secret!(h, owner)
+      ref = Process.monitor(pid)
+
+      log =
+        capture_log(fn ->
+          # No handle_call clause matches, so the session crashes with its
+          # state in the stacktrace arguments.
+          catch_exit(GenServer.call(pid, {:cancel, :not_an_actor}))
+          assert_receive {:DOWN, ^ref, :process, ^pid, _}
+          Process.sleep(50)
+        end)
+
+      assert log =~ "handle_call"
+      refute log =~ @secret
     end
   end
 

@@ -16,6 +16,11 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
   alias MealPlannerApi.Repo
   alias MealPlannerApiWeb.{PlanningAgentChannel, UserSocket}
 
+  defmodule FailingInitModel do
+    @moduledoc false
+    def init(_opts), do: {:error, {:unexpected, "detail"}}
+  end
+
   @range %{"range_from" => "2026-11-02", "range_to" => "2026-11-02", "slots" => ["dinner"]}
 
   setup do
@@ -123,6 +128,56 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     refute_push("agent_event", %{"type" => "assistant_message"}, 100)
 
     cancel!(socket)
+  end
+
+  test "a message without text is refused with invalid_message", %{household: h} do
+    socket = join!(h, h.owner)
+    ref = push(socket, "start_session", @range)
+    assert_reply(ref, :ok, _)
+
+    ref = push(socket, "send_message", %{})
+    assert_reply(ref, :error, %{reason: "invalid_message"})
+
+    ref = push(socket, "send_message", %{"text" => 42})
+    assert_reply(ref, :error, %{reason: "invalid_message"})
+
+    cancel!(socket)
+  end
+
+  test "an overlapping range while a session is active is refused with a documented reason",
+       %{household: h} do
+    socket = join!(h, h.owner)
+    ref = push(socket, "start_session", %{@range | "range_to" => "2026-11-04"})
+    assert_reply(ref, :ok, _)
+
+    # The Household lock is checked before the range overlap, so an
+    # overlapping start is reported as session_already_active.
+    other_socket = join!(h, member!(h))
+
+    ref =
+      push(other_socket, "start_session", %{
+        @range
+        | "range_from" => "2026-11-03",
+          "range_to" => "2026-11-05"
+      })
+
+    assert_reply(ref, :error, %{reason: "session_already_active"})
+
+    cancel!(socket)
+  end
+
+  test "a non-atom failure is replied as internal_error, never invalid_payload",
+       %{household: h} do
+    # A model whose init fails with a tuple reason stands in for any
+    # changeset or tuple error surfacing from the session.
+    Application.put_env(:meal_planner_api, :planning_agent,
+      model: {__MODULE__.FailingInitModel, []},
+      optimizer: {FakeOptimizer, []}
+    )
+
+    socket = join!(h, h.owner)
+    ref = push(socket, "start_session", @range)
+    assert_reply(ref, :error, %{reason: "internal_error"})
   end
 
   test "after consent a message produces a validated Proposal event", %{household: h} do
