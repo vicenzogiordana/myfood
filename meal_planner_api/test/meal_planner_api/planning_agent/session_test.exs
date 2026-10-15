@@ -9,6 +9,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
   import Ecto.Query
   import MealPlannerApi.PlanningAgentFixtures
 
+  alias MealPlannerApi.Data.PlanningRepo
   alias MealPlannerApi.Persistence.Planning.PlanningSession
   alias MealPlannerApi.PlanningAgent.Model.{OpenAIResponses, Scripted}
   alias MealPlannerApi.PlanningAgent.Session
@@ -306,6 +307,42 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
                  model: {Scripted, []},
                  subscriber: self()
                )
+    end
+  end
+
+  describe "shutdown and lease" do
+    test "a supervisor shutdown releases the Household lock", %{household: h, owner: owner} do
+      {session_id, pid} = start!(h, owner, [])
+      ref = Process.monitor(pid)
+
+      assert :ok =
+               DynamicSupervisor.terminate_child(
+                 MealPlannerApi.PlanningAgent.SessionSupervisor,
+                 pid
+               )
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "session_ended"}}
+      assert active_sessions(h) == []
+
+      assert {:ok, _} =
+               Session.start(session_attrs(h, owner, {@monday, @tuesday}),
+                 model: {Scripted, []},
+                 subscriber: self()
+               )
+    end
+
+    test "a session whose lock row was expired stops on lease renewal",
+         %{household: h, owner: owner} do
+      {session_id, pid} = start!(h, owner, [])
+      ref = Process.monitor(pid)
+
+      assert {:ok, _} = PlanningRepo.expire_session(h.account_id, session_id)
+      send(pid, :renew_lease)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "session_ended"}}
+      assert %PlanningSession{status: :expired} = Repo.get!(PlanningSession, session_id)
     end
   end
 

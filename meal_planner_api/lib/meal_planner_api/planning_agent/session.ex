@@ -164,6 +164,10 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   @impl true
   def init(args) do
+    # Trap exits so a supervisor or application shutdown runs terminate/2,
+    # which releases the Household lock instead of waiting for the lease to
+    # lapse. Turns run under async_nolink, so no turn exit reaches here.
+    Process.flag(:trap_exit, true)
     %{attrs: attrs} = args
     {:ok, _} = Registry.register(@registry, {:household, attrs.account_id}, args.session_id)
 
@@ -313,9 +317,22 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   def handle_info(:renew_lease, state) do
     until = DateTime.add(DateTime.utc_now(), @lease_seconds, :second)
-    _ = PlanningRepo.renew_lease(state.account_id, state.session_id, until)
-    schedule_lease_renewal()
-    {:noreply, state}
+
+    case PlanningRepo.renew_lease(state.account_id, state.session_id, until) do
+      :ok ->
+        schedule_lease_renewal()
+        {:noreply, state}
+
+      # The lock row was expired behind this session's back (e.g. the Sweeper
+      # after a lapsed lease): the Household may already belong to a new
+      # session, so stop spending now. session_id is cleared so terminate/2
+      # does not expire the row a second time.
+      {:error, :not_active} ->
+        Logger.warning("planning agent session lost its lock; stopping")
+        state = stop_turn(state)
+        emit(state, %{"type" => "session_ended"})
+        {:stop, :normal, %{state | session_id: nil}}
+    end
   end
 
   def handle_info(_message, state), do: {:noreply, state}

@@ -74,6 +74,7 @@ with its tests at once; commits stay reviewable work units).
 | R1 | Jorge round 1 (PR #114): ledger survives killed turns, unknown usage settles at the reservation, refused cancel still expires | inline | done (see Review round 1) |
 | R2 | Jorge round 2 (PR #114): bound Member message size; stop claiming code enforces budget and Nutrition Goal | inline | done (see Review round 2) |
 | R3 | Jorge round 3 (PR #114): reap the optimizer when the turn is brutally killed; drop the draft on failed re-runs; 14-digit consent migration version | inline | done (see Review round 3) |
+| R4 | Jorge round 4 (PR #114): trap exits so shutdown releases the lock; stop a Session whose lease renewal finds its row expired | inline | done (see Review round 4) |
 
 ## Checks
 
@@ -157,6 +158,29 @@ Confirmed findings and fixes:
 Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix test`
 982 passed, 20 skipped; `mix precommit` exit 0, 982 passed, 20 skipped.
 
+## Review round 4 (Jorge el Curioso, PR #114)
+
+Route: inline (one source file and its test). Confirmed findings and fixes:
+
+1. Session did not trap exits, so a `:shutdown` from the DynamicSupervisor or Application
+   skipped `terminate/2` and left the `planning_sessions` row `:active` until the lease
+   lapsed (low). `init/1` now sets `Process.flag(:trap_exit, true)`; turns run under
+   `Task.Supervisor.async_nolink`, so no turn `:EXIT` reaches the Session. RED: new
+   `session_test.exs` case "a supervisor shutdown releases the Household lock"
+   (`DynamicSupervisor.terminate_child`) never received `session_ended` (17/19 with the
+   case below); GREEN.
+2. `handle_info(:renew_lease)` discarded `{:error, :not_active}` and kept running and
+   spending after its row was expired (low). The Session now stops the turn, emits
+   `session_ended` and stops `:normal` with `session_id: nil`, so `terminate/2` does not
+   call `expire_session` again. RED: new case "a session whose lock row was expired stops
+   on lease renewal" (`PlanningRepo.expire_session` + `send(pid, :renew_lease)`) got no
+   `:DOWN`; GREEN 19/19 (three consecutive runs).
+
+Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix test`
+984 passed, 20 skipped; `mix precommit` exit 0, 984 passed, 20 skipped.
+`config/test.exs` does not append `MIX_TEST_PARTITION` to the DB name, so isolation relies
+on `MYFOOD_TEST_DATABASE`.
+
 ## Known limits handed to later slices of #93
 
 - Purchase calculation and budget deviations (`requires_approval`), Nutrition Goal in the
@@ -167,4 +191,4 @@ Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix 
 
 ## Next step
 
-Re-run the Jorge review gate on PR #114 after review round 3.
+Re-run the Jorge review gate on PR #114 after review round 4.
