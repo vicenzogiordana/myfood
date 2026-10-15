@@ -50,9 +50,11 @@ defmodule MealPlannerApi.PlanningAgent.CallBounds do
   # module does not know, is never retried automatically. An invalid provider
   # response (incomplete, or neither text nor tool calls) is not transient: it
   # was already billed, and resending the same request would be billed again
-  # for the same answer.
+  # for the same answer. `:provider_busy` (the global provider concurrency
+  # cap was full) is refused before any spend is reserved, so a retry costs
+  # nothing.
   @transient %{
-    model: [:timeout, :provider_unavailable, :provider_timeout],
+    model: [:timeout, :provider_unavailable, :provider_timeout, :provider_busy],
     solver: [],
     read: [:timeout, :search_failed]
   }

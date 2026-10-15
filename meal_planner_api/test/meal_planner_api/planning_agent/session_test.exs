@@ -219,6 +219,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
       # One worst-case reservation (~400_000 micro-USD) fits the cap; two do not.
       model_opts = [
         api_key: "test-key",
+        max_concurrent_calls: 100,
         spend_cap_micros: 600_000,
         token_cap: 100_000_000,
         input_price_micros_per_mtok: 1_000_000,
@@ -261,6 +262,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
 
       model_opts = [
         api_key: "test-key",
+        max_concurrent_calls: 100,
         spend_cap_micros: 100_000_000,
         token_cap: 1_000_000,
         input_price_micros_per_mtok: 1,

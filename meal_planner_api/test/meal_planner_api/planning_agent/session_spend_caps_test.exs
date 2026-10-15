@@ -48,6 +48,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionSpendCapsTest do
   defp hanging_provider(spend_cap_micros, token_cap) do
     {OpenAIResponses,
      api_key: "test-key",
+     max_concurrent_calls: 100,
      spend_cap_micros: spend_cap_micros,
      token_cap: token_cap,
      input_price_micros_per_mtok: 1_000_000,
