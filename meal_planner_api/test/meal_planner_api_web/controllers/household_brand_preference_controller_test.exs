@@ -126,6 +126,32 @@ defmodule MealPlannerApiWeb.HouseholdBrandPreferenceControllerTest do
     assert json_response(conn, 422)["error"] == "invalid_brand_preference"
   end
 
+  test "bounds a brand to 120 codepoints, combining marks included", ctx do
+    conn =
+      put(authed(ctx.conn, ctx.owner_token), prefs_path(ctx.household, ctx.pasta), %{
+        "brand" => String.duplicate("a", 121)
+      })
+
+    assert %{"error" => "invalid_brand_preference", "details" => %{"brand" => [_ | _]}} =
+             json_response(conn, 422)
+
+    # One grapheme, 301 codepoints: longer than the varchar(255) column.
+    conn =
+      put(authed(build_conn(), ctx.owner_token), prefs_path(ctx.household, ctx.oil), %{
+        "brand" => "a" <> String.duplicate("́", 300)
+      })
+
+    assert %{"error" => "invalid_brand_preference", "details" => %{"brand" => [_ | _]}} =
+             json_response(conn, 422)
+
+    conn =
+      put(authed(build_conn(), ctx.owner_token), prefs_path(ctx.household, ctx.oil), %{
+        "brand" => String.duplicate("a", 120)
+      })
+
+    assert json_response(conn, 200)["data"]["brand"] == String.duplicate("a", 120)
+  end
+
   test "rejects a blank brand and an unknown ingredient", ctx do
     conn =
       put(authed(ctx.conn, ctx.owner_token), prefs_path(ctx.household, ctx.pasta), %{

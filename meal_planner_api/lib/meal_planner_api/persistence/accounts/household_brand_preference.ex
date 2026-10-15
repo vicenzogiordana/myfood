@@ -26,7 +26,9 @@ defmodule MealPlannerApi.Persistence.Accounts.HouseholdBrandPreference do
     |> cast(attrs, [:account_id, :ingredient_id, :brand])
     |> update_change(:brand, &single_line/1)
     |> validate_required([:account_id, :ingredient_id, :brand])
-    |> validate_length(:brand, max: @max_brand_length)
+    # Codepoints, not graphemes: the varchar column counts codepoints, and a
+    # run of combining marks is a single grapheme.
+    |> validate_length(:brand, max: @max_brand_length, count: :codepoints)
     |> validate_format(:brand, ~r/\A[^\p{C}]+\z/u)
     |> foreign_key_constraint(:account_id)
     |> foreign_key_constraint(:ingredient_id)

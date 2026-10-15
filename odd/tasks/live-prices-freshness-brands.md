@@ -236,6 +236,20 @@ review rounds) is split into three more slices:
   breaks cannot forge instruction lines): 13 passed. `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix precommit`
   (compile with warnings as errors, format, full suite) 1291 passed, 25
   skipped.
+- S3 review round (Jorge el Curioso on PR #135), route: inline, one
+  confirmed low-severity finding in `HouseholdBrandPreference`:
+  - `validate_length(:brand, max: 120)` counted graphemes while the
+    `varchar(255)` column counts codepoints, so "a" followed by 300
+    combining acute accents (one grapheme) passed the changeset and raised
+    `string_data_right_truncation` (a 500 instead of a 422), and shorter
+    combining-mark runs exceeded the intended 120 bound. RED: the new
+    controller test got `Postgrex.Error` on that PUT. GREEN: the length
+    check uses `count: :codepoints`; the combining-mark brand and a
+    121-character ASCII brand return 422 with a `brand` error, and a
+    120-character brand is still accepted.
+  - Focused `HouseholdBrandPreferenceControllerTest` 9 passed.
+    `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1292 passed,
+    25 skipped; `mix precommit` 1292 passed, 25 skipped.
 
 ## Next step
 
