@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Meal optimizer v2: OR-Tools solver behind the Elixir Port protocol (spec #93).
+Meal optimizer v2: OR-Tools solver behind the Elixir Port protocol (spec #93,
+issues #97 and #98).
 
 Protocol (JSON lines over stdio):
   1. Read handshake: {"type":"handshake","version":"1.0"}
@@ -12,7 +13,8 @@ Protocol (JSON lines over stdio):
      → {"type":"error","id":"<uuid>","error":"<reason>","details":{...}}
 
 Payload:
-  days, slots                  lists of non-empty strings
+  days                         the Planning Range as ISO dates (YYYY-MM-DD)
+  slots                        list of non-empty strings
   candidates_by_slot           {slot: [candidate, ...]}; a candidate carries
                                recipe_id, estimated_cost_cents, per-serving
                                calories/protein_g/carbs_g/fat_g,
@@ -23,6 +25,12 @@ Payload:
                                protein_g, carbs_g and fat_g (the Household
                                Nutrition Goal, per standard portion)
   constraints.inventory_weight optional preference weight for pantry hits
+  constraints.variety_cap      optional positive integer: how many times a
+                               recipe may appear in any rolling 7-day window
+                               (default 2; adjustable per Planning Session)
+  prior_meals                  optional fixed context: the confirmed
+                               {"day","slot","recipe_id"} Planned Meals of the
+                               6 days before the range; never returned or moved
   excluded_recipe_ids          optional recipes the Member excluded
   time_limit_ms                optional solver deadline (default 120 s)
 
@@ -40,16 +48,28 @@ leave a slot without candidates the error is "infeasible" with named causes
 ("coverage", "restriction", "excluded_recipe"). A solver deadline without any
 plan is "inconclusive", never "infeasible".
 
-Backend choice: SCIP through ``ortools.linear_solver.pywraplp`` (OR-Tools
-version pinned in requirements.txt). The model is a small MIP — one boolean
-per day/slot/candidate plus continuous deviation variables — and nutrition
-coefficients are fractional grams and kcal, which SCIP takes as-is; CP-SAT
-would need every coefficient scaled to integers. Priority is exact, not
-weighted: the solver runs one stage per goal (budget, calories, macros, then
-cost/pantry preference) and freezes each stage's optimum before the next, so
-no amount of a lower goal can buy any amount of a higher one.
+Variety rules never relax either: a recipe appears at most ``variety_cap``
+times in any rolling 7-day window (counted across every slot, prior meals
+included), and never in the same slot on consecutive days (the day before the
+range included). When no plan satisfies them the error is "infeasible" with
+the single cause {"cause": "variety"}.
+
+Backend choice: CP-SAT through ``ortools.linear_solver.pywraplp`` (OR-Tools
+version pinned in requirements.txt). The model is one boolean per
+day/slot/candidate plus deviation variables. It was SCIP until the variety
+rules (#98): with the rolling cap and the consecutive-slot rule a 90-meal
+range made SCIP stop at its 60 s budget still 10 kcal short of a calorie goal
+that CP-SAT meets exactly in about 17 s, because the model is a combinatorial
+assignment problem where CP-SAT's search is far stronger. The wrapper scales
+fractional coefficients (grams, kcal) to integers itself, and every reported
+Deviation is recomputed exactly from the chosen recipes, so scaling never
+reaches the reply. Priority is exact, not weighted: the solver runs one stage
+per goal (budget, calories, macros, cost/pantry preference, then a stable
+tie-break) and freezes each stage's optimum before the next, so no amount of
+a lower goal can buy any amount of a higher one.
 """
 
+import datetime
 import json
 import sys
 import time
@@ -57,6 +77,8 @@ import time
 from ortools.linear_solver import pywraplp
 
 DEFAULT_TIME_LIMIT_MS = 120_000
+DEFAULT_VARIETY_CAP = 2
+VARIETY_WINDOW_DAYS = 7
 NUTRITION_GOALS = [
     # (goal, candidate field, priority)
     ("calories", "calories_per_serving", 2),
@@ -64,8 +86,8 @@ NUTRITION_GOALS = [
     ("carbs_g", "carbs_g_per_serving", 3),
     ("fat_g", "fat_g_per_serving", 3),
 ]
-# Absolute slack used when freezing a stage optimum: well above SCIP's
-# feasibility tolerance and far below one cent, one kcal or one gram.
+# Absolute slack used when freezing a stage optimum: above the solver's
+# numeric tolerance and far below one cent, one kcal or one gram.
 STAGE_TOLERANCE = 1e-4
 
 
@@ -89,7 +111,7 @@ def _solution_response(request_id, result):
 
 
 def _create_solver():
-    return pywraplp.Solver.CreateSolver("SCIP")
+    return pywraplp.Solver.CreateSolver("CP-SAT")
 
 
 def _read_line():
@@ -110,13 +132,38 @@ def _is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _parse_day(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _is_iso_day(value):
+    # fromisoformat also accepts compact forms such as "20260907"; the
+    # contract is the extended YYYY-MM-DD form only.
+    day = _parse_day(value)
+    return day is not None and day.isoformat() == value
+
+
+def _is_prior_meal(entry):
+    return (
+        isinstance(entry, dict)
+        and _is_iso_day(entry.get("day"))
+        and isinstance(entry.get("slot"), str) and entry["slot"]
+        and isinstance(entry.get("recipe_id"), str) and entry["recipe_id"]
+    )
+
+
 def _validate_payload(payload):
     days = payload.get("days")
     slots = payload.get("slots")
     constraints = payload.get("constraints")
     candidates_by_slot = payload.get("candidates_by_slot")
 
-    if not isinstance(days, list) or not all(isinstance(day, str) and day for day in days):
+    if not isinstance(days, list) or not all(_is_iso_day(day) for day in days):
         return "invalid_days"
 
     if not isinstance(slots, list) or not all(isinstance(slot, str) and slot for slot in slots):
@@ -146,6 +193,14 @@ def _validate_payload(payload):
     excluded = payload.get("excluded_recipe_ids", [])
     if not isinstance(excluded, list) or not all(isinstance(rid, str) for rid in excluded):
         return "invalid_excluded_recipes"
+
+    variety_cap = constraints.get("variety_cap", DEFAULT_VARIETY_CAP)
+    if not isinstance(variety_cap, int) or isinstance(variety_cap, bool) or variety_cap < 1:
+        return "invalid_variety_cap"
+
+    prior_meals = payload.get("prior_meals", [])
+    if not isinstance(prior_meals, list) or not all(_is_prior_meal(entry) for entry in prior_meals):
+        return "invalid_prior_meals"
 
     time_limit = payload.get("time_limit_ms", DEFAULT_TIME_LIMIT_MS)
     if not _is_number(time_limit) or time_limit <= 0:
@@ -245,6 +300,8 @@ def _solve(payload, create_solver=None):
             for index, candidate in enumerate(allowed_by_slot[slot])
         )
 
+    _add_variety_rules(solver, x, payload, allowed_by_slot)
+
     infinity = solver.infinity()
 
     # Stage 1 — budget overspend.
@@ -271,17 +328,26 @@ def _solve(payload, create_solver=None):
                     distance.extend([under, over])
             stages.append((solver.Sum(distance), distance))
 
-    # Final stage — cheapest plan that uses the pantry, with a stable tie-break.
+    # Preference stage — cheapest plan that uses the pantry.
     inventory_weight = _candidate_num(constraints, "inventory_weight") or 100.0
     stages.append((solver.Sum(
         x[(day, slot, index)] * (
             _candidate_num(candidate, "estimated_cost_cents")
             - inventory_weight * _candidate_num(candidate, "inventory_hit_count")
-            + index / 1_000_000.0
         )
         for day in days
         for slot in slots
         for index, candidate in enumerate(allowed_by_slot[slot])
+    ), []))
+
+    # Final stage — stable tie-break: among equal plans prefer the candidates
+    # that sort first (allowed candidates are sorted by recipe id), so input
+    # order never changes the plan. A stage of its own keeps it exact.
+    stages.append((solver.Sum(
+        x[(day, slot, index)] * index
+        for day in days
+        for slot in slots
+        for index, _candidate in enumerate(allowed_by_slot[slot])
     ), []))
 
     assignment = None
@@ -314,8 +380,14 @@ def _solve(payload, create_solver=None):
             optimality = "feasible"
             break
 
-        # Every hard rule was checked before solving, so the relaxed model
-        # cannot be infeasible; anything else is a solver fault.
+        if status == pywraplp.Solver.INFEASIBLE and assignment is None:
+            # Coverage, Restrictions and exclusions were checked before
+            # solving and every goal is soft, so only variety can leave the
+            # first stage without a plan.
+            return None, ("infeasible", [{"cause": "variety"}])
+
+        # Later stages only add bounds the previous optimum satisfies, so
+        # anything else is a solver fault.
         return None, ("abnormal", None)
 
     if assignment is None:
@@ -330,6 +402,66 @@ def _solve(payload, create_solver=None):
         "deviations": _deviations(assignment, days, slots, budget, macro_bounds),
         "optimality": optimality,
     }, None
+
+
+def _add_variety_rules(solver, x, payload, allowed_by_slot):
+    """Hard variety rules over the range, with prior meals as fixed context.
+
+    * Rolling cap: in every 7-day window touching the range, the prior meals
+      of a recipe plus its range meals (any slot) stay within the cap. A
+      window whose prior meals alone already exceed the cap only blocks more
+      of that recipe; it does not make the range infeasible by itself.
+    * Consecutive days: a recipe never fills the same slot on two
+      consecutive days, including the day before the range.
+    """
+    days = payload["days"]
+    slots = payload["slots"]
+    cap = payload["constraints"].get("variety_cap", DEFAULT_VARIETY_CAP)
+    dates = {day: _parse_day(day) for day in days}
+    prior = [
+        (_parse_day(entry["day"]), entry["slot"], entry["recipe_id"])
+        for entry in payload.get("prior_meals", [])
+    ]
+
+    # (date, slot, recipe_id) -> decision variables choosing that recipe there.
+    chosen = {}
+    for day in days:
+        for slot in slots:
+            for index, candidate in enumerate(allowed_by_slot[slot]):
+                key = (dates[day], slot, candidate["recipe_id"])
+                chosen.setdefault(key, []).append(x[(day, slot, index)])
+
+    recipe_ids = sorted({recipe_id for _date, _slot, recipe_id in chosen})
+    range_dates = sorted(set(dates.values()))
+    one_day = datetime.timedelta(days=1)
+    window = datetime.timedelta(days=VARIETY_WINDOW_DAYS - 1)
+
+    # Every window that holds at least one range day starts within 6 days
+    # before the first range day and no later than the last one.
+    start = range_dates[0] - window
+    while start <= range_dates[-1]:
+        end = start + window
+        for recipe_id in recipe_ids:
+            in_range = [
+                var
+                for (date, _slot, rid), variables in chosen.items()
+                if rid == recipe_id and start <= date <= end
+                for var in variables
+            ]
+            if len(in_range) == 0:
+                continue
+            already = sum(1 for date, _slot, rid in prior if rid == recipe_id and start <= date <= end)
+            solver.Add(solver.Sum(in_range) <= max(0, cap - already))
+        start += one_day
+
+    for (date, slot, recipe_id), variables in chosen.items():
+        following = chosen.get((date + one_day, slot, recipe_id))
+        if following:
+            solver.Add(solver.Sum(variables + following) <= 1)
+
+    for date, slot, recipe_id in prior:
+        for var in chosen.get((date + one_day, slot, recipe_id), []):
+            var.SetUb(0)
 
 
 def _freeze(solver, objective, deviation_vars, optimum):
