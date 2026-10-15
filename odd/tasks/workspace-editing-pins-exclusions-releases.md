@@ -57,6 +57,7 @@ candidate costs are 0, so a budget Deviation from a Pin is proven at the optimiz
 | T2 | Workspace module, `edit_workspace` and `get_workspace` tools | inline | done (`e361fb4`, one work unit with T3: same test file and tool seam) |
 | T3 | `run_optimizer` over the Workspace: fixed meals, exclusions, variety cap, release_all, two-meal refinement | inline | done (`e361fb4`) |
 | T4 | Spend and token caps per Planning Session (docs + cross-turn test) | inline | done (`d93a3b3`) |
+| R1 | Review round 1 (Jorge, PR #124): a Workspace edit discards the stale draft | inline | done (see Evidence) |
 
 ## Checks
 
@@ -80,6 +81,12 @@ candidate costs are 0, so a budget Deviation from a Pin is proven at the optimiz
 - Full: `MIX_TEST_PARTITION=99 MYFOOD_TEST_DATABASE=meal_planner_api_test_99 mix precommit`
   exit 0, 1034 passed, 25 skipped; no warnings from changed files (remaining warnings are
   pre-existing in unrelated tests).
+- R1 (review round 1, Jorge, PR #124): finding "edit_workspace does not invalidate
+  workspace.draft" (medium). RED: new test "an edit discards the draft until the optimizer
+  runs again" failed (all three `present_proposal` calls returned `valid`). Fix:
+  `Workspace.edit/3` sets `draft: nil` after any edit that changes the Workspace; a no-op
+  edit keeps the draft. GREEN: `session_workspace_test.exs` 13/13; full `mix test` and
+  `mix precommit` 1035 passed, 25 skipped.
 
 ## Decisions
 

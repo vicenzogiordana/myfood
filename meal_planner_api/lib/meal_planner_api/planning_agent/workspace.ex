@@ -62,9 +62,20 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
   Applies one `edit_workspace` call. Returns `{:ok, workspace, result}` or
   `{:error, reason, extra}` where `reason` is a stable code; the Workspace is
   unchanged on error.
+
+  An edit that changes the Workspace discards the draft: it was planned
+  without that edit, so `present_proposal` needs a new `run_optimizer` first.
   """
   @spec edit(t(), map(), ctx()) :: {:ok, t(), map()} | {:error, String.t(), map()}
   def edit(%__MODULE__{} = ws, args, ctx) do
+    case apply_edit(ws, args, ctx) do
+      {:ok, ^ws, result} -> {:ok, ws, result}
+      {:ok, edited, result} -> {:ok, %{edited | draft: nil}, result}
+      error -> error
+    end
+  end
+
+  defp apply_edit(ws, args, ctx) do
     action = Map.get(args, "action")
 
     cond do

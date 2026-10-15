@@ -436,6 +436,43 @@ defmodule MealPlannerApi.PlanningAgent.SessionWorkspaceTest do
       refute_received {:planning_agent_event, ^session_id, %{"type" => "proposal"}}
     end
 
+    test "an edit discards the draft until the optimizer runs again", %{household: h, recipes: r} do
+      # The fake optimizer plans the first candidate, the lentil stew, everywhere.
+      script = [
+        {:tool_calls, [{"run_optimizer", %{}}]},
+        edit(%{"action" => "exclude", "recipe_id" => r.lentil_stew.id}),
+        present(),
+        {:tool_calls, [{"run_optimizer", %{}}]},
+        edit(%{
+          "action" => "pin",
+          "date" => "2026-11-02",
+          "slot" => "lunch",
+          "recipe_id" => r.bean_bowl.id
+        }),
+        present(),
+        {:tool_calls, [{"run_optimizer", %{}}]},
+        present(),
+        {:text, "ok"}
+      ]
+
+      {session_id, pid} = start!(h, script)
+      results = run_turn!(session_id, pid, "Plan without the stew, Monday lunch the bean bowl")
+
+      assert Enum.map(results(results, "edit_workspace"), & &1["status"]) == ["ok", "ok"]
+
+      assert [%{"error" => "no_plan_to_present"}, %{"error" => "no_plan_to_present"}, last] =
+               results(results, "present_proposal")
+
+      assert %{"status" => "valid"} = last
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "proposal", "meals" => meals}}
+
+      plan = plan_by_slot(meals)
+      assert plan[{"2026-11-02", "lunch"}] == r.bean_bowl.id
+      refute r.lentil_stew.id in Map.values(plan)
+    end
+
     test "redo the whole week releases every meal but keeps the session's Pins",
          %{household: h, recipes: r} do
       script =
