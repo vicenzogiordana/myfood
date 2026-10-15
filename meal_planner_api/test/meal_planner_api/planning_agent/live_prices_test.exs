@@ -142,6 +142,21 @@ defmodule MealPlannerApi.PlanningAgent.LivePricesTest do
                lookup(h, rice, responses: responses)["prices"]
     end
 
+    test "scraped data the database rejects is a failed refresh, never a crash",
+         %{household: h} do
+      rice = ingredient!("Fictitious rice")
+      product!(rice, price_cents: 700, observed_at: hours_ago(30))
+      too_long = FakeScraper.item(product: String.duplicate("x", 300), observed_at: hours_ago(1))
+
+      result = lookup(h, rice, responses: %{String.downcase(rice.name) => {:ok, [too_long]}})
+
+      assert [%{"price_cents" => 700, "fresh" => false, "age_hours" => 30}] = result["prices"]
+
+      assert [%{"ingredient" => ingredient, "reason" => "refresh_failed"}] = result["warnings"]
+      assert ingredient == rice.name
+      assert result["outcome"] == "partial"
+    end
+
     test "a transient scraper failure is retried within the read budget", %{household: h} do
       rice = ingredient!("Fictitious rice")
       product!(rice, observed_at: hours_ago(30))

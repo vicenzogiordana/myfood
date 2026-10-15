@@ -115,6 +115,31 @@ are rejected as unusable, never assumed.
   the same seed (490195) and a fresh seed both pass 1141/1141 (25 skipped),
   so it is an order-dependent flake outside this change.
 
+## Review round 1 (Jorge el Curioso, PR #126)
+
+Route: inline (one source file plus tests, findings already mapped).
+
+- [x] R1 Product search scraped an unbounded number of Ingredients
+  (CD-1, SP-1). `Prices.lookup/2` now caps the merged Ingredient set at
+  `Prices.max_ingredients/0` (50, named Ingredients first), the Product
+  query itself is limited, and the returned offers are capped at
+  `Prices.max_offers/0` (200). RED: `PricesTest` with 60 stale Ingredients
+  matching one Product query saw 60 refresh calls (cap 50); GREEN after the
+  cap.
+- [x] R2 `Prices.record/2` raised inside the read tool (CD-2, TR-1, SP-2).
+  It now returns `:ok | {:error, :record_failed}` (all or nothing), the
+  Product insert uses `on_conflict: :nothing` plus a re-read, as the
+  Supermarket insert already did, and `refresh_all` turns a failed record
+  into a `refresh_failed` warning. RED: a 300-character product name raised
+  `Postgrex.Error` (varchar 255) and a zero package quantity raised
+  `Ecto.InvalidChangesetError`; GREEN with `PricesTest` record tests and the
+  `LivePricesTest` session test asserting a `refresh_failed` warning. The
+  concurrent-insert race itself is not reproducible deterministically in a
+  test; the reuse path is covered by an idempotent re-record test.
+  `Http.item/1` was left unchanged (optional in the contract).
+- Checks: `MIX_TEST_PARTITION=101 MYFOOD_TEST_DATABASE=meal_planner_api_test101
+  mix test` 1146 passed, 25 skipped; `mix precommit` 1146 passed, 25 skipped.
+
 ## Next step
 
-Push the branch and open the PR; review gate (Jorge el Curioso) runs separately.
+Review gate (Jorge el Curioso) re-runs separately on the updated PR.

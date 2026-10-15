@@ -26,6 +26,20 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
 
   @fresh_seconds 24 * 3600
 
+  # One lookup reads and refreshes at most this many Ingredients, named or
+  # matched by a Product query, and returns at most this many offers: every
+  # refresh is a live scraper call.
+  @max_ingredients 50
+  @max_offers 200
+
+  @doc "The most Ingredients one `lookup/2` reads and refreshes."
+  @spec max_ingredients() :: pos_integer()
+  def max_ingredients, do: @max_ingredients
+
+  @doc "The most offers one `lookup/2` returns."
+  @spec max_offers() :: pos_integer()
+  def max_offers, do: @max_offers
+
   @type offer :: %{
           product_id: Ecto.UUID.t(),
           ingredient_id: Ecto.UUID.t(),
@@ -120,7 +134,13 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
 
     wanted = names |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()
     named = ingredients_by_name(wanted)
-    ingredients = Enum.uniq_by(Map.values(named) ++ product_ingredients(product), & &1.id)
+    # Named Ingredients come first, so a Product query never pushes them
+    # out of the capped set.
+    ingredients =
+      (Enum.sort_by(Map.values(named), & &1.name) ++ product_ingredients(product))
+      |> Enum.uniq_by(& &1.id)
+      |> Enum.take(@max_ingredients)
+
     matches? = &(brand_match?(&1, brand) and product_match?(&1, product))
 
     {offers, warnings} = fresh_offers(ingredients, now, Keyword.get(opts, :refresh), matches?)
@@ -133,7 +153,14 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
         end
       end) ++ product_gap(wanted, offers, product)
 
-    %{prices: offers |> Map.values() |> List.flatten(), missing: missing, warnings: warnings}
+    prices =
+      offers
+      |> Map.values()
+      |> List.flatten()
+      |> Enum.sort_by(&{&1.ingredient, &1.price_cents, &1.product, &1.product_id})
+      |> Enum.take(@max_offers)
+
+    %{prices: prices, missing: missing, warnings: warnings}
   end
 
   @doc "The Ingredient named `name` (case-insensitive exact match), or `nil`."
@@ -173,27 +200,35 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   Records scraped `items` as Products of `ingredient_id` with their Price
   Observations, at the scraper's observation time. An observation already
   stored for the same Product and time is kept as is.
+
+  Recording is all or nothing: when the database rejects any item (an
+  invalid value, a string wider than its column), nothing is recorded and
+  `{:error, :record_failed}` is returned, so a bad scrape is a failed
+  refresh rather than a crash of the read tool.
   """
-  @spec record(Ecto.UUID.t(), [map()]) :: :ok
+  @spec record(Ecto.UUID.t(), [map()]) :: :ok | {:error, :record_failed}
   def record(ingredient_id, items) do
-    {:ok, :ok} =
-      Repo.transaction(fn ->
-        Enum.each(items, fn item ->
-          supermarket = supermarket!(item.supermarket)
-          product = product!(ingredient_id, supermarket.id, item)
+    case Repo.transaction(fn -> Enum.each(items, &record_item!(ingredient_id, &1)) end) do
+      {:ok, :ok} -> :ok
+      {:error, _reason} -> {:error, :record_failed}
+    end
+  rescue
+    _error in [Postgrex.Error, Ecto.InvalidChangesetError, Ecto.ConstraintError] ->
+      {:error, :record_failed}
+  end
 
-          %PriceObservation{}
-          |> PriceObservation.changeset(%{
-            product_id: product.id,
-            price_cents: item.price_cents,
-            currency: item.currency,
-            observed_at: item.observed_at
-          })
-          |> Repo.insert!(on_conflict: :nothing, conflict_target: [:product_id, :observed_at])
-        end)
-      end)
+  defp record_item!(ingredient_id, item) do
+    supermarket = supermarket!(item.supermarket)
+    product = product!(ingredient_id, supermarket.id, item)
 
-    :ok
+    %PriceObservation{}
+    |> PriceObservation.changeset(%{
+      product_id: product.id,
+      price_cents: item.price_cents,
+      currency: item.currency,
+      observed_at: item.observed_at
+    })
+    |> Repo.insert!(on_conflict: :nothing, conflict_target: [:product_id, :observed_at])
   end
 
   @doc "JSON-safe provenance and age of an offer, as shown to the model and the Member."
@@ -325,6 +360,8 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
       join: i in assoc(p, :ingredient),
       where: ilike(p.name, ^pattern) or ilike(p.brand, ^pattern),
       distinct: true,
+      order_by: [asc: i.name, asc: i.id],
+      limit: ^@max_ingredients,
       select: %{id: i.id, name: i.name}
     )
     |> Repo.all()
@@ -362,8 +399,10 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
     Enum.reduce(ingredients, %{}, fn ingredient, failed ->
       case refresh.(ingredient.name) do
         {:ok, items} ->
-          :ok = record(ingredient.id, items)
-          failed
+          case record(ingredient.id, items) do
+            :ok -> failed
+            {:error, reason} -> Map.put(failed, ingredient.id, reason)
+          end
 
         {:error, reason} ->
           Map.put(failed, ingredient.id, reason)
@@ -405,12 +444,32 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
       package_unit: item.package_unit
     ]
 
-    case Repo.get_by(Product, key) do
-      nil ->
-        %Product{}
-        |> Product.changeset(key |> Map.new() |> Map.put(:brand, item.brand))
-        |> Repo.insert!()
+    product =
+      case Repo.get_by(Product, key) do
+        nil ->
+          # A concurrent lookup may insert the same Product first: keep
+          # theirs and read it back.
+          _ =
+            %Product{}
+            |> Product.changeset(key |> Map.new() |> Map.put(:brand, item.brand))
+            |> Repo.insert!(
+              on_conflict: :nothing,
+              conflict_target: [
+                :supermarket_id,
+                :ingredient_id,
+                :name,
+                :package_quantity_milli,
+                :package_unit
+              ]
+            )
 
+          Repo.get_by!(Product, key)
+
+        product ->
+          product
+      end
+
+    case product do
       %Product{brand: brand} = product when brand == item.brand ->
         product
 
