@@ -1,7 +1,8 @@
 defmodule MealPlannerApi.PlanningAgent.Tools do
   @moduledoc """
   Agent-callable tool catalog of the planning agent (spec #93). No tool writes
-  persistent data, and no tool grants a Deviation Approval or an Absence
+  household data (`lookup_prices` records the Price Observations a live
+  lookup returns), and no tool grants a Deviation Approval or an Absence
   Exception: those are human-only actions of `MealPlannerApi.PlanningAgent.Session`.
 
     * `search_recipes` — structured search; Restriction-violating recipes are
@@ -20,8 +21,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       that was not released. Failures are typed errors, never a fallback plan
     * `get_pantry` — the Projected Pantry (Pantry minus stock committed to
       not-yet-cooked Planned Meals)
-    * `lookup_prices` — stored prices with provenance; missing prices are
-      reported, never invented
+    * `lookup_prices` — prices with provenance and age, read from the
+      database first and refreshed live through the scraper when missing or
+      24 hours old or older; missing prices are reported, never invented,
+      and a failed refresh keeps the old price with its real age
     * `get_recipe` — one recipe or Recipe Draft with ingredients,
       quantities, steps, nutrition and its completeness
     * `create_recipe` — a Recipe Draft from catalog Ingredients only, kept in
@@ -34,7 +37,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       over the budget is a budget Deviation (`requires_approval`)
     * `ask_human` — one question; ends the turn
 
-  Read calls (recipe search) and solver calls run within
+  Read calls (recipe search, live price lookups) and solver calls run within
   `MealPlannerApi.PlanningAgent.CallBounds`: their own deadline and retry
   budget, clipped by the turn's global deadline.
 
@@ -49,6 +52,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     CallBounds,
     MealPlan,
     Prices,
+    PriceScraper,
     ProjectedPantry,
     Proposal,
     ProposalValidator,
@@ -211,9 +215,11 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       %{
         name: "lookup_prices",
         description:
-          "Read stored prices of the Products covering the named ingredients, with product, " <>
-            "presentation, supermarket, currency and observation date. Ingredients without a " <>
-            "stored price are listed as missing; never assume a price for them.",
+          "Read prices of the Products covering the named ingredients, with product, " <>
+            "presentation, supermarket, currency, observation date and age. Missing or stale " <>
+            "prices are refreshed live; when that fails the old price keeps its real age and a " <>
+            "warning is returned. Ingredients without a price are listed as missing; never " <>
+            "assume a price for them, and tell the household when a price is stale.",
         parameters: %{
           "type" => "object",
           "properties" => %{
@@ -482,21 +488,32 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
         {%{"error" => "ingredients_required"}, ctx.workspace, :continue}
 
       names ->
-        %{prices: prices, missing: missing} =
-          names |> Enum.take(@max_price_lookups) |> Prices.lookup_names()
+        %{prices: prices, missing: missing, warnings: warnings, refresh_memo: memo} =
+          names
+          |> Enum.take(@max_price_lookups)
+          |> Prices.lookup(
+            now: now(ctx),
+            refresh: &scrape(ctx, &1),
+            refresh_memo: Map.get(ctx.workspace, :price_refreshes, %{})
+          )
 
         result = %{
           "prices" => Enum.map(prices, &Prices.offer_data/1),
-          "missing" =>
-            Enum.map(missing, fn m ->
-              %{"ingredient" => m.ingredient, "reason" => Atom.to_string(m.reason)}
-            end)
+          "missing" => Enum.map(missing, &Prices.missing_data/1),
+          "warnings" => Enum.map(warnings, &Prices.warning_data/1)
         }
 
-        # Missing prices are named, never zero: the lookup is then partial.
-        result = if missing == [], do: result, else: Map.put(result, "outcome", "partial")
+        # Missing prices are named, never zero, and stale or unrefreshed
+        # prices are flagged: the lookup is then partial.
+        result =
+          if missing == [] and warnings == [],
+            do: result,
+            else: Map.put(result, "outcome", "partial")
 
-        {result, ctx.workspace, :continue}
+        # Recent refreshes are kept in the Workspace, which the Session
+        # checkpoints after every tool call, so the session does not scrape
+        # the same Ingredient again on every lookup.
+        {result, Map.put(ctx.workspace, :price_refreshes, memo), :continue}
     end
   end
 
@@ -744,6 +761,34 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       {:ok, recipes, _} -> {:ok, recipes}
       {:error, :timeout, _} -> {:error, :search_timeout}
       {:error, reason, _} -> {:error, reason}
+    end
+  end
+
+  # A live scraper lookup is a read call: bounded and retried on transient
+  # failure. It is not a model call, so it uses no iteration or spend.
+  defp scrape(ctx, query) do
+    {module, opts} = Map.get(ctx, :price_scraper) || {PriceScraper.Unavailable, []}
+
+    attempt = fn state, call ->
+      opts = Keyword.put(opts, :receive_timeout, call.timeout_ms)
+
+      case module.fetch(query, opts) do
+        {:ok, items} -> {:ok, items, state}
+        {:error, reason} -> {:error, reason, state}
+      end
+    end
+
+    case CallBounds.run(Map.get(ctx, :bounds), :read, nil, attempt) do
+      {:ok, items, _} -> {:ok, items}
+      {:error, :timeout, _} -> {:error, :scraper_timeout}
+      {:error, reason, _} -> {:error, reason}
+    end
+  end
+
+  defp now(ctx) do
+    case Map.get(ctx, :clock) do
+      clock when is_function(clock, 0) -> clock.()
+      _ -> DateTime.utc_now()
     end
   end
 

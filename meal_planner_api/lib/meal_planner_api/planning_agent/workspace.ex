@@ -16,6 +16,9 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
     * `recipe_drafts` — Recipe Drafts by id (`MealPlannerApi.PlanningAgent.RecipeDraft`)
     * `deviation_approval` / `absence_exceptions` — human-owned approvals,
       set only by the Member through `MealPlannerApi.PlanningAgent.Session`
+    * `price_refreshes` — recent live price refreshes by ingredient id
+      (`MealPlannerApi.PlanningAgent.Prices.refresh_memo/0`), so the session
+      does not scrape the same Ingredient again on every `lookup_prices`
 
   `edit/3` applies one edit or refuses it with a reason; approvals are human
   actions and can never be set here.
@@ -40,7 +43,8 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
             variety_cap: 2,
             recipe_drafts: %{},
             deviation_approval: nil,
-            absence_exceptions: []
+            absence_exceptions: [],
+            price_refreshes: %{}
 
   @type key :: {Date.t(), String.t()}
   @type t :: %__MODULE__{
@@ -53,7 +57,8 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
           variety_cap: pos_integer(),
           recipe_drafts: %{Ecto.UUID.t() => term()},
           deviation_approval: map() | nil,
-          absence_exceptions: [map()]
+          absence_exceptions: [map()],
+          price_refreshes: MealPlannerApi.PlanningAgent.Prices.refresh_memo()
         }
 
   @type ctx :: %{
