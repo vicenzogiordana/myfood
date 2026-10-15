@@ -40,7 +40,7 @@ review. Out: switching the legacy planner off (spec #93, after the battery).
 - [x] T1 Restart during an old registration returns `{:error, :session_already_active}` (route: inline, one file + test)
 - [x] T2 Idle expiry: a connected but inactive session ends after `:idle_ms` (default 30 min) and releases the slot (route: inline, one file + test)
 - [x] T3 Legacy start refuses while an agent session holds the Household lock (route: inline; migration + repo + server + tests)
-- [ ] T4 Sweeper tests against agent lock rows (route: inline, tests only)
+- [x] T4 Sweeper tests against agent lock rows (route: inline, tests only)
 - [ ] T5 No tool call runs after `ask_human` ends the turn; proposal clearing reviewed (route: inline, one file + test)
 
 ## Acceptance criteria
@@ -72,7 +72,15 @@ review. Out: switching the legacy planner off (spec #93, after the battery).
   row is active; legacy rows keep their per-range rule. RED: the new
   `legacy_session_agent_lock_test.exs` start returned `{:ok, _}`; GREEN:
   generation, channels, planning repo and migration shape tests 234 passed.
+  Commit 5cd0d19.
+- T4: inspection found the Sweeper correct for agent rows (a present
+  session's lease covers >= 120 s and renews every 30 s; an absent one's
+  lease is its grace deadline; expiry deletes the recovery snapshot; a live
+  process whose row was swept stops on its next renewal). Test-first
+  exception: characterization tests, no RED possible; teeth checked by a
+  mutation (Sweeper ignoring the lease) that failed 3 of 4. GREEN:
+  `session_sweeper_test.exs` 4 passed.
 
 ## Next step
 
-T4.
+T5.
