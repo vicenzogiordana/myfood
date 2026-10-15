@@ -245,10 +245,10 @@ Every event is pushed as `agent_event` with `type` and `session_id`:
 | `proposal` | `{proposal_id, status, meals: [{date, slot, recipe_id, name, origin, draft}], purchase, consumed_cost, budget, deviations}` | A Proposal validated by code; `status` is code-owned (`valid` or `requires_approval`). Every meal shows its Recipe Origin (`traditional`, `ai_created`, `user_created`); `draft: true` marks an unsaved AI-created Recipe Draft, saved as a private Household Recipe only if this Proposal is confirmed. See "Proposal Purchase" below |
 | `recipe_draft` | `{recipe_id, name, origin, draft: true, servings, slots, ingredients: [{ingredient, quantity_milli, unit}], steps, nutrition, cost}` | The agent built a Recipe Draft from catalog Ingredients. `origin` is `ai_created` (disclose as AI-made, possibly imperfect) or `user_created` (a dictated recipe). See "Recipe Drafts" below |
 | `recipe_saved` | `{recipe_id, name, origin}` | The Member saved a dictated recipe as a Household Recipe |
-| `optimizer_failed` | `{reason}` | The optimizer failed; no fallback plan is produced |
+| `optimizer_failed` | `{reason}` | The optimizer failed (including `optimizer_busy` / `optimizer_unconfigured` from the global subprocess cap); no fallback plan is produced |
 | `consent_required` | `{}` | Consent must be given before the agent can call the AI provider |
 | `limit_reached` | `{limit, requires_authorization: true}` — `iterations`, `no_progress` or `time` | Execution stopped: 10 iterations per Planning Session (new messages do not reset them), 3 consecutive attempts without new evidence, or 5 minutes per request. Nothing runs until the Member sends `authorize_continuation` |
-| `agent_unavailable` | `{reason}` | The AI provider cannot be used now: `provider_unavailable` / `provider_timeout` after up to 5 retries, or at once for `provider_unauthorized`, `provider_rejected_request`, `provider_conflict`, `spend_cap_reached`, `token_cap_reached` |
+| `agent_unavailable` | `{reason}` | The AI provider cannot be used now: `provider_unavailable` / `provider_timeout` after up to 5 retries, `provider_busy` (global provider concurrency cap) after up to 5 retries, or at once for `provider_unauthorized`, `provider_rejected_request`, `provider_conflict`, `spend_cap_reached`, `token_cap_reached` |
 | `turn_completed` | `{}` | The agent finished answering |
 | `run_finished` | `{outcome}` — `complete`, `partial`, `failure`, `cancelled`, `interrupted`, `unknown` | Exactly one per request or authorized continuation; `partial` means stopped by a limit, `interrupted` that the Member left and no new model call started, `unknown` that the run crashed |
 | `session_recovered` | `{interrupted}` | The session was restored after a server restart; `interrupted: true` means a request was running and was not resumed — the Member asks again |
@@ -315,9 +315,21 @@ and its nutrition and cost are computed by code:
   named and left out of the total (`complete: false`), never zero.
 
 Paid execution requires `OPENAI_API_KEY`, `PLANNING_AGENT_SPEND_CAP_MICROS`,
-`PLANNING_AGENT_TOKEN_CAP`, `OPENAI_INPUT_PRICE_MICROS_PER_MTOK` and
-`OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK`; without them `start_session` replies
-`spend_caps_unconfigured` (or `pricing_unconfigured` / `provider_unconfigured`).
+`PLANNING_AGENT_TOKEN_CAP`, `PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS`,
+`OPENAI_INPUT_PRICE_MICROS_PER_MTOK` and `OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK`, plus
+the start rate limit (`PLANNING_AGENT_SESSION_STARTS_PER_WINDOW`,
+`PLANNING_AGENT_SESSION_START_WINDOW_SECONDS`); without them `start_session` replies
+`spend_caps_unconfigured` (or `pricing_unconfigured` / `provider_unconfigured`). A
+value that is not a whole integer reads as unset: it never crashes boot, it refuses
+the same way.
+
+Global concurrency caps (issue #118) bound every Planning Session together.
+`PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS` caps OpenAI calls in flight: a call
+over it is refused before any spend is reserved and retried like a transient
+failure, then reported as `agent_unavailable` with `provider_busy`.
+`PLANNING_AGENT_MAX_CONCURRENT_OPTIMIZER_RUNS` caps optimizer subprocesses: a run
+over it starts no subprocess and is reported as `optimizer_failed` with
+`optimizer_busy` (`optimizer_unconfigured` when the cap is unset).
 The spend and token caps bound every OpenAI call of one Planning Session; they
 are not reset between messages and never extended by `authorize_continuation`,
 so once they are used up the session replies `agent_unavailable` with
