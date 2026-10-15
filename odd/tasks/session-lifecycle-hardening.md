@@ -85,7 +85,7 @@ review. Out: switching the legacy planner off (spec #93, after the battery).
   `ask_human` + `run_optimizer` + `present_proposal` used to spend on the
   optimizer and could show a Proposal beside the question). RED: the new
   `session_tools_test.exs` test saw the optimizer payload; GREEN:
-  `test/meal_planner_api/planning_agent/` 239 passed.
+  `test/meal_planner_api/planning_agent/` 239 passed. Commit ff21318.
 - T5 review of `workspace.proposal` (it now has readers: `confirm/3`,
   `approve_deviations/3`, `resume/2`, `current_proposal/1`): it is set only
   by `present_proposal` (`Workspace.present/3`), cleared by
@@ -95,6 +95,10 @@ review. Out: switching the legacy planner off (spec #93, after the battery).
   purpose: it stays what the Member sees, and confirmation revalidates it.
   No change needed.
 
+- Closure: full `mix test` 1214 passed, 25 skipped; `mix precommit` exit 0
+  (1214 passed, 25 skipped; only pre-existing test warnings in untouched
+  files). Delivery: `single-pr` (about 600 authored lines, mostly tests).
+
 ## Next step
 
-Full suite, `mix precommit`, PR.
+Review of the PR.
