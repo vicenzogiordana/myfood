@@ -22,6 +22,7 @@ defmodule MealPlannerApi.Data.PlanningRepo do
     ContextSnapshot,
     CookingSession,
     CookingStepEvent,
+    PlanningAgentRecovery,
     PlanningException,
     PlanningGenerationRun,
     PlanningMessage,
@@ -372,6 +373,62 @@ defmodule MealPlannerApi.Data.PlanningRepo do
     end
   end
 
+  @doc "The Household's active Planning Session row, or `nil`."
+  @spec active_household_session(Ecto.UUID.t()) :: PlanningSession.t() | nil
+  def active_household_session(account_id) do
+    Repo.one(
+      from(s in PlanningSession, where: s.account_id == ^account_id and s.status == :active)
+    )
+  end
+
+  @doc """
+  Stores the recoverable snapshot of an active agent Planning Session
+  (issue #107), replacing the previous one. Refuses with `:not_active` once
+  the session ended, so a late write never outlives it.
+  """
+  @spec save_recovery(Ecto.UUID.t(), Ecto.UUID.t(), binary()) :: :ok | {:error, :not_active}
+  def save_recovery(account_id, session_id, snapshot) when is_binary(snapshot) do
+    Repo.transaction(fn ->
+      case fetch_active_session(account_id, session_id) do
+        {:ok, _session} ->
+          now = DateTime.utc_now()
+
+          Repo.insert_all(
+            PlanningAgentRecovery,
+            [
+              %{
+                session_id: session_id,
+                account_id: account_id,
+                snapshot: snapshot,
+                inserted_at: now,
+                updated_at: now
+              }
+            ],
+            on_conflict: {:replace, [:snapshot, :updated_at]},
+            conflict_target: :session_id
+          )
+
+          :ok
+
+        error ->
+          Repo.rollback(error)
+      end
+    end)
+    |> case do
+      {:ok, :ok} -> :ok
+      {:error, {:error, reason}} -> {:error, reason}
+    end
+  end
+
+  @doc "The recoverable snapshot of a Planning Session, or `:error`."
+  @spec fetch_recovery(Ecto.UUID.t()) :: {:ok, binary()} | :error
+  def fetch_recovery(session_id) do
+    case Repo.get(PlanningAgentRecovery, session_id) do
+      %PlanningAgentRecovery{snapshot: snapshot} -> {:ok, snapshot}
+      nil -> :error
+    end
+  end
+
   @doc "Whether any meal is already scheduled for the Household within the range."
   @spec range_planned?(Ecto.UUID.t(), Date.t(), Date.t()) :: boolean()
   def range_planned?(account_id, %Date{} = from_date, %Date{} = to_date) do
@@ -528,6 +585,9 @@ defmodule MealPlannerApi.Data.PlanningRepo do
           {:error, :session_lock_lost}
 
         %PlanningSession{} = session ->
+          # A committed session is never recovered: its snapshot goes with it.
+          delete_recovery(session_id)
+
           session
           |> PlanningSession.commit_changeset(%{terminal_at: DateTime.utc_now()})
           |> Repo.update()
@@ -564,6 +624,12 @@ defmodule MealPlannerApi.Data.PlanningRepo do
 
     Repo.delete_all(from(e in PlanningException, where: e.session_id == ^session_id))
 
+    delete_recovery(session_id)
+  end
+
+  # The Workspace snapshot is discarded whenever the Planning Session ends.
+  defp delete_recovery(session_id) do
+    Repo.delete_all(from(r in PlanningAgentRecovery, where: r.session_id == ^session_id))
     :ok
   end
 

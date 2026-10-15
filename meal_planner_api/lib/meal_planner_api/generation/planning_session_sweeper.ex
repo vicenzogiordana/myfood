@@ -26,6 +26,7 @@ defmodule MealPlannerApi.Generation.PlanningSession.Sweeper do
 
   import Ecto.Query, warn: false
 
+  alias MealPlannerApi.Persistence.Planning.PlanningAgentRecovery
   alias MealPlannerApi.Persistence.Planning.PlanningException
   alias MealPlannerApi.Persistence.Planning.PlanningMessage
   alias MealPlannerApi.Persistence.Planning.PlanningSession
@@ -148,6 +149,8 @@ defmodule MealPlannerApi.Generation.PlanningSession.Sweeper do
   defp delete_children(session_id) do
     Repo.delete_all(from(m in PlanningMessage, where: m.session_id == ^session_id))
     Repo.delete_all(from(e in PlanningException, where: e.session_id == ^session_id))
+    # An expired grace discards an agent session's recoverable Workspace.
+    Repo.delete_all(from(r in PlanningAgentRecovery, where: r.session_id == ^session_id))
     :ok
   end
 

@@ -70,6 +70,28 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
     end
   end
 
+  @doc """
+  The spend ledger, kept across a server restart (issue #107). A
+  reservation still open belongs to a call whose outcome is unknown, so its
+  worst case is counted as spent. The configuration, with its API key, is
+  never part of it.
+  """
+  @impl true
+  def recoverable(%{ledger: ledger}) do
+    %{
+      spent_micros: ledger.spent_micros + ledger.reserved_micros,
+      spent_tokens: ledger.spent_tokens + ledger.reserved_tokens
+    }
+  end
+
+  @doc "A recovered Planning Session's state: fresh configuration, kept spend."
+  @impl true
+  def recover(opts, %{spent_micros: micros, spent_tokens: tokens}) do
+    with {:ok, state} <- init(opts) do
+      {:ok, %{state | ledger: %{state.ledger | spent_micros: micros, spent_tokens: tokens}}}
+    end
+  end
+
   @doc "Spend summary of the Planning Session so far."
   @spec spend(map()) :: map()
   def spend(%{ledger: ledger}), do: SpendLedger.summary(ledger)

@@ -60,6 +60,9 @@ defmodule MealPlannerApi.PlanningAgent.SessionGraceTest do
     assert_receive {:DOWN, ^ref, :process, ^socket, _}
   end
 
+  # A call returns once the session handled everything sent before it.
+  defp settle(pid), do: _ = Session.current_proposal(pid)
+
   defp start!(household, member, script, opts) do
     attrs = session_attrs(household, member, {@monday, @tuesday})
 
@@ -114,6 +117,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionGraceTest do
       proposal_id = propose!(pid, session_id)
 
       close(socket)
+      settle(pid)
 
       # The session, its slot and its Proposal survive the disconnect, and
       # the slot is held for the whole grace.
@@ -150,6 +154,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionGraceTest do
       assert_receive {:in_flight, call_pid}, 2_000
 
       close(socket)
+      settle(pid)
       send(call_pid, :finish)
 
       # The finished call's tools ran, but the next model call never starts.
@@ -171,6 +176,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionGraceTest do
       proposal_id = propose!(pid, session_id)
 
       close(socket)
+      settle(pid)
 
       assert {:error, :member_absent} =
                Session.confirm(h.account_id, member.membership_id, proposal_id)
@@ -187,6 +193,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionGraceTest do
       ref = Process.monitor(pid)
 
       close(socket)
+      settle(pid)
 
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
       assert %PlanningSession{status: :expired} = session_row(session_id)
@@ -206,6 +213,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionGraceTest do
       {session_id, pid} = start!(h, member, [], subscriber: socket, grace_ms: 300)
 
       close(socket)
+      settle(pid)
       assert {:ok, %{session_id: ^session_id}} = resume(h, member)
 
       Process.sleep(500)
@@ -217,6 +225,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionGraceTest do
       socket = socket!()
       {_session_id, pid} = start!(h, member, [], subscriber: socket)
       close(socket)
+      settle(pid)
 
       assert {:error, :forbidden} = resume(h, owner)
       assert Session.whereis(h.account_id) == pid
@@ -226,6 +235,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionGraceTest do
       socket = socket!()
       {_session_id, pid} = start!(h, member, [], subscriber: socket)
       close(socket)
+      settle(pid)
 
       remove_member!(member)
 
