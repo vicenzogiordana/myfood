@@ -94,6 +94,24 @@ report no outcome kind. Spec #93 and the #86 contract require all of that.
   legitimate evidence. Full suite (partition 108): 1086 passed, 25 skipped;
   `mix precommit` exit 0.
 
+## Review round 2 (Jorge el Curioso)
+
+- Finding (medium): `:invalid_provider_response` (an incomplete response,
+  or one with neither text nor tool calls) was in the model transient list,
+  so an already billed 200 answer was resent up to 5 more times, each billed
+  again, with up to ~15.5 s of backoff inside the turn.
+- Fix (the `fix(planning-agent): ...` commit after 3544beb): the reason is
+  removed from `CallBounds` model transient reasons, so it fails fast to the
+  existing failure path. Route: inline (one-line classification change plus
+  two tests). Spend cap semantics, other reasons, `Allowance` and `Session`
+  unchanged.
+- RED: the new `CallBoundsTest` saw the reason as transient; the new adapter
+  test through `CallBounds` with an always-incomplete stub received a second
+  provider call. GREEN after the fix: exactly 1 provider call, 1 settlement
+  (300 micro-USD spent, nothing reserved) and the run fails with
+  `:invalid_provider_response`. Planning agent suite 139 passed;
+  `mix precommit` (partition 108): exit 0, 1102 passed, 25 skipped.
+
 ## Next step
 
 Native review gate (Jorge el Curioso) on the PR. Follow-ups outside #108:

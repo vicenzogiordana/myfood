@@ -50,6 +50,17 @@ defmodule MealPlannerApi.PlanningAgent.CallBoundsTest do
     assert attempts() == 1
   end
 
+  test "an invalid provider response is deterministic and never retried" do
+    bounds = CallBounds.new(policies: @fast)
+
+    refute CallBounds.transient?(:model, :invalid_provider_response)
+
+    assert {:error, :invalid_provider_response, _} =
+             CallBounds.run(bounds, :model, nil, failing(:invalid_provider_response))
+
+    assert attempts() == 1
+  end
+
   test "the state reported by a killed attempt is kept" do
     bounds = CallBounds.new(policies: %{solver: %{timeout_ms: 50}})
 

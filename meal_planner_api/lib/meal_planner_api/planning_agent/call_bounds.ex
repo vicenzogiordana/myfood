@@ -47,9 +47,12 @@ defmodule MealPlannerApi.PlanningAgent.CallBounds do
   @unbounded_ms 1_000_000_000
 
   # Only these reasons are transient. Anything else, including reasons this
-  # module does not know, is never retried automatically.
+  # module does not know, is never retried automatically. An invalid provider
+  # response (incomplete, or neither text nor tool calls) is not transient: it
+  # was already billed, and resending the same request would be billed again
+  # for the same answer.
   @transient %{
-    model: [:timeout, :provider_unavailable, :provider_timeout, :invalid_provider_response],
+    model: [:timeout, :provider_unavailable, :provider_timeout],
     solver: [],
     read: [:timeout, :search_failed]
   }

@@ -7,6 +7,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponsesTest do
 
   use ExUnit.Case, async: true
 
+  alias MealPlannerApi.PlanningAgent.CallBounds
   alias MealPlannerApi.PlanningAgent.Model.OpenAIResponses
 
   @stub __MODULE__
@@ -277,6 +278,28 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponsesTest do
 
       assert {:error, :invalid_provider_response, _state} =
                OpenAIResponses.respond(state, @request)
+    end
+
+    test "an incomplete response is not retried through the call bounds: billed once" do
+      stub_response(
+        text_response("Here is your", %{"input_tokens" => 100, "output_tokens" => 50})
+        |> Map.put("status", "incomplete")
+      )
+
+      {:ok, state} = OpenAIResponses.init(opts())
+      bounds = CallBounds.new(policies: %{model: %{timeout_ms: 1_000, backoff_ms: 1}})
+
+      assert {:error, :invalid_provider_response, state} =
+               CallBounds.run(bounds, :model, state, fn model_state, _call ->
+                 OpenAIResponses.respond(model_state, @request)
+               end)
+
+      assert_received {:provider_called, _conn, _body}
+      refute_received {:provider_called, _conn, _body}
+
+      # One settlement: 100 input tokens at 1 USD/Mtok + 50 output tokens at
+      # 4 USD/Mtok = 300 micro-USD.
+      assert %{reserved_micros: 0, spent_micros: 300} = OpenAIResponses.spend(state)
     end
 
     test "reports the reserved state through the request checkpoint before calling" do
