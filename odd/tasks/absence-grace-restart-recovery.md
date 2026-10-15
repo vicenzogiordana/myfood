@@ -43,23 +43,23 @@ Out of scope: #108 execution bounds hardening, #109 battery.
 
 ## Tasks
 
-- [ ] T1 Absence grace in a live session: grace timer, lease, no model calls
+- [x] T1 Absence grace in a live session: grace timer, lease, no model calls
       or saves while absent, resume of the live process, expiry discards and
       frees the slot. Route: direct inline (single deep module + its test;
       writer delegation not available to this bounded worker).
-- [ ] T2 Restart recovery: snapshot storage + migration, recoverable model
+- [x] T2 Restart recovery: snapshot storage + migration, recoverable model
       state, `resume/2` recovering a dormant session without replay, limits
       kept, revoked Member refused, dormant cancel. Route: direct inline.
-- [ ] T3 Channel wiring (`resume_session`, dormant cancel) and docs.
+- [x] T3 Channel wiring (`resume_session`, dormant cancel) and docs.
       Route: direct inline.
 
 ## Acceptance criteria
 
-- [ ] Reconnecting within 15 minutes restores the Workspace and Proposal
-- [ ] A restart within the grace restores the session without replaying uncertain operations
-- [ ] No model calls or saves happen while the Member is absent
-- [ ] Grace expiry discards the Workspace and frees the slot
-- [ ] A Member removed from the Household cannot resume a recovered session
+- [x] Reconnecting within 15 minutes restores the Workspace and Proposal
+- [x] A restart within the grace restores the session without replaying uncertain operations
+- [x] No model calls or saves happen while the Member is absent
+- [x] Grace expiry discards the Workspace and frees the slot
+- [x] A Member removed from the Household cannot resume a recovered session
 
 ## Checks
 
@@ -68,8 +68,31 @@ Out of scope: #108 execution bounds hardening, #109 battery.
 
 ## Progress / evidence
 
-(pending)
+- T1 `8b9981f` — RED: session_grace_test 0/7 (resume undefined, lease 120 s,
+  confirm not refused). GREEN: 7 passed; planning agent + channel suites 234 passed.
+- T2 `03d024c` — RED: recovery + adapter tests 28/37. GREEN: 44 passed;
+  stress-run 12x stable after fixing a dead-pid Registry race in `whereis/1`
+  (a just-stopped session is now treated as not running) and syncing tests
+  with the session before reading state or killing it.
+  `session_test` "supervisor shutdown releases the lock" was intentionally
+  changed: a shutdown is a restart and now keeps the session recoverable.
+- T3 (channel + docs) — RED: 3 new channel tests failed; GREEN: 19 passed.
+- Full suite: `MYFOOD_TEST_DATABASE=meal_planner_api_test107 mix test` →
+  1199 passed, 25 skipped. `mix precommit` → passed.
+
+## Decisions
+
+- The grace deadline is the `planning_sessions.lease_expires_at`: while the
+  Member is present it is renewed to now + max(grace, 120 s); when they leave
+  it is fixed to leave time + grace and a restart never extends it.
+- Each new absence starts a new grace; "never resets" applies to restarts.
+- Snapshot = `term_to_binary` (decoded with `:safe`) of transcript,
+  Workspace, allowance, pending limit and `Model.recoverable/2` (OpenAI: the
+  spend with open reservations counted as spent; never the config/API key).
+- Confirmation in flight is reconciled by the row status: the commit deletes
+  the snapshot inside the same transaction and a committed row is never
+  restored.
 
 ## Next step
 
-T1.
+PR review (Jorge el Curioso gate).
