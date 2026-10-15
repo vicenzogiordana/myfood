@@ -11,8 +11,15 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       must pass `present_proposal` like any optimizer plan
     * `run_optimizer` — the existing optimizer over Restriction-safe candidates;
       failures are typed errors, never a fallback plan
+    * `get_pantry` — the Projected Pantry (Pantry minus stock committed to
+      not-yet-cooked Planned Meals)
+    * `lookup_prices` — stored prices with provenance; missing prices are
+      reported, never invented
     * `present_proposal` — always validates the latest optimizer plan; only a
-      valid plan is shown to the Member, otherwise violations go back
+      valid plan is shown to the Member, otherwise violations go back. A
+      shown Proposal always carries its Purchase (`MealPlannerApi.PlanningAgent.Purchase`),
+      the consumed-ingredient cost and the budget comparison; a Purchase
+      over the budget is a budget Deviation (`requires_approval`)
     * `ask_human` — one question; ends the turn
 
   Every call runs with the session's tool context. The Household always comes
@@ -20,7 +27,16 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   in model arguments is ignored. Unknown tools are rejected by code.
   """
 
-  alias MealPlannerApi.PlanningAgent.{MealPlan, ProposalValidator, RecipeSearch}
+  alias MealPlannerApi.Planning.ProposalStatus
+
+  alias MealPlannerApi.PlanningAgent.{
+    MealPlan,
+    Prices,
+    ProjectedPantry,
+    ProposalValidator,
+    Purchase,
+    RecipeSearch
+  }
 
   @type context :: %{
           required(:account_id) => Ecto.UUID.t(),
@@ -34,6 +50,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   @type control :: :continue | :end_turn
 
   @optimizer_candidates_per_slot 50
+  @max_price_lookups 50
   @wide_bounds %{"min" => 0, "max" => 1_000_000}
 
   @doc "Tool definitions offered to the model."
@@ -107,10 +124,39 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
         }
       },
       %{
+        name: "get_pantry",
+        description:
+          "Read the household's Projected Pantry: stock on hand minus what is already " <>
+            "committed to Planned Meals not yet cooked. Quantities are milli-units.",
+        parameters: %{"type" => "object", "properties" => %{}, "additionalProperties" => false}
+      },
+      %{
+        name: "lookup_prices",
+        description:
+          "Read stored prices of the Products covering the named ingredients, with product, " <>
+            "presentation, supermarket, currency and observation date. Ingredients without a " <>
+            "stored price are listed as missing; never assume a price for them.",
+        parameters: %{
+          "type" => "object",
+          "properties" => %{
+            "ingredients" => %{
+              "type" => "array",
+              "items" => %{"type" => "string"},
+              "minItems" => 1,
+              "maxItems" => @max_price_lookups,
+              "description" => "Ingredient names, as returned by search_recipes"
+            }
+          },
+          "required" => ["ingredients"],
+          "additionalProperties" => false
+        }
+      },
+      %{
         name: "present_proposal",
         description:
-          "Validate the latest optimizer plan and, only if valid, show it to the household. " <>
-            "Returns the validity status or the violations to fix.",
+          "Validate the latest optimizer plan and, only if valid, show it to the household " <>
+            "with its Purchase (packages to buy net of the Projected Pantry) and budget check. " <>
+            "Returns the status (valid, requires_approval with Deviations) or the violations to fix.",
         parameters: %{"type" => "object", "properties" => %{}, "additionalProperties" => false}
       },
       %{
@@ -224,10 +270,14 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
     case ProposalValidator.validate(ctx.workspace.draft, ctx) do
       {:valid, meals} ->
+        purchase = Purchase.for_meals(meals, ctx.account_id)
+        deviations = budget_deviations(purchase, ctx.household.budget_cents)
+        status = ProposalStatus.classify([], deviations) |> Atom.to_string()
+
         proposal = %{
           "type" => "proposal",
           "proposal_id" => Ecto.UUID.generate(),
-          "status" => "valid",
+          "status" => status,
           "meals" =>
             Enum.map(meals, fn meal ->
               %{
@@ -236,16 +286,60 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
                 "recipe_id" => meal.recipe_id,
                 "name" => meal.name
               }
-            end)
+            end),
+          "purchase" => Purchase.to_data(purchase),
+          "consumed_cost" => Purchase.consumed_data(purchase),
+          "budget" => budget_data(purchase, ctx.household.budget_cents),
+          "deviations" => deviations
         }
 
         emit(ctx, proposal)
 
-        {%{"status" => "valid", "proposal_id" => proposal["proposal_id"]},
-         %{ctx.workspace | proposal: proposal}, :continue}
+        result = %{
+          "status" => status,
+          "proposal_id" => proposal["proposal_id"],
+          "purchase_total_cents" => purchase.total_cents,
+          "purchase_complete" => purchase.complete?,
+          "missing_prices" => proposal["purchase"]["missing_prices"],
+          "consumed_cost_cents" => purchase.consumed.total_cents,
+          "currency" => purchase.currency,
+          "budget" => proposal["budget"],
+          "deviations" => deviations
+        }
+
+        {result, %{ctx.workspace | proposal: proposal}, :continue}
 
       {:invalid, violations} ->
         {%{"status" => "invalid", "violations" => violations}, ctx.workspace, :continue}
+    end
+  end
+
+  def execute("get_pantry", _args, ctx) do
+    emit(ctx, %{"type" => "progress", "step" => "reading_pantry"})
+    pantry = ProjectedPantry.load(ctx.account_id)
+    {%{"items" => ProjectedPantry.to_data(pantry)}, ctx.workspace, :continue}
+  end
+
+  def execute("lookup_prices", args, ctx) do
+    emit(ctx, %{"type" => "progress", "step" => "looking_up_prices"})
+
+    case args |> Map.get("ingredients") |> List.wrap() |> Enum.filter(&is_binary/1) do
+      [] ->
+        {%{"error" => "ingredients_required"}, ctx.workspace, :continue}
+
+      names ->
+        %{prices: prices, missing: missing} =
+          names |> Enum.take(@max_price_lookups) |> Prices.lookup_names()
+
+        result = %{
+          "prices" => Enum.map(prices, &Prices.offer_data/1),
+          "missing" =>
+            Enum.map(missing, fn m ->
+              %{"ingredient" => m.ingredient, "reason" => Atom.to_string(m.reason)}
+            end)
+        }
+
+        {result, ctx.workspace, :continue}
     end
   end
 
@@ -262,6 +356,53 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
   def execute(_name, _arguments, ctx),
     do: {%{"error" => "unknown_tool"}, ctx.workspace, :continue}
+
+  # ---------------------------------------------------------------------------
+  # Budget
+  # ---------------------------------------------------------------------------
+
+  # The budget is compared against the Purchase total. A budget of zero means
+  # the Household has not set one. With missing prices the total is a lower
+  # bound: overspend is still certain, but fitting the budget is unknown.
+  defp budget_deviations(purchase, budget_cents)
+       when is_integer(budget_cents) and budget_cents > 0 and
+              purchase.total_cents > budget_cents do
+    [
+      %{
+        "type" => "budget",
+        "budget_cents" => budget_cents,
+        "total_cents" => purchase.total_cents,
+        "difference_cents" => purchase.total_cents - budget_cents
+      }
+    ]
+  end
+
+  defp budget_deviations(_purchase, _budget_cents), do: []
+
+  defp budget_data(purchase, budget_cents) when is_integer(budget_cents) and budget_cents > 0 do
+    within =
+      cond do
+        purchase.total_cents > budget_cents -> false
+        purchase.complete? -> true
+        true -> nil
+      end
+
+    %{
+      "budget_cents" => budget_cents,
+      "purchase_total_cents" => purchase.total_cents,
+      "within_budget" => within,
+      "uncertain" => not purchase.complete?
+    }
+  end
+
+  defp budget_data(purchase, _budget_cents) do
+    %{
+      "budget_cents" => nil,
+      "purchase_total_cents" => purchase.total_cents,
+      "within_budget" => nil,
+      "uncertain" => not purchase.complete?
+    }
+  end
 
   # ---------------------------------------------------------------------------
   # Optimizer

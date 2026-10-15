@@ -251,7 +251,9 @@ defmodule MealPlannerApi.PlanningAgent.SessionMealPlanTest do
       assert_receive {:planning_agent_event, ^session_id,
                       %{"type" => "proposal", "meals" => meals} = proposal}
 
-      assert Map.keys(proposal) == ~w(meals proposal_id status type)
+      assert Map.keys(proposal) ==
+               ~w(budget consumed_cost deviations meals proposal_id purchase status type)
+
       assert Enum.all?(meals, &(Map.keys(&1) == ~w(date name recipe_id slot)))
     end
 
