@@ -88,16 +88,25 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   end
 
   @doc """
-  Looks prices up by ingredient name (case-insensitive exact match), reading
-  the database first and refreshing missing or stale Ingredients live.
+  Looks prices up, reading the database first and refreshing missing or
+  stale Ingredients live.
 
-  Options: `:now` (default: the current time) and `:refresh`, a function
-  from an Ingredient name to the scraped items (see
-  `MealPlannerApi.PlanningAgent.PriceScraper`); without it nothing is
-  refreshed. Names that match no Ingredient are never looked up live.
+  The query is any combination of:
 
-  Returns the offers, the names still without a price in `missing` with
-  their reason, and `warnings` for failed refreshes and prices still stale.
+    * `names` — Ingredient names (case-insensitive exact match)
+    * `:brand` — only Products of this brand (case-insensitive exact match)
+    * `:product` — only Products whose name or brand contains this text
+      (case-insensitive); without names, it searches every stored Product
+
+  Other options: `:now` (default: the current time) and `:refresh`, a
+  function from an Ingredient name to the scraped items (see
+  `MealPlannerApi.PlanningAgent.PriceScraper`); without it no refresh
+  succeeds. Names that match no Ingredient are never looked up live.
+  Freshness is judged on the offers that match the query.
+
+  Returns the matching offers, what is still without a price in `missing`
+  with its reason, and `warnings` for failed refreshes and prices still
+  stale.
   """
   @spec lookup([String.t()], keyword()) :: %{
           prices: [offer()],
@@ -106,27 +115,34 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
         }
   def lookup(names, opts \\ []) do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    brand = opts |> Keyword.get(:brand) |> normalize()
+    product = opts |> Keyword.get(:product) |> normalize()
 
     wanted = names |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()
-    ingredients = ingredients_by_name(wanted)
+    named = ingredients_by_name(wanted)
+    ingredients = Enum.uniq_by(Map.values(named) ++ product_ingredients(product), & &1.id)
+    matches? = &(brand_match?(&1, brand) and product_match?(&1, product))
 
-    {offers, warnings} =
-      ingredients |> Map.values() |> fresh_offers(now, Keyword.get(opts, :refresh))
+    {offers, warnings} = fresh_offers(ingredients, now, Keyword.get(opts, :refresh), matches?)
 
     missing =
       Enum.flat_map(wanted, fn name ->
-        case Map.fetch(ingredients, String.downcase(name)) do
-          :error ->
-            [%{ingredient: name, reason: :unknown_ingredient}]
-
-          {:ok, ingredient} ->
-            if Map.has_key?(offers, ingredient.id),
-              do: [],
-              else: [%{ingredient: ingredient.name, reason: :no_stored_price}]
+        case Map.fetch(named, String.downcase(name)) do
+          :error -> [%{ingredient: name, reason: :unknown_ingredient}]
+          {:ok, ingredient} -> named_gap(ingredient, offers, now, brand, product)
         end
-      end)
+      end) ++ product_gap(wanted, offers, product)
 
     %{prices: offers |> Map.values() |> List.flatten(), missing: missing, warnings: warnings}
+  end
+
+  @doc "JSON-safe entry of a lookup's `missing` list."
+  @spec missing_data(map()) :: map()
+  def missing_data(missing) do
+    missing
+    |> Map.take([:ingredient, :brand, :product])
+    |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
+    |> Map.put("reason", Atom.to_string(missing.reason))
   end
 
   @doc """
@@ -191,15 +207,20 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
 
   # ---------------------------------------------------------------------------
 
-  # Stored offers of `ingredients`, refreshed live where missing or stale.
-  defp fresh_offers([], _now, _refresh), do: {%{}, []}
+  # Offers of `ingredients` matching the query, refreshed live where missing
+  # or stale.
+  defp fresh_offers([], _now, _refresh, _matches?), do: {%{}, []}
 
-  defp fresh_offers(ingredients, now, refresh) do
+  defp fresh_offers(ingredients, now, refresh, matches?) do
     ids = Enum.map(ingredients, & &1.id)
-    stored = offers_for(ids, now)
+    stored = matching(offers_for(ids, now), matches?)
     to_refresh = Enum.filter(ingredients, &needs_refresh?(stored, &1.id))
     failed = refresh_all(to_refresh, refresh)
-    offers = if to_refresh == [] or refresh == nil, do: stored, else: offers_for(ids, now)
+
+    offers =
+      if to_refresh == [] or refresh == nil,
+        do: stored,
+        else: matching(offers_for(ids, now), matches?)
 
     warnings =
       Enum.flat_map(to_refresh, fn ingredient ->
@@ -223,6 +244,78 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
 
     {offers, Enum.sort_by(warnings, & &1.ingredient)}
   end
+
+  defp matching(offers_by_ingredient, matches?) do
+    offers_by_ingredient
+    |> Enum.map(fn {id, offers} -> {id, Enum.filter(offers, matches?)} end)
+    |> Enum.reject(fn {_id, offers} -> offers == [] end)
+    |> Map.new()
+  end
+
+  defp brand_match?(_offer, nil), do: true
+  defp brand_match?(%{brand: nil}, _brand), do: false
+  defp brand_match?(offer, brand), do: String.downcase(offer.brand) == String.downcase(brand)
+
+  defp product_match?(_offer, nil), do: true
+
+  defp product_match?(offer, product) do
+    text = String.downcase(product)
+
+    Enum.any?(
+      [offer.product, offer.brand],
+      &(is_binary(&1) and String.contains?(String.downcase(&1), text))
+    )
+  end
+
+  defp named_gap(ingredient, offers, now, brand, product) do
+    cond do
+      Map.has_key?(offers, ingredient.id) ->
+        []
+
+      brand != nil and any_offer?(ingredient.id, now) ->
+        [%{ingredient: ingredient.name, brand: brand, reason: :no_matching_brand}]
+
+      product != nil and any_offer?(ingredient.id, now) ->
+        [%{ingredient: ingredient.name, product: product, reason: :no_matching_product}]
+
+      true ->
+        [%{ingredient: ingredient.name, reason: :no_stored_price}]
+    end
+  end
+
+  # A Product query without names is missing when nothing matched it.
+  defp product_gap([], offers, product) when is_binary(product) and map_size(offers) == 0,
+    do: [%{product: product, reason: :no_matching_product}]
+
+  defp product_gap(_wanted, _offers, _product), do: []
+
+  defp any_offer?(ingredient_id, now),
+    do: Map.has_key?(offers_for([ingredient_id], now), ingredient_id)
+
+  defp product_ingredients(nil), do: []
+
+  defp product_ingredients(product) do
+    pattern = "%" <> escape_like(product) <> "%"
+
+    from(p in Product,
+      join: i in assoc(p, :ingredient),
+      where: ilike(p.name, ^pattern) or ilike(p.brand, ^pattern),
+      distinct: true,
+      select: %{id: i.id, name: i.name}
+    )
+    |> Repo.all()
+  end
+
+  defp escape_like(text), do: String.replace(text, ~r/[\\%_]/, "\\\\\\0")
+
+  defp normalize(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize(_value), do: nil
 
   defp with_age(offer, now) do
     age = max(DateTime.diff(now, offer.observed_at, :second), 0)

@@ -73,7 +73,9 @@ are rejected as unusable, never assumed.
   old price with its age (route: inline, single bounded worker owning the
   whole issue). Commit: the `feat(planning-agent): refresh stale prices ...`
   commit on this branch.
-- [ ] T2 Brand and Product queries in `lookup_prices` (route: inline).
+- [x] T2 Brand and Product queries in `lookup_prices` (route: inline).
+  Commit: the `feat(planning-agent): query prices by brand and Product`
+  commit on this branch.
 - [ ] T3 Household Brand Preferences in settings and the Household context
   (route: inline).
 - [ ] T4 Session Brands in the Workspace, brand-steered Purchase, disclosed
@@ -93,7 +95,10 @@ are rejected as unusable, never assumed.
   live refresh. `PriceScraper.HttpTest` covers the contract parsing.
   `PurchaseToolsTest` now pins its clock (fixture prices were aged by the
   real clock). Planning agent suite: 154 passed.
+- T2: RED observed for 6 brand and Product query session tests; GREEN after
+  brand and product filters (freshness judged on the matching offers).
+  Planning agent suite: 160 passed.
 
 ## Next step
 
-T2.
+T3.
