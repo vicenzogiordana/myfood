@@ -237,7 +237,8 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponsesTest do
 
       {:ok, state} = OpenAIResponses.init(opts())
 
-      assert {:ok, %{text: "hi"}, state} = OpenAIResponses.respond(state, @request)
+      # Unknown usage is reported as unknown, never as zero tokens.
+      assert {:ok, %{text: "hi", usage: nil}, state} = OpenAIResponses.respond(state, @request)
       assert %{reserved_micros: 0, spent_micros: spent} = OpenAIResponses.spend(state)
       # Worst case output alone is 1_000 tokens at 4 USD/Mtok = 4_000 micro-USD.
       assert spent >= 4_000

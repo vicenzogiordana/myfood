@@ -45,19 +45,20 @@ report no outcome kind. Spec #93 and the #86 contract require all of that.
 - [x] Non-retryable errors are not retried
 - [x] Three no-progress attempts stop the run and ask the Member
 - [x] Continuing past a limit requires explicit authorization
-- [ ] Outcome kinds are reported for tools and runs
-- [ ] Streamed events contain no raw tool output or model reasoning
+- [x] Outcome kinds are reported for tools and runs
+- [x] Streamed events contain no raw tool output or model reasoning
 
 ## Tasks
 
 - [x] T1 Per-call deadlines, retry budgets and error classification
   (route: inline, single bounded worker; trigger evidence: worker owns the
-  whole issue). Commit: e1a7ab7.
+  whole issue). Commit: 5863711.
 - [x] T2 Session-level allowance, no-progress detection and authorization
-  to continue (route: inline). Commit: see the T2 commit on this branch
-  (feat(planning-agent): stop at session limits ...).
-- [ ] T3 Outcome kinds for tools and runs, event allowlist, missing is never
-  zero. Commit: see T3 evidence below.
+  to continue (route: inline). Commit: af7a495.
+- [x] T3 Outcome kinds for tools and runs, event allowlist, missing is never
+  zero (route: inline). Commit: the T3 commit on this branch
+  (feat(planning-agent): report outcome kinds ...), which also carries this
+  checkbox update.
 
 ## Checks
 
@@ -66,9 +67,20 @@ report no outcome kind. Spec #93 and the #86 contract require all of that.
 
 ## Progress and evidence
 
-- T1 (e1a7ab7): RED observed for 8 session bounds tests, 5 OpenAI status
+- T1 (5863711; e1a7ab7 before rebase): RED observed for 8 session bounds tests, 5 OpenAI status
   classification tests and the closed-port test; GREEN after wiring. Planning
   agent suite 104 passed; full suite 1054/1055 with one failure in the legacy
   `PlanningChannelTest` that passes on rerun (flaky, untouched code).
 - T2: RED observed for 8 allowance session tests; GREEN after wiring.
   Planning agent and agent channel suites 115 passed.
+- T3: RED observed for 8 outcome/streaming session tests and the unknown
+  usage adapter test; GREEN after wiring. Planning agent and agent channel
+  suites 123 passed. `mix precommit` (partition 108): exit 0, 1074 passed,
+  25 skipped.
+
+## Next step
+
+Native review gate (Jorge el Curioso) on the PR. Follow-ups outside #108:
+absence grace (#107) can reuse the session presence flag that already stops
+retries; candidate costs remain unpriced until the purchase slice (#100), so
+every optimizer plan is reported as `partial` with `estimated_cost` missing.

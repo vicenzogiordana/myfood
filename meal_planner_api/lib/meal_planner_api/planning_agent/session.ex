@@ -22,7 +22,17 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   Subscribers receive `{:planning_agent_event, session_id, event}` where
   `event["type"]` is one of `progress`, `assistant_message`, `question`,
   `proposal`, `optimizer_failed`, `consent_required`, `limit_reached`,
-  `agent_unavailable`, `turn_completed`, `session_cancelled`, `session_ended`.
+  `agent_unavailable`, `turn_completed`, `run_finished`, `session_cancelled`,
+  `session_ended`.
+
+  Every run (one request, or one authorized continuation) ends with exactly
+  one `run_finished` event whose `outcome` is `complete`, `partial` (stopped
+  by a limit), `failure`, `cancelled` or `unknown` (the turn crashed). Every
+  tool result carries its own outcome kind (see `MealPlannerApi.PlanningAgent.Tools`).
+
+  Streaming carries progress only: every event passes an allowlist of types
+  and fields before it is sent, so raw tool output, tool arguments and model
+  reasoning never reach subscribers.
 
   ## Limits
 
@@ -298,7 +308,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   def handle_call({:cancel, %{membership_id: actor, owner?: owner?}}, _from, state) do
     if actor == state.membership_id or owner? == true do
-      state = stop_turn(state)
+      state = cancel_run(state)
 
       # When the store refuses the cancel, session_id is kept so terminate/2
       # falls back to expire_session and the Household is not left blocked
@@ -367,6 +377,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     Logger.error("planning agent turn crashed: #{inspect(reason)}")
     state = clear_turn(state)
     emit(state, %{"type" => "agent_unavailable", "reason" => "internal_error"})
+    emit(state, %{"type" => "run_finished", "outcome" => "unknown"})
     {:noreply, state}
   end
 
@@ -398,7 +409,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       # does not expire the row a second time.
       {:error, :not_active} ->
         Logger.warning("planning agent session lost its lock; stopping")
-        state = stop_turn(state)
+        state = cancel_run(state)
         emit(state, %{"type" => "session_ended"})
         {:stop, :normal, %{state | session_id: nil}}
     end
@@ -408,7 +419,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   @impl true
   def terminate(_reason, state) do
-    _ = stop_turn(state)
+    _ = cancel_run(state)
 
     if state.session_id do
       _ = PlanningRepo.expire_session(state.account_id, state.session_id)
@@ -508,8 +519,6 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     %{state | task: task, deadline_ref: deadline_ref}
   end
 
-  defp stop_turn(%{task: nil} = state), do: state
-
   defp stop_turn(%{task: task} = state) do
     _ = Task.shutdown(task, :brutal_kill)
     # The task is dead, so every checkpoint it sent is already queued: adopt
@@ -530,20 +539,32 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     end
   end
 
+  # A running turn interrupted by Cancel, a lost lock or shutdown.
+  defp cancel_run(%{task: nil} = state), do: state
+
+  defp cancel_run(state) do
+    state = stop_turn(state)
+    emit(state, %{"type" => "run_finished", "outcome" => "cancelled"})
+    state
+  end
+
   # The run's terminal events come from its outcome. A reached limit stops
   # execution until the Member authorizes continuing.
   defp finish_run(state, :completed) do
     emit(state, %{"type" => "turn_completed"})
+    emit(state, %{"type" => "run_finished", "outcome" => "complete"})
     state
   end
 
   defp finish_run(state, {:limit_reached, limit}) do
     emit(state, %{"type" => "limit_reached", "limit" => limit, "requires_authorization" => true})
+    emit(state, %{"type" => "run_finished", "outcome" => "partial"})
     %{state | pending_limit: limit}
   end
 
   defp finish_run(state, {:failed, reason}) do
     emit(state, %{"type" => "agent_unavailable", "reason" => reason_string(reason)})
+    emit(state, %{"type" => "run_finished", "outcome" => "failure"})
     state
   end
 
@@ -576,10 +597,44 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   end
 
   defp emit(state, event) do
-    Enum.each(Map.keys(state.subscribers), fn pid ->
-      send(pid, {:planning_agent_event, state.session_id, event})
+    case sanitize(event) do
+      nil ->
+        Logger.warning("planning agent dropped an event outside the allowlist")
+
+      event ->
+        Enum.each(Map.keys(state.subscribers), fn pid ->
+          send(pid, {:planning_agent_event, state.session_id, event})
+        end)
+    end
+  end
+
+  @event_fields %{
+    "progress" => ~w(step call attempt tool outcome),
+    "assistant_message" => ~w(text),
+    "question" => ~w(text),
+    "proposal" => ~w(proposal_id status meals purchase consumed_cost budget deviations),
+    "optimizer_failed" => ~w(reason),
+    "consent_required" => [],
+    "limit_reached" => ~w(limit requires_authorization),
+    "agent_unavailable" => ~w(reason),
+    "turn_completed" => [],
+    "run_finished" => ~w(outcome),
+    "session_cancelled" => [],
+    "session_ended" => []
+  }
+  @meal_fields ~w(date slot recipe_id name)
+
+  # Streaming carries progress only: known event types with known fields.
+  # Anything else, such as raw tool output or model reasoning, is dropped.
+  defp sanitize(%{"type" => type} = event) when is_map_key(@event_fields, type) do
+    event
+    |> Map.take(["type" | Map.fetch!(@event_fields, type)])
+    |> Map.replace_lazy("meals", fn meals ->
+      Enum.map(List.wrap(meals), &Map.take(&1, @meal_fields))
     end)
   end
+
+  defp sanitize(_event), do: nil
 
   defp schedule_lease_renewal, do: Process.send_after(self(), :renew_lease, @lease_renew_ms)
 

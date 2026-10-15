@@ -480,4 +480,182 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
       refute_received {:planning_agent_event, ^session_id, %{"text" => "never"}}
     end
   end
+
+  describe "outcome kinds" do
+    defp run_outcome(session_id) do
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "run_finished", "outcome" => outcome}},
+                     2_000
+
+      outcome
+    end
+
+    test "every tool result carries its outcome kind", %{household: h} do
+      steps = FakeRecipeSearch.steps!([{:ok, []}, :fail, {:sleep, 1_000}])
+
+      script = [
+        {:tool_calls,
+         [
+           {"search_recipes", %{"query" => "a"}},
+           {"search_recipes", %{"query" => "b"}},
+           {"present_proposal", %{}},
+           {"no_such_tool", %{}}
+         ]},
+        {:tool_calls, [{"search_recipes", %{"query" => "c"}}]},
+        {:text, "Done."}
+      ]
+
+      {session_id, pid} =
+        start!(h, script,
+          recipe_search: {FakeRecipeSearch, steps: steps},
+          call_policies: %{read: %{timeout_ms: 50, retries: 0}}
+        )
+
+      :ok = Session.send_message(pid, "Plan")
+      assert run_outcome(session_id) == "complete"
+
+      assert_received {:scripted_model_request, _}
+      assert_received {:scripted_model_request, second}
+      assert_received {:scripted_model_request, third}
+
+      outcomes =
+        for %{role: :tool_result, content: content} <- third.messages, do: content["outcome"]
+
+      # complete search, failed search, nothing to present, unknown tool,
+      # and a search cut at its deadline: not "no recipes", but unknown.
+      assert outcomes == ["complete", "failure", "failure", "failure", "unknown"]
+      assert length(second.messages) < length(third.messages)
+
+      for outcome <- ["complete", "failure", "unknown"] do
+        assert_received {:planning_agent_event, ^session_id,
+                         %{"type" => "progress", "step" => "tool_finished", "outcome" => ^outcome}}
+      end
+    end
+
+    test "an optimizer plan built without prices is partial and names what is missing",
+         %{household: h} do
+      {session_id, pid} =
+        start!(h, [{:tool_calls, [{"run_optimizer", %{}}]}, {:text, "Done."}])
+
+      :ok = Session.send_message(pid, "Plan")
+      assert run_outcome(session_id) == "complete"
+
+      assert_received {:scripted_model_request, _}
+      assert_received {:scripted_model_request, second}
+
+      assert %{"status" => "ok", "outcome" => "partial", "missing" => missing} =
+               tool_result(second, "run_optimizer")
+
+      assert "estimated_cost" in missing
+      assert "protein_g_per_serving" in missing
+
+      assert_received {:optimizer_payload, payload}
+      [candidate | _] = payload["candidates_by_slot"]["lunch"]
+      # Missing nutrition is sent as missing, never as zero.
+      assert candidate["protein_g_per_serving"] == nil
+    end
+
+    test "an optimizer timeout is unknown, never failure or infeasible", %{household: h} do
+      {session_id, pid} =
+        start!(h, [{:tool_calls, [{"run_optimizer", %{}}]}, {:text, "Done."}],
+          optimizer: {FakeOptimizer, result: fn _ -> {:error, :optimizer_timeout, %{}} end}
+        )
+
+      :ok = Session.send_message(pid, "Plan")
+      assert run_outcome(session_id) == "complete"
+
+      assert_received {:scripted_model_request, _}
+      assert_received {:scripted_model_request, second}
+      assert %{"outcome" => "unknown"} = tool_result(second, "run_optimizer")
+    end
+
+    test "a run stopped by a limit is partial", %{household: h} do
+      script =
+        Enum.map(1..3, fn n -> {:tool_calls, [{"search_recipes", %{"query" => "#{n}"}}]} end)
+
+      {session_id, pid} = start!(h, script, max_iterations: 1)
+
+      :ok = Session.send_message(pid, "Plan")
+      assert run_outcome(session_id) == "partial"
+    end
+
+    test "a run whose model fails is a failure", %{household: h} do
+      {session_id, pid} = start!(h, [{:error, :provider_unauthorized}])
+
+      :ok = Session.send_message(pid, "Plan")
+      assert run_outcome(session_id) == "failure"
+    end
+
+    test "a run that crashes is unknown", %{household: h} do
+      crash = fn _request -> raise "fictitious crash" end
+      {session_id, pid} = start!(h, [crash])
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        :ok = Session.send_message(pid, "Plan")
+        assert run_outcome(session_id) == "unknown"
+      end)
+    end
+
+    test "a run interrupted by Cancel is cancelled", %{household: h} do
+      slow = fn _request -> Process.sleep(5_000) && {:text, "late"} end
+
+      {session_id, pid} =
+        start!(h, [slow], call_policies: %{model: %{timeout_ms: 10_000}})
+
+      :ok = Session.send_message(pid, "Plan")
+      assert_receive {:scripted_model_request, _}, 1_000
+
+      :ok = Session.cancel(pid, %{membership_id: h.owner.membership_id, owner?: true})
+      assert run_outcome(session_id) == "cancelled"
+    end
+  end
+
+  describe "streaming" do
+    @sentinel "SENTINEL-raw-tool-output"
+
+    test "streamed events carry progress only, never raw tool output", %{household: h} do
+      raw_recipe = %{
+        id: Ecto.UUID.generate(),
+        name: "#{@sentinel} recipe",
+        slots: ["lunch"],
+        ingredients: ["#{@sentinel} ingredient"],
+        calories_per_serving: nil
+      }
+
+      # The search itself, then the optimizer's lunch and dinner candidates.
+      steps = FakeRecipeSearch.steps!(List.duplicate({:ok, [raw_recipe]}, 3))
+      failing = fn _ -> {:error, :infeasible, %{"causes" => [@sentinel]}} end
+
+      script = [
+        {:tool_calls,
+         [
+           {"search_recipes", %{"query" => @sentinel}},
+           {"run_optimizer", %{"exclude_recipe_ids" => [@sentinel]}},
+           {@sentinel, %{"x" => @sentinel}}
+         ]},
+        {:text, "Done."}
+      ]
+
+      {session_id, pid} =
+        start!(h, script,
+          recipe_search: {FakeRecipeSearch, steps: steps},
+          optimizer: {FakeOptimizer, result: failing}
+        )
+
+      :ok = Session.send_message(pid, "Plan")
+      assert run_outcome(session_id) == "complete"
+
+      events = collect_events(session_id)
+      assert Enum.any?(events, &(&1["type"] == "optimizer_failed"))
+      refute inspect(events, limit: :infinity, printable_limit: :infinity) =~ @sentinel
+    end
+
+    defp collect_events(session_id, acc \\ []) do
+      receive do
+        {:planning_agent_event, ^session_id, event} -> collect_events(session_id, [event | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+  end
 end

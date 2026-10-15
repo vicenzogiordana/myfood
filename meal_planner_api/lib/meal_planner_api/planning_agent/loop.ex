@@ -124,6 +124,14 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
       arguments = if is_map(call.arguments), do: call.arguments, else: %{}
       {content, workspace, call_control} = Tools.execute(call.name, arguments, acc.tool_context)
 
+      # Progress only: the tool's name and outcome kind, never its output.
+      acc.emit.(%{
+        "type" => "progress",
+        "step" => "tool_finished",
+        "tool" => tool_label(call.name),
+        "outcome" => content["outcome"]
+      })
+
       acc =
         acc
         |> Map.update!(:tool_context, &%{&1 | workspace: workspace})
@@ -133,13 +141,19 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
     end)
   end
 
-  # Verifiable progress is evidence: a successful tool result. Its identity
-  # ignores generated identifiers, so presenting the same plan twice is not
-  # new evidence.
-  defp fingerprint(_name, %{"error" => _}, fingerprints), do: fingerprints
+  # Verifiable progress is evidence: a complete or partial tool result. Its
+  # identity ignores generated identifiers, so presenting the same plan twice
+  # is not new evidence.
+  defp fingerprint(name, %{"outcome" => outcome} = content, fingerprints)
+       when outcome in ["complete", "partial"],
+       do: [:erlang.phash2({name, Map.delete(content, "proposal_id")}) | fingerprints]
 
-  defp fingerprint(name, content, fingerprints),
-    do: [:erlang.phash2({name, Map.delete(content, "proposal_id")}) | fingerprints]
+  defp fingerprint(_name, _content, fingerprints), do: fingerprints
+
+  # Tool names come from the model: only catalog names are streamed.
+  defp tool_label(name) do
+    if Enum.any?(Tools.definitions(), &(&1.name == name)), do: name, else: "unknown"
+  end
 
   defp merge_control(:end_turn, _), do: :end_turn
   defp merge_control(_, control), do: control

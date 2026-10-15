@@ -87,8 +87,9 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
             {usage, actual} =
               case usage(response) do
                 {:ok, usage} -> {usage, cost(state.config, usage)}
-                # Usage is unknown: the worst case stays spent.
-                :unknown -> {%{input_tokens: 0, output_tokens: 0}, reservation}
+                # Usage is unknown: reported as unknown (never as zero) and
+                # the worst case stays spent.
+                :unknown -> {nil, reservation}
               end
 
             state = %{state | ledger: SpendLedger.settle(state.ledger, reservation, actual)}

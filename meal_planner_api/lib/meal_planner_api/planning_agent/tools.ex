@@ -182,7 +182,25 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   updated workspace, and whether the turn continues.
   """
   @spec execute(String.t(), map(), context()) :: {map(), map(), control()}
-  def execute("search_recipes", args, ctx) do
+  def execute(name, args, ctx) do
+    {content, workspace, control} = run(name, args, ctx)
+    {Map.put_new(content, "outcome", outcome(content)), workspace, control}
+  end
+
+  @doc """
+  The outcome kind of a tool result: `complete`, `partial` (verified but
+  with missing data, named under `"missing"`), `failure`, or `unknown` (the
+  call was cut by its deadline, so absence of a result proves nothing).
+  `cancelled` applies only to runs, which a cancel interrupts mid-tool.
+  """
+  @spec outcome(map()) :: String.t()
+  def outcome(%{"outcome" => outcome}), do: outcome
+  def outcome(%{"error" => "search_timeout"}), do: "unknown"
+  def outcome(%{"error" => "optimizer_failed", "reason" => "optimizer_timeout"}), do: "unknown"
+  def outcome(%{"error" => _}), do: "failure"
+  def outcome(_content), do: "complete"
+
+  defp run("search_recipes", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "searching_recipes"})
 
     filters = %{
@@ -201,7 +219,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
-  def execute("get_plan", args, ctx) do
+  defp run("get_plan", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "reading_plan"})
 
     case MealPlan.parse_range(Map.get(args, "from"), Map.get(args, "to")) do
@@ -214,7 +232,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
-  def execute("reuse_plan", args, ctx) do
+  defp run("reuse_plan", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "reading_plan"})
 
     case MealPlan.reuse(ctx.account_id, Map.get(args, "source_from"), ctx.range, ctx.slots) do
@@ -230,7 +248,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
-  def execute("run_optimizer", args, ctx) do
+  defp run("run_optimizer", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "running_optimizer"})
 
     exclude =
@@ -247,8 +265,11 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
       workspace = %{ctx.workspace | draft: meals}
 
-      {%{"status" => "ok", "meals" => Enum.map(meals, &meal_data(&1, names))}, workspace,
-       :continue}
+      result =
+        %{"status" => "ok", "meals" => Enum.map(meals, &meal_data(&1, names))}
+        |> with_missing(missing(candidates_by_slot))
+
+      {result, workspace, :continue}
     else
       # Every failed run discards the earlier draft so present_proposal cannot
       # show a plan the agent just asked to change.
@@ -268,10 +289,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
-  def execute("present_proposal", _args, %{workspace: %{draft: nil}} = ctx),
+  defp run("present_proposal", _args, %{workspace: %{draft: nil}} = ctx),
     do: {%{"error" => "no_plan_to_present"}, ctx.workspace, :continue}
 
-  def execute("present_proposal", _args, ctx) do
+  defp run("present_proposal", _args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "validating_proposal"})
 
     case ProposalValidator.validate(ctx.workspace.draft, ctx) do
@@ -320,13 +341,13 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
-  def execute("get_pantry", _args, ctx) do
+  defp run("get_pantry", _args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "reading_pantry"})
     pantry = ProjectedPantry.load(ctx.account_id)
     {%{"items" => ProjectedPantry.to_data(pantry)}, ctx.workspace, :continue}
   end
 
-  def execute("lookup_prices", args, ctx) do
+  defp run("lookup_prices", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "looking_up_prices"})
 
     case args |> Map.get("ingredients") |> List.wrap() |> Enum.filter(&is_binary/1) do
@@ -345,11 +366,14 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             end)
         }
 
+        # Missing prices are named, never zero: the lookup is then partial.
+        result = if missing == [], do: result, else: Map.put(result, "outcome", "partial")
+
         {result, ctx.workspace, :continue}
     end
   end
 
-  def execute("ask_human", args, ctx) do
+  defp run("ask_human", args, ctx) do
     case string_arg(args, "question") do
       nil ->
         {%{"error" => "question_required"}, ctx.workspace, :continue}
@@ -360,7 +384,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
-  def execute(_name, _arguments, ctx),
+  defp run(_name, _arguments, ctx),
     do: {%{"error" => "unknown_tool"}, ctx.workspace, :continue}
 
   # ---------------------------------------------------------------------------
@@ -429,18 +453,38 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   # Candidate costs and the Nutrition Goal enter the optimizer with the
   # package-aware purchase calculation and goal relaxation slices of #93; the
   # tracer bullet keeps bounds wide so only coverage decides feasibility.
+  #
+  # Missing nutrition data is sent as missing (nil), never as zero, and the
+  # plan built from it is reported as partial with what is missing.
   defp candidate(recipe) do
     %{
       "recipe_id" => recipe.id,
       "label" => recipe.name,
       "estimated_cost_cents" => 0,
-      "calories_per_serving" => recipe.calories_per_serving || 0,
-      "protein_g_per_serving" => recipe.protein_g_per_serving || 0,
-      "carbs_g_per_serving" => recipe.carbs_g_per_serving || 0,
-      "fat_g_per_serving" => recipe.fat_g_per_serving || 0,
+      "calories_per_serving" => Map.get(recipe, :calories_per_serving),
+      "protein_g_per_serving" => Map.get(recipe, :protein_g_per_serving),
+      "carbs_g_per_serving" => Map.get(recipe, :carbs_g_per_serving),
+      "fat_g_per_serving" => Map.get(recipe, :fat_g_per_serving),
       "inventory_hit_count" => 0
     }
   end
+
+  @nutrition_fields ~w(calories_per_serving protein_g_per_serving carbs_g_per_serving
+                       fat_g_per_serving)
+
+  # Candidate costs are not priced yet (purchase slice of #93), so every plan
+  # misses its estimated cost and is partial until that slice lands.
+  defp missing(candidates_by_slot) do
+    candidates = candidates_by_slot |> Map.values() |> List.flatten()
+
+    nutrition =
+      Enum.filter(@nutrition_fields, fn field -> Enum.any?(candidates, &is_nil(&1[field])) end)
+
+    ["estimated_cost" | nutrition]
+  end
+
+  defp with_missing(result, missing),
+    do: Map.merge(result, %{"outcome" => "partial", "missing" => missing})
 
   defp payload(ctx, candidates_by_slot) do
     {from_date, to_date} = ctx.range
