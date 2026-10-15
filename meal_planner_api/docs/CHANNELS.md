@@ -203,6 +203,12 @@ One Planning Session per Household: while one is active, any other Member's
 the active one; `overlapping_range` is only the store's last-resort guard). The session ends when it is
 cancelled, confirmed, or when its absence grace expires.
 
+**Start rate limit (issue #118).** A Household starts at most
+`PLANNING_AGENT_SESSION_STARTS_PER_WINDOW` Planning Sessions within
+`PLANNING_AGENT_SESSION_START_WINDOW_SECONDS`; a start over it is refused with
+`session_start_rate_limited`. Without both values every `start_session` is refused
+with `spend_caps_unconfigured`. Resuming a session is not a start.
+
 **Absence grace and recovery (issue #107).** When the Member's socket leaves or
 drops, the session, its Workspace, the last Proposal and the Household's slot are
 kept for 15 minutes. While the Member is absent no new model call starts (a call in
@@ -218,7 +224,7 @@ grace expires the work is cancelled, the Workspace discarded and the slot releas
 
 | Event | Payload | Reply |
 |-------|---------|-------|
-| `start_session` | `{range_from, range_to, slots?}` — ISO dates, at most 31 days of unplanned days; `slots` from `breakfast`, `lunch`, `snack`, `dinner` (default `lunch`, `dinner`) | `{session_id}` or `{reason}`: `session_already_active`, `range_already_planned`, `overlapping_range`, `invalid_range`, `invalid_slots`, `subscription_required`, `spend_caps_unconfigured`, `pricing_unconfigured`, `provider_unconfigured`, `internal_error` |
+| `start_session` | `{range_from, range_to, slots?}` — ISO dates, at most 31 days of unplanned days; `slots` from `breakfast`, `lunch`, `snack`, `dinner` (default `lunch`, `dinner`) | `{session_id}` or `{reason}`: `session_already_active`, `session_start_rate_limited`, `range_already_planned`, `overlapping_range`, `invalid_range`, `invalid_slots`, `subscription_required`, `spend_caps_unconfigured`, `pricing_unconfigured`, `provider_unconfigured`, `internal_error` |
 | `resume_session` | `{}` — only the session's Member, within the absence grace (also after a server restart) | `{session_id, proposal}` (the last valid Proposal or `null`) or `{reason}`: `forbidden` (another Member, or no longer an active Member), `no_session` (none, or its grace expired) |
 | `give_consent` | `{}` — explicit consent before the first external AI use | `ok` |
 | `send_message` | `{text}` — a non-blank string of at most 4,000 bytes | `ok`, or `{reason}`: `invalid_message` (missing, non-string or blank `text`), `message_too_long`, `consent_required`, `busy`, `authorization_required` (a limit was reached), `no_active_session`, `internal_error` |

@@ -335,10 +335,17 @@ defmodule MealPlannerApi.Data.PlanningRepo do
   A transaction-scoped advisory lock keyed on the Household serialises
   concurrent starts, so two Members racing cannot both win. The legacy
   overlap EXCLUDE constraint still applies underneath.
+
+  With `start_limit: {max_starts, window_seconds}` the start is refused
+  with `:session_start_rate_limited` once the Household already started
+  `max_starts` Planning Sessions in the last `window_seconds` (issue #118).
+  Every stored session counts, whatever its status, and the count runs
+  under the same lock, so concurrent starts cannot exceed the limit.
   """
-  @spec create_household_session(Ecto.UUID.t(), map()) ::
-          {:ok, PlanningSession.t()} | {:error, :session_already_active | term()}
-  def create_household_session(account_id, attrs) when is_map(attrs) do
+  @spec create_household_session(Ecto.UUID.t(), map(), keyword()) ::
+          {:ok, PlanningSession.t()}
+          | {:error, :session_already_active | :session_start_rate_limited | term()}
+  def create_household_session(account_id, attrs, opts \\ []) when is_map(attrs) do
     Repo.transaction(fn ->
       Repo.query!("SELECT pg_advisory_xact_lock(hashtext($1))", [
         "planning_session:" <> account_id
@@ -349,15 +356,31 @@ defmodule MealPlannerApi.Data.PlanningRepo do
           from(s in PlanningSession, where: s.account_id == ^account_id and s.status == :active)
         )
 
-      if active? do
-        Repo.rollback(:session_already_active)
-      else
-        case create_session(account_id, attrs) do
-          {:ok, session} -> session
-          {:error, reason} -> Repo.rollback(reason)
-        end
+      cond do
+        active? ->
+          Repo.rollback(:session_already_active)
+
+        start_limited?(account_id, Keyword.get(opts, :start_limit)) ->
+          Repo.rollback(:session_start_rate_limited)
+
+        true ->
+          case create_session(account_id, attrs) do
+            {:ok, session} -> session
+            {:error, reason} -> Repo.rollback(reason)
+          end
       end
     end)
+  end
+
+  defp start_limited?(_account_id, nil), do: false
+
+  defp start_limited?(account_id, {max_starts, window_seconds}) do
+    since = DateTime.add(DateTime.utc_now(), -window_seconds, :second)
+
+    Repo.aggregate(
+      from(s in PlanningSession, where: s.account_id == ^account_id and s.started_at > ^since),
+      :count
+    ) >= max_starts
   end
 
   @doc "Extends the lease of an active session so the sweeper does not expire it."

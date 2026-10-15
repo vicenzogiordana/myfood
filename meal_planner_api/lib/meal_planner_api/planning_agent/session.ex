@@ -77,6 +77,16 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   once at start and carried across turns, so neither Stop nor a new message
   resets it.
 
+  ## Start rate limit
+
+  A Household starts at most `max_starts` Planning Sessions within a
+  sliding window of `window_seconds` (`:session_start_limit`, issue #118);
+  a start over it is refused with `:session_start_rate_limited` and leaves
+  nothing behind. Every stored Planning Session counts, whatever its end.
+  The limit is a human decision with no default: without a valid one every
+  start is refused with `:spend_caps_unconfigured`. Recovering a session
+  after a restart is not a start and is never limited.
+
   ## Stop and Cancel
 
   Both halt the running turn immediately with a `:brutal_kill`, adopt what
@@ -237,6 +247,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       store (see `MealPlannerApi.PlanningAgent.Confirmation`), for tests
     * `:reconcile_ms`, `:poll_ms` — how long and how often a lost
       confirmation acknowledgement is reconciled (default 30 s and 1 s)
+    * `:session_start_limit` — `{max_starts, window_seconds}` (default from
+      `config :meal_planner_api, :planning_agent`), see "Start rate limit"
   """
   @spec start(attrs(), keyword()) ::
           {:ok, %{session_id: Ecto.UUID.t(), pid: pid()}}
@@ -245,16 +257,22 @@ defmodule MealPlannerApi.PlanningAgent.Session do
              | :invalid_slots
              | :range_already_planned
              | :session_already_active
+             | :session_start_rate_limited
+             | :spend_caps_unconfigured
              | term()}
   def start(attrs, opts \\ []) do
     {model, model_opts} = Keyword.get_lazy(opts, :model, fn -> config(:model) end)
 
-    with {:ok, {from_date, to_date}} <- validate_range(attrs.range),
+    with {:ok, start_limit} <-
+           start_limit(
+             Keyword.get_lazy(opts, :session_start_limit, fn -> config(:session_start_limit) end)
+           ),
+         {:ok, {from_date, to_date}} <- validate_range(attrs.range),
          :ok <- validate_slots(attrs.slots),
          :ok <- ensure_unplanned(attrs.account_id, from_date, to_date),
          {:ok, model_state} <- model.init(model_opts),
          grace_ms = Keyword.get(opts, :grace_ms, @default_grace_ms),
-         {:ok, row} <- lock(attrs, from_date, to_date, grace_ms) do
+         {:ok, row} <- lock(attrs, from_date, to_date, grace_ms, start_limit) do
       init_args = init_args(attrs, row.id, {model, model_state}, nil, opts)
 
       case DynamicSupervisor.start_child(@supervisor, {__MODULE__, init_args}) do
@@ -1752,15 +1770,28 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       else: :ok
   end
 
-  defp lock(attrs, from_date, to_date, grace_ms) do
-    PlanningRepo.create_household_session(attrs.account_id, %{
-      range_from: from_date,
-      range_to: to_date,
-      lock_owner_user_id: attrs.user_id,
-      lock_owner_membership_id: attrs.membership_id,
-      lease_expires_at: present_lease(grace_ms)
-    })
+  defp lock(attrs, from_date, to_date, grace_ms, start_limit) do
+    PlanningRepo.create_household_session(
+      attrs.account_id,
+      %{
+        range_from: from_date,
+        range_to: to_date,
+        lock_owner_user_id: attrs.user_id,
+        lock_owner_membership_id: attrs.membership_id,
+        lease_expires_at: present_lease(grace_ms)
+      },
+      start_limit: start_limit
+    )
   end
+
+  # The start rate limit is a human decision: without a valid one no
+  # Planning Session starts.
+  defp start_limit({max_starts, window_seconds} = limit)
+       when is_integer(max_starts) and max_starts > 0 and is_integer(window_seconds) and
+              window_seconds > 0,
+       do: {:ok, limit}
+
+  defp start_limit(_limit), do: {:error, :spend_caps_unconfigured}
 
   defp config(key) do
     :meal_planner_api

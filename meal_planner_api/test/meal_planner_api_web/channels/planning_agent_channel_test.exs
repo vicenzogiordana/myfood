@@ -41,9 +41,13 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
   end
 
   defp configure_agent(script) do
-    Application.put_env(:meal_planner_api, :planning_agent,
-      model: {Scripted, script: script},
-      optimizer: {FakeOptimizer, []}
+    # Keeps the rest of the configuration, such as the start rate limit.
+    configured = Application.get_env(:meal_planner_api, :planning_agent, [])
+
+    Application.put_env(
+      :meal_planner_api,
+      :planning_agent,
+      Keyword.merge(configured, model: {Scripted, script: script}, optimizer: {FakeOptimizer, []})
     )
   end
 
@@ -170,9 +174,14 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
        %{household: h} do
     # A model whose init fails with a tuple reason stands in for any
     # changeset or tuple error surfacing from the session.
-    Application.put_env(:meal_planner_api, :planning_agent,
-      model: {__MODULE__.FailingInitModel, []},
-      optimizer: {FakeOptimizer, []}
+    Application.put_env(
+      :meal_planner_api,
+      :planning_agent,
+      Keyword.put(
+        Application.get_env(:meal_planner_api, :planning_agent),
+        :model,
+        {__MODULE__.FailingInitModel, []}
+      )
     )
 
     socket = join!(h, h.owner)
