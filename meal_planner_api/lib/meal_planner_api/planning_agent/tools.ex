@@ -11,6 +11,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       must pass `present_proposal` like any optimizer plan
     * `run_optimizer` — the existing optimizer over Restriction-safe candidates;
       failures are typed errors, never a fallback plan
+    * `get_pantry` — the Projected Pantry (Pantry minus stock committed to
+      not-yet-cooked Planned Meals)
     * `lookup_prices` — stored prices with provenance; missing prices are
       reported, never invented
     * `present_proposal` — always validates the latest optimizer plan; only a
@@ -22,7 +24,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   in model arguments is ignored. Unknown tools are rejected by code.
   """
 
-  alias MealPlannerApi.PlanningAgent.{MealPlan, Prices, ProposalValidator, RecipeSearch}
+  alias MealPlannerApi.PlanningAgent.{MealPlan, Prices, ProjectedPantry, ProposalValidator, RecipeSearch}
 
   @type context :: %{
           required(:account_id) => Ecto.UUID.t(),
@@ -108,6 +110,13 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
           },
           "additionalProperties" => false
         }
+      },
+      %{
+        name: "get_pantry",
+        description:
+          "Read the household's Projected Pantry: stock on hand minus what is already " <>
+            "committed to Planned Meals not yet cooked. Quantities are milli-units.",
+        parameters: %{"type" => "object", "properties" => %{}, "additionalProperties" => false}
       },
       %{
         name: "lookup_prices",
@@ -271,6 +280,12 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       {:invalid, violations} ->
         {%{"status" => "invalid", "violations" => violations}, ctx.workspace, :continue}
     end
+  end
+
+  def execute("get_pantry", _args, ctx) do
+    emit(ctx, %{"type" => "progress", "step" => "reading_pantry"})
+    pantry = ProjectedPantry.load(ctx.account_id)
+    {%{"items" => ProjectedPantry.to_data(pantry)}, ctx.workspace, :continue}
   end
 
   def execute("lookup_prices", args, ctx) do

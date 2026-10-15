@@ -122,4 +122,43 @@ defmodule MealPlannerApi.PlanningAgent.PurchaseToolsTest do
       assert %{"error" => "ingredients_required"} = run_tool(h, "lookup_prices", %{})
     end
   end
+
+  describe "get_pantry" do
+    test "subtracts stock committed to pending Planned Meals, including outside the range",
+         %{household: h} do
+      rice = ingredient!("Fictitious rice")
+      flour = ingredient!("Fictitious flour")
+      pantry!(h, rice, 1_000_000)
+      pantry!(h, flour, 300_000)
+
+      rice_bowl = recipe!("Rice bowl", [rice], quantities: %{rice.id => {200_000, :g}})
+      bread = recipe!("Flat bread", [flour], quantities: %{flour.id => {500_000, :g}})
+
+      # After the new range: still committed.
+      scheduled_meal!(h, ~D[2026-11-10], :lunch, rice_bowl, selected_quantity: 2)
+      # Cooked: no longer committed.
+      scheduled_meal!(h, ~D[2026-11-11], :lunch, rice_bowl, is_cooked: true)
+      # Commitment above stock: nothing left, never negative.
+      scheduled_meal!(h, ~D[2026-11-12], :dinner, bread)
+
+      items = run_tool(h, "get_pantry", %{})["items"]
+
+      assert %{
+               "unit" => "g",
+               "on_hand_milli" => 1_000_000,
+               "committed_milli" => 400_000,
+               "available_milli" => 600_000
+             } = Enum.find(items, &(&1["ingredient"] == rice.name))
+
+      assert %{"on_hand_milli" => 300_000, "committed_milli" => 500_000, "available_milli" => 0} =
+               Enum.find(items, &(&1["ingredient"] == flour.name))
+    end
+
+    test "expired lots are not part of the Pantry", %{household: h} do
+      milk = ingredient!("Fictitious milk")
+      pantry!(h, milk, 500_000, :ml, expired_at: DateTime.add(DateTime.utc_now(), -3, :day))
+
+      assert run_tool(h, "get_pantry", %{})["items"] == []
+    end
+  end
 end
