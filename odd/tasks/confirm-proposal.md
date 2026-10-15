@@ -39,21 +39,21 @@ grace/restart recovery (#107).
 
 ## Acceptance criteria
 
-- [ ] Confirming the exact current Proposal saves Planned Meals and appends Purchase lines
-- [ ] Existing pending and in-cart Shopping List lines are untouched
-- [ ] A stale Proposal is not saved and the Member is asked again
-- [ ] A revalidation conflict blocks saving and leads to a corrected Proposal needing new approval
+- [x] Confirming the exact current Proposal saves Planned Meals and appends Purchase lines
+- [x] Existing pending and in-cart Shopping List lines are untouched
+- [x] A stale Proposal is not saved and the Member is asked again
+- [x] A revalidation conflict blocks saving and leads to a corrected Proposal needing new approval
 - [ ] Replaying the same confirmation never saves twice
 - [ ] An unverifiable confirmation is reported as unresolved after 30 s, never as failed
-- [ ] No agent tool can persist a plan
+- [x] No agent tool can persist a plan
 
 ## Tasks
 
-- [ ] **T1** Confirm saves the exact current Proposal (route: inline, single writer; tests through `Session`)
+- [x] **T1** Confirm saves the exact current Proposal (route: inline, single writer; tests through `Session`)
   - Proposal builder extracted from `Tools`; confirmation store + migration
   - Planned Meals saved, Purchase lines appended as pending lines, existing lines untouched
   - Session ends committed; slot released; no tool persists
-- [ ] **T2** Stale Proposals and revalidation conflicts (route: inline)
+- [x] **T2** Stale Proposals and revalidation conflicts (route: inline)
   - Wrong identity → `:stale_proposal`, nothing saved, current Proposal re-shown
   - Changed Projected Pantry / prices / budget → recalculated Proposal (new identity)
   - Restriction conflict → nothing saved, Proposal voided, agent turn corrects it
@@ -72,10 +72,10 @@ grace/restart recovery (#107).
 
 | Task | Commit | Tests |
 |------|--------|-------|
-| T1   | (pending) | |
-| T2   | (pending) | |
+| T1   | b58251a | RED 3/5 (confirm/3 undefined; 2 no-persist characterization tests already green); GREEN 5/5; planning_agent suite 144 passed |
+| T2   | this commit | RED 6/9 (stale/budget/conflict); GREEN 9/9; planning_agent suite 148 passed |
 | T3   | (pending) | |
 
 ## Next step
 
-T1.
+T3.

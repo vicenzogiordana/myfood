@@ -70,8 +70,18 @@ defmodule MealPlannerApi.PlanningAgent.SessionConfirmTest do
     :ok = Session.send_message(pid, "Plan Monday")
     assert_receive {:planning_agent_event, ^session_id, %{"type" => "proposal"} = proposal}
     assert_receive {:planning_agent_event, ^session_id, %{"type" => "run_finished"}}
+    flush_model_requests()
 
     %{session_id: session_id, pid: pid, proposal: proposal}
+  end
+
+  # Every model request of a finished run is already in the mailbox.
+  defp flush_model_requests do
+    receive do
+      {:scripted_model_request, _request} -> flush_model_requests()
+    after
+      0 -> :ok
+    end
   end
 
   defp confirm(household, proposal_id),
@@ -187,6 +197,128 @@ defmodule MealPlannerApi.PlanningAgent.SessionConfirmTest do
                Session.confirm(h.account_id, other.membership_id, proposal["proposal_id"])
 
       assert planned_meals(h) == []
+    end
+  end
+
+  describe "a stale Proposal" do
+    test "a Proposal that is not the one on display is not saved and is shown again",
+         %{household: h} = ctx do
+      %{session_id: session_id, proposal: proposal} = present!(h, ctx.recipe)
+
+      assert {:error, :stale_proposal} = confirm(h, Ecto.UUID.generate())
+
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "proposal"} = shown}
+      assert shown["proposal_id"] == proposal["proposal_id"]
+      assert planned_meals(h) == []
+      assert shopping_lines(h) == []
+    end
+
+    test "a Projected Pantry change by another Member makes it stale and recalculates it",
+         %{household: h} = ctx do
+      %{session_id: session_id, proposal: proposal} = present!(h, ctx.recipe)
+
+      # Another Member stocks enough rice for the plan meanwhile.
+      pantry!(h, ctx.rice, 1_000_000)
+
+      assert {:error, :stale_proposal} = confirm(h, proposal["proposal_id"])
+      assert planned_meals(h) == []
+      assert shopping_lines(h) == []
+
+      # The Member is asked again with a recalculated Proposal: same meals,
+      # a new identity and the Purchase net of the new stock.
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "proposal"} = recalculated}
+      refute recalculated["proposal_id"] == proposal["proposal_id"]
+      assert recalculated["meals"] == proposal["meals"]
+      assert [%{"ingredient" => pasta}] = recalculated["purchase"]["lines"]
+      assert pasta == ctx.pasta.name
+
+      # The earlier identity stays stale; the recalculated one confirms.
+      assert {:error, :stale_proposal} = confirm(h, proposal["proposal_id"])
+      assert {:ok, %{shopping_lines_count: 1}} = confirm(h, recalculated["proposal_id"])
+      assert length(planned_meals(h)) == 2
+    end
+
+    test "a budget change makes it stale and the recalculated Proposal needs approval",
+         %{household: h} = ctx do
+      %{session_id: session_id, proposal: proposal} = present!(h, ctx.recipe)
+      assert proposal["status"] == "valid"
+
+      budget!(h, 100)
+
+      assert {:error, :stale_proposal} = confirm(h, proposal["proposal_id"])
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "proposal", "status" => "requires_approval"} = recalculated}
+
+      assert [%{"type" => "budget", "budget_cents" => 100}] = recalculated["deviations"]
+
+      # Deviation Approval is a separate human action (#103): until it is
+      # given, a Proposal with Deviations cannot be confirmed.
+      assert {:error, :approval_required} = confirm(h, recalculated["proposal_id"])
+      assert planned_meals(h) == []
+    end
+  end
+
+  describe "a revalidation conflict" do
+    test "blocks saving and leads to a corrected Proposal needing new confirmation",
+         %{household: h} do
+      peanut = ingredient!("Fictitious peanut")
+      risky = recipe!("Peanut noodles", [peanut])
+      safe = recipe!("Plain noodles", [ingredient!("Fictitious noodle")])
+
+      # The optimizer prefers the peanut recipe whenever it is a candidate.
+      prefer_risky = fn payload ->
+        meals =
+          for day <- payload["days"], slot <- payload["slots"] do
+            ids = Enum.map(payload["candidates_by_slot"][slot], & &1["recipe_id"])
+            id = if risky.id in ids, do: risky.id, else: safe.id
+            %{"day" => day, "slot" => slot, "recipe_id" => id}
+          end
+
+        {:ok, %{"meals" => meals}}
+      end
+
+      %{session_id: session_id, proposal: proposal} =
+        present!(h, risky,
+          session: [optimizer: {FakeOptimizer, result: prefer_risky}],
+          script: [
+            {:tool_calls, [{"run_optimizer", %{}}]},
+            {:tool_calls, [{"present_proposal", %{}}]},
+            {:text, "Here is a corrected plan."}
+          ]
+        )
+
+      assert Enum.all?(proposal["meals"], &(&1["recipe_id"] == risky.id))
+
+      # Another Member with a peanut allergy joins meanwhile.
+      h |> member!() |> allergy!(peanut)
+
+      assert {:error, :revalidation_conflict} = confirm(h, proposal["proposal_id"])
+      assert planned_meals(h) == []
+      assert shopping_lines(h) == []
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "proposal_invalidated", "reason" => "revalidation_conflict"} =
+                        invalidated}
+
+      assert invalidated["proposal_id"] == proposal["proposal_id"]
+      assert [%{"type" => "restriction_conflict"} | _] = invalidated["violations"]
+
+      # The agent is told why and builds a corrected Proposal, with a new
+      # identity that needs the Member's confirmation.
+      assert_receive {:scripted_model_request, %{messages: messages}}
+      assert %{role: :user, content: notice} = List.last(messages)
+      assert notice =~ "restriction_conflict"
+
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "proposal"} = corrected}
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "run_finished"}}
+      refute corrected["proposal_id"] == proposal["proposal_id"]
+      assert Enum.all?(corrected["meals"], &(&1["recipe_id"] == safe.id))
+      assert planned_meals(h) == []
+
+      assert {:error, :stale_proposal} = confirm(h, proposal["proposal_id"])
+      assert {:ok, %{meals_count: 2}} = confirm(h, corrected["proposal_id"])
+      assert Enum.all?(planned_meals(h), &(&1.recipe_id == safe.id))
     end
   end
 

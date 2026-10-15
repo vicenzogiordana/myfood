@@ -572,17 +572,52 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     {:reply, {:error, :stale_proposal}, state}
   end
 
+  # Restrictions, the Projected Pantry, prices and the budget are read
+  # again: concurrent changes by other Members are caught here.
   defp commit(state, shown) do
+    household = HouseholdContext.load(state.account_id, state.user_id)
+
+    state = %{
+      state
+      | household: household,
+        instructions: HouseholdContext.instructions(household, state.range, state.slots)
+    }
+
     ctx = %{
       account_id: state.account_id,
       range: state.range,
       slots: state.slots,
-      household: state.household
+      household: household
     }
 
-    {:valid, meals} = ProposalValidator.validate(Proposal.meals(shown), ctx)
-    {_proposal, purchase} = Proposal.build(meals, ctx)
+    with {:valid, meals} <- ProposalValidator.validate(Proposal.meals(shown), ctx),
+         {current, purchase} = Proposal.build(meals, ctx),
+         true <- Proposal.same_content?(current, shown) || {:stale, current},
+         :ok <- approved(shown) do
+      save(state, shown, purchase)
+    else
+      {:invalid, violations} ->
+        {:reply, {:error, :revalidation_conflict},
+         revalidation_conflict(state, shown, violations)}
 
+      # Only the affected parts changed: the same meals are shown again,
+      # recalculated, as a new Proposal the Member is asked to confirm.
+      {:stale, current} ->
+        emit(state, current)
+        state = put_in(state.workspace.proposal, current)
+        {:reply, {:error, :stale_proposal}, state}
+
+      {:error, :approval_required} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  # Deviation Approval is its own human action (#103); until it exists a
+  # Proposal with Deviations cannot be confirmed.
+  defp approved(%{"status" => "valid"}), do: :ok
+  defp approved(_shown), do: {:error, :approval_required}
+
+  defp save(state, shown, purchase) do
     attrs = %{
       confirmation_id: shown["proposal_id"],
       account_id: state.account_id,
@@ -604,6 +639,37 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  # The shown Proposal no longer passes validation: it is voided and the
+  # agent is sent the violations to build a corrected one, which needs the
+  # Member's confirmation again. With a reached limit pending, the Member
+  # decides first whether the agent continues.
+  defp revalidation_conflict(state, shown, violations) do
+    emit(state, %{
+      "type" => "proposal_invalidated",
+      "proposal_id" => shown["proposal_id"],
+      "reason" => "revalidation_conflict",
+      "violations" => violations
+    })
+
+    state = put_in(state.workspace.proposal, nil)
+
+    if state.consent? and state.pending_limit == nil do
+      notice = %{role: :user, content: conflict_notice(violations)}
+      start_turn(%{state | messages: state.messages ++ [notice]})
+    else
+      state
+    end
+  end
+
+  # Code-authored: the Member asked to confirm and code found the
+  # violations. Violations are generic and never name a Member.
+  defp conflict_notice(violations) do
+    "[Confirmation blocked by code] The Member tried to confirm the shown Proposal, but " <>
+      "revalidation found violations: " <>
+      Jason.encode!(violations) <>
+      ". Nothing was saved. Build a corrected plan and present it with present_proposal."
   end
 
   # The Planning Session is committed with the confirmation: it ends without
