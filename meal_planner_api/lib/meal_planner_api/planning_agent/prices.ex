@@ -448,11 +448,22 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
 
   # A named Ingredient without a matching offer is missing: for the brand
   # or Product asked when it has other offers, else for having none. Stale
-  # offers are still returned, with their age.
+  # offers are still returned, with their age. With both a brand and a
+  # Product, an offer of the brand means only the Product text failed.
   defp named_gap(ingredient, offers, now, brand, product) do
     cond do
       Map.has_key?(offers, ingredient.id) ->
         []
+
+      brand != nil and product != nil and brand_offer?(ingredient.id, now, brand) ->
+        [
+          %{
+            ingredient: ingredient.name,
+            brand: brand,
+            product: product,
+            reason: :no_matching_product
+          }
+        ]
 
       brand != nil and any_offer?(ingredient.id, now) ->
         [%{ingredient: ingredient.name, brand: brand, reason: :no_matching_brand}]
@@ -473,6 +484,12 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
 
   defp any_offer?(ingredient_id, now),
     do: Map.has_key?(offers_for([ingredient_id], now), ingredient_id)
+
+  defp brand_offer?(ingredient_id, now, brand) do
+    offers_for([ingredient_id], now)
+    |> Map.get(ingredient_id, [])
+    |> Enum.any?(&brand_match?(&1, brand))
+  end
 
   # At most `@max_ingredients` Ingredients with a stored Product whose name
   # or brand contains the text and, when asked, of the brand (as

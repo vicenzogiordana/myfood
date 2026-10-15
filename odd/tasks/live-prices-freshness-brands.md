@@ -318,6 +318,20 @@ review rounds) is split into three more slices:
   - Focused `PricesTest` 19 passed.
     `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1308 passed,
     25 skipped; `mix precommit` 1308 passed, 25 skipped.
+- S4 review round 3 (Jorge el Curioso on PR #136), route: inline, one
+  confirmed low-severity finding in `Prices.lookup/2`:
+  - A named lookup with both a brand and a Product that matched nothing was
+    always reported as `:no_matching_brand`, even when the brand was stored
+    and only the Product text failed. RED: `PricesTest` "with a Product of a
+    stored brand blames the Product, not the brand" (milk, Product "Whole"
+    of brand Acme, lookup brand Acme + product "skimmed") got
+    `:no_matching_brand`. GREEN: `named_gap/5` checks, when both are set,
+    whether any offer passes the brand filter alone; if so it reports
+    `:no_matching_product` with the brand and Product, else
+    `:no_matching_brand` as before.
+  - Focused `PricesTest` 20 passed.
+    `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1309 passed,
+    25 skipped; `mix precommit` 1309 passed, 25 skipped.
 
 ## Next step
 

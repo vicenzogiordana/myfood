@@ -205,6 +205,34 @@ defmodule MealPlannerApi.PlanningAgent.PricesTest do
 
       assert refreshed_count() == 1
     end
+
+    test "with a Product of a stored brand blames the Product, not the brand" do
+      brand = "Fictitious Acme #{System.unique_integer([:positive])}"
+      milk = ingredient!("Fictitious milk #{System.unique_integer([:positive])}")
+      product!(milk, name: "Whole", brand: brand, observed_at: hours_ago(2))
+
+      result =
+        Prices.lookup([milk.name],
+          brand: brand,
+          product: "skimmed",
+          now: @now,
+          refresh: counting_refresh()
+        )
+
+      assert result.prices == []
+
+      assert [
+               %{
+                 ingredient: name,
+                 brand: ^brand,
+                 product: "skimmed",
+                 reason: :no_matching_product
+               }
+             ] =
+               result.missing
+
+      assert name == milk.name
+    end
   end
 
   describe "lookup/2 when the scraper is down" do
