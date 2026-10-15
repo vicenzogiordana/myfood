@@ -60,6 +60,11 @@ defmodule MealPlannerApi.Services.RecipeLifecycleTest do
     %{actor: actor, recipe: recipe, account: account, user: user, membership: membership}
   end
 
+  test "recipe detail shows its Recipe Origin", f do
+    assert {:ok, detail} = RecipeService.get_recipe(f.actor, f.recipe.id)
+    assert detail.origin == "user_created"
+  end
+
   test "successor corrections preserve confirmed detail, cooking and shopping", f do
     {:ok, meal} =
       Planning.schedule_meal(%{

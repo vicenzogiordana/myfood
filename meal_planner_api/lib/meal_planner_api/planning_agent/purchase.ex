@@ -64,11 +64,13 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
 
   @doc """
   Calculates the Purchase of `meals` (each with a `recipe_id`) for the
-  Household `account_id`, net of its Projected Pantry.
+  Household `account_id`, net of its Projected Pantry. A meal whose recipe
+  is one of the Recipe Drafts `drafts` (by id) needs the Draft's
+  ingredients.
   """
-  @spec for_meals([%{recipe_id: Ecto.UUID.t()}], Ecto.UUID.t()) :: t()
-  def for_meals(meals, account_id) do
-    needs = needs(meals)
+  @spec for_meals([%{recipe_id: Ecto.UUID.t()}], Ecto.UUID.t(), map()) :: t()
+  def for_meals(meals, account_id, drafts \\ %{}) do
+    needs = needs(meals, drafts)
     ingredient_ids = needs |> Map.keys() |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
     available = account_id |> ProjectedPantry.load() |> ProjectedPantry.available()
 
@@ -238,15 +240,22 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
 
   defp ceil_div(a, b), do: div(a + b - 1, b)
 
-  defp needs(meals) do
+  defp needs(meals, drafts) do
     counts = Enum.frequencies_by(meals, & &1.recipe_id)
-    ids = counts |> Map.keys() |> Enum.flat_map(&cast_uuid/1)
+    {draft_ids, stored_ids} = counts |> Map.keys() |> Enum.split_with(&Map.has_key?(drafts, &1))
+    ids = Enum.flat_map(stored_ids, &cast_uuid/1)
+
+    draft_rows =
+      for id <- draft_ids,
+          item <- Map.fetch!(drafts, id).ingredients,
+          do: {id, item.ingredient_id, item.unit, item.quantity_milli}
 
     from(ri in RecipeIngredient,
       where: ri.recipe_id in ^ids,
       select: {ri.recipe_id, ri.ingredient_id, ri.unit, ri.quantity_milli}
     )
     |> Repo.all()
+    |> Kernel.++(draft_rows)
     |> Enum.reduce(%{}, fn {recipe_id, ingredient_id, unit, quantity}, acc ->
       total = quantity * Map.fetch!(counts, recipe_id)
       Map.update(acc, {ingredient_id, unit}, total, &(&1 + total))

@@ -15,6 +15,11 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       not-yet-cooked Planned Meals)
     * `lookup_prices` — stored prices with provenance; missing prices are
       reported, never invented
+    * `get_recipe` — one recipe or Recipe Draft with ingredients,
+      quantities, steps, nutrition and its completeness
+    * `create_recipe` — a Recipe Draft from catalog Ingredients only, kept in
+      the Workspace (`MealPlannerApi.PlanningAgent.RecipeDraft`); unknown
+      Ingredients are rejected and nutrition and cost are computed by code
     * `present_proposal` — always validates the latest optimizer plan; only a
       valid plan is shown to the Member, otherwise violations go back. A
       shown Proposal always carries its Purchase (`MealPlannerApi.PlanningAgent.Purchase`),
@@ -38,6 +43,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     ProjectedPantry,
     Proposal,
     ProposalValidator,
+    RecipeDraft,
     RecipeSearch
   }
 
@@ -75,6 +81,30 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
           },
           "additionalProperties" => false
         }
+      },
+      %{
+        name: "get_recipe",
+        description:
+          "Read one recipe or Recipe Draft by id: ingredients with quantities (milli-units), " <>
+            "steps, nutrition per serving and whether that nutrition is complete, and its " <>
+            "Recipe Origin.",
+        parameters: %{
+          "type" => "object",
+          "properties" => %{"recipe_id" => %{"type" => "string"}},
+          "required" => ["recipe_id"],
+          "additionalProperties" => false
+        }
+      },
+      %{
+        name: "create_recipe",
+        description:
+          "Draft a new recipe when existing recipes do not fit, or build the recipe a Member " <>
+            "dictates (origin user_created). Use catalog Ingredient names only: unknown " <>
+            "Ingredients reject the Draft. Nutrition and cost are computed by code and " <>
+            "reported partial when data is missing. The Draft lives only in this chat; it is " <>
+            "never saved by you. AI-created Drafts can be planned; a dictated recipe is saved " <>
+            "only when the Member presses save.",
+        parameters: RecipeDraft.parameters()
       },
       %{
         name: "get_plan",
@@ -216,6 +246,43 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
       {:error, reason} ->
         {%{"error" => reason_string(reason, "search_failed")}, ctx.workspace, :continue}
+    end
+  end
+
+  defp run("get_recipe", args, ctx) do
+    emit(ctx, %{"type" => "progress", "step" => "reading_recipe"})
+    id = string_arg(args, "recipe_id")
+
+    case Map.fetch(drafts(ctx), id) do
+      {:ok, draft} ->
+        {Map.merge(RecipeDraft.to_data(draft), RecipeDraft.outcome(draft)), ctx.workspace,
+         :continue}
+
+      :error ->
+        case RecipeSearch.get(ctx.household, id) do
+          {:ok, recipe} -> {with_nutrition_outcome(recipe), ctx.workspace, :continue}
+          {:error, :not_found} -> {%{"error" => "recipe_not_found"}, ctx.workspace, :continue}
+          {:error, reason} -> {%{"error" => Atom.to_string(reason)}, ctx.workspace, :continue}
+        end
+    end
+  end
+
+  defp run("create_recipe", args, ctx) do
+    emit(ctx, %{"type" => "progress", "step" => "drafting_recipe"})
+    drafts = drafts(ctx)
+
+    with true <-
+           map_size(drafts) < RecipeDraft.max_drafts() ||
+             {:error, %{"error" => "draft_limit_reached"}},
+         {:ok, draft} <- RecipeDraft.build(args, ctx.household) do
+      data = RecipeDraft.to_data(draft)
+      emit(ctx, Map.put(data, "type", "recipe_draft"))
+      workspace = Map.put(ctx.workspace, :recipe_drafts, Map.put(drafts, draft.id, draft))
+
+      {data |> Map.put("status", "drafted") |> Map.merge(RecipeDraft.outcome(draft)), workspace,
+       :continue}
+    else
+      {:error, error} -> {error, ctx.workspace, :continue}
     end
   end
 
@@ -372,16 +439,44 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   # Optimizer
   # ---------------------------------------------------------------------------
 
+  # AI-created Recipe Drafts of the Workspace are candidates for their slots
+  # beside the searched recipes; the validator checks them like any recipe.
   defp candidates(ctx, exclude) do
+    drafts = ctx |> drafts() |> Map.values() |> Enum.filter(&RecipeDraft.plannable?/1)
+
     Enum.reduce_while(ctx.slots, {:ok, %{}}, fn slot, {:ok, acc} ->
       filters = %{slot: slot, exclude_recipe_ids: exclude, limit: @optimizer_candidates_per_slot}
 
+      slot_drafts =
+        drafts
+        |> Enum.filter(&(slot in &1.slots and &1.id not in exclude))
+        |> Enum.sort_by(&{&1.name, &1.id})
+        |> Enum.map(&draft_candidate/1)
+
       case search(ctx, filters) do
-        {:ok, []} -> {:halt, {:error, :no_candidates, slot}}
-        {:ok, recipes} -> {:cont, {:ok, Map.put(acc, slot, Enum.map(recipes, &candidate/1))}}
-        {:error, _reason} = error -> {:halt, error}
+        {:ok, recipes} ->
+          case Enum.map(recipes, &candidate/1) ++ slot_drafts do
+            [] -> {:halt, {:error, :no_candidates, slot}}
+            candidates -> {:cont, {:ok, Map.put(acc, slot, candidates)}}
+          end
+
+        {:error, _reason} = error ->
+          {:halt, error}
       end
     end)
+  end
+
+  defp draft_candidate(draft) do
+    per_serving = draft.nutrition["per_serving"]
+
+    candidate(%{
+      id: draft.id,
+      name: draft.name,
+      calories_per_serving: per_serving["calories"],
+      protein_g_per_serving: per_serving["protein_g"],
+      carbs_g_per_serving: per_serving["carbs_g"],
+      fat_g_per_serving: per_serving["fat_g"]
+    })
   end
 
   # Candidate costs and the Nutrition Goal enter the optimizer with the
@@ -517,10 +612,18 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   # Helpers
   # ---------------------------------------------------------------------------
 
+  defp drafts(ctx), do: RecipeDraft.in_context(ctx)
+
+  defp with_nutrition_outcome(%{"nutrition" => %{"complete" => true}} = recipe), do: recipe
+
+  defp with_nutrition_outcome(recipe),
+    do: Map.merge(recipe, %{"outcome" => "partial", "missing" => ["nutrition"]})
+
   defp recipe_data(recipe) do
     %{
       "recipe_id" => recipe.id,
       "name" => recipe.name,
+      "origin" => Map.get(recipe, :origin),
       "slots" => recipe.slots,
       "ingredients" => recipe.ingredients,
       "calories_per_serving" => recipe.calories_per_serving

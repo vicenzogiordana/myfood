@@ -11,7 +11,7 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
   """
 
   alias MealPlannerApi.Planning.ProposalStatus
-  alias MealPlannerApi.PlanningAgent.Purchase
+  alias MealPlannerApi.PlanningAgent.{Purchase, RecipeDraft}
 
   @type t :: map()
 
@@ -20,12 +20,14 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
 
   @doc """
   Builds a Proposal for `meals` (validated, each with `:date`, `:slot`,
-  `:recipe_id` and `:name`) in the session context `ctx`. Returns the
+  `:recipe_id`, `:name`, `:origin` and `:draft`) in the session context
+  `ctx`. Every meal shows its Recipe Origin, and a Recipe Draft is marked as
+  one so the Member sees it is AI-created and not yet saved. Returns the
   Proposal event and the Purchase it carries.
   """
   @spec build([map()], map()) :: {t(), Purchase.t()}
   def build(meals, ctx) do
-    purchase = Purchase.for_meals(meals, ctx.account_id)
+    purchase = Purchase.for_meals(meals, ctx.account_id, RecipeDraft.in_context(ctx))
     deviations = budget_deviations(purchase, ctx.household.budget_cents)
 
     proposal = %{
@@ -38,7 +40,9 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
             "date" => Date.to_iso8601(meal.date),
             "slot" => meal.slot,
             "recipe_id" => meal.recipe_id,
-            "name" => meal.name
+            "name" => meal.name,
+            "origin" => meal.origin,
+            "draft" => meal.draft
           }
         end),
       "purchase" => Purchase.to_data(purchase),

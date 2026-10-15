@@ -19,6 +19,9 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
     * `authorize_continuation` — the session Member authorizes continuing
       after a `limit_reached` event; replies `:ok` or
       `%{reason: "forbidden" | "no_limit_reached"}`.
+    * `save_recipe` — `%{"recipe_id"}`; the session Member's explicit save of
+      a dictated Recipe Draft. Replies `%{recipe_id, name, origin}` or
+      `%{reason: "forbidden" | "busy" | "not_found" | "not_dictated"}`.
     * `cancel_session` — ends the Household's session (its Member or the Owner).
 
   Outgoing: every session event is pushed as `agent_event` with its `type`
@@ -91,6 +94,24 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
   def handle_in("authorize_continuation", _payload, socket) do
     membership_id = socket.assigns.current_membership.id
     with_own_session(socket, fn pid -> Session.authorize_continuation(pid, membership_id) end)
+  end
+
+  def handle_in("save_recipe", %{"recipe_id" => recipe_id}, socket) when is_binary(recipe_id) do
+    membership_id = socket.assigns.current_membership.id
+
+    case socket.assigns[:session_pid] do
+      pid when is_pid(pid) ->
+        case Session.save_recipe(pid, membership_id, recipe_id) do
+          {:ok, saved} -> {:reply, {:ok, saved}, socket}
+          {:error, reason} -> {:reply, {:error, %{reason: reason_string(reason)}}, socket}
+        end
+
+      _ ->
+        {:reply, {:error, %{reason: "no_active_session"}}, socket}
+    end
+  catch
+    :exit, _ ->
+      {:reply, {:error, %{reason: "no_active_session"}}, assign(socket, :session_pid, nil)}
   end
 
   def handle_in("cancel_session", _payload, socket) do
