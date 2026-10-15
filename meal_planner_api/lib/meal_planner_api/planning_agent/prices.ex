@@ -36,6 +36,10 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   # scraped again: the scraper would most likely answer the same thing.
   @refresh_memo_seconds 15 * 60
 
+  # A refresh failing for one of these reasons means the scraper is down or
+  # the turn is out of time: the rest of the lookup is not scraped.
+  @breaker_reasons [:scraper_timeout, :scraper_unreachable, :deadline_exceeded]
+
   @doc "The most Ingredients one `lookup/2` reads and refreshes."
   @spec max_ingredients() :: pos_integer()
   def max_ingredients, do: @max_ingredients
@@ -69,7 +73,7 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   @type refresh_memo :: %{Ecto.UUID.t() => %{at: DateTime.t(), failure: term() | nil}}
   @type warning :: %{
           ingredient: String.t(),
-          reason: :refresh_failed | :still_stale,
+          reason: :refresh_failed | :still_stale | :offers_truncated,
           detail: term()
         }
 
@@ -133,6 +137,16 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   refreshed again, whatever that refresh brought; its failure, or its
   prices still being stale, is reported again as a warning.
 
+  Once a refresh fails because the scraper timed out, is unreachable or the
+  turn ran out of time, the remaining Ingredients are not scraped: they get
+  the same failure as a warning and stay out of the memo, as does every
+  `:deadline_exceeded`, so the next lookup tries them again.
+
+  At most `max_offers/0` offers are returned, taken round-robin from each
+  Ingredient's cheapest ones, so every Ingredient with offers keeps some; an
+  Ingredient that lost offers to the cap gets an `:offers_truncated`
+  warning.
+
   Returns the matching offers, what is still without a price in `missing`
   with its reason, `warnings` for failed refreshes and prices still stale,
   and the updated `refresh_memo`.
@@ -172,12 +186,14 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
         end
       end) ++ product_gap(wanted, offers, product)
 
-    prices =
-      offers
-      |> Map.values()
-      |> List.flatten()
-      |> Enum.sort_by(&{&1.ingredient, &1.price_cents, &1.product, &1.product_id})
-      |> Enum.take(@max_offers)
+    {prices, truncated} = capped(offers)
+
+    warnings =
+      Enum.sort_by(
+        warnings ++
+          Enum.map(truncated, &%{ingredient: &1, reason: :offers_truncated, detail: nil}),
+        &{&1.ingredient, &1.reason}
+      )
 
     %{prices: prices, missing: missing, warnings: warnings, refresh_memo: memo}
   end
@@ -294,10 +310,14 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
     stored = matching(offers_for(ids, now), matches?)
     unrefreshed = Enum.filter(ingredients, &needs_refresh?(stored, &1.id))
     {memoized, to_refresh} = Enum.split_with(unrefreshed, &Map.has_key?(memo, &1.id))
-    failed = refresh_all(to_refresh, refresh)
+    {failed, skipped} = refresh_all(to_refresh, refresh)
 
+    # Ingredients never scraped, or cut by the turn deadline, are left out
+    # so the next lookup tries them.
     memo =
-      Enum.reduce(to_refresh, memo, fn ingredient, memo ->
+      to_refresh
+      |> Enum.reject(&(MapSet.member?(skipped, &1.id) or failed[&1.id] == :deadline_exceeded))
+      |> Enum.reduce(memo, fn ingredient, memo ->
         Map.put(memo, ingredient.id, %{at: now, failure: Map.get(failed, ingredient.id)})
       end)
 
@@ -336,6 +356,34 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
 
     {offers, Enum.sort_by(warnings, & &1.ingredient), memo}
   end
+
+  # The offers returned, at most `@max_offers` taken round-robin from each
+  # Ingredient's cheapest, and the names of the Ingredients that lost some.
+  defp capped(offers) do
+    ranked =
+      offers
+      |> Map.values()
+      |> Enum.flat_map(fn list -> list |> Enum.sort_by(&offer_key/1) |> Enum.with_index() end)
+
+    kept =
+      ranked
+      |> Enum.sort_by(fn {offer, rank} -> {rank, offer_key(offer)} end)
+      |> Enum.take(@max_offers)
+      |> Enum.map(&elem(&1, 0))
+      |> Enum.sort_by(&offer_key/1)
+
+    kept_counts = Enum.frequencies_by(kept, & &1.ingredient_id)
+
+    truncated =
+      offers
+      |> Enum.filter(fn {id, list} -> Map.get(kept_counts, id, 0) < length(list) end)
+      |> Enum.map(fn {_id, [offer | _]} -> offer.ingredient end)
+
+    {kept, truncated}
+  end
+
+  defp offer_key(offer),
+    do: {offer.ingredient, offer.price_cents, offer.product, offer.product_id}
 
   defp recent_refreshes(memo, now) when is_map(memo) do
     memo
@@ -434,24 +482,35 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
     end
   end
 
-  # Returns the failed refreshes: ingredient id => failure reason. Without a
-  # refresh function every refresh fails as unavailable.
+  # Returns the failed refreshes (ingredient id => failure reason) and the
+  # ids of the Ingredients never scraped. Without a refresh function every
+  # refresh fails as unavailable. After a breaker failure the remaining
+  # Ingredients are skipped with that same reason.
   defp refresh_all(ingredients, nil),
-    do: Map.new(ingredients, &{&1.id, :scraper_unavailable})
+    do: {Map.new(ingredients, &{&1.id, :scraper_unavailable}), MapSet.new()}
 
   defp refresh_all(ingredients, refresh) do
-    Enum.reduce(ingredients, %{}, fn ingredient, failed ->
-      case refresh.(ingredient.name) do
-        {:ok, items} ->
-          case record(ingredient.id, items) do
-            :ok -> failed
-            {:error, reason} -> Map.put(failed, ingredient.id, reason)
+    {failed, _tripped, skipped} =
+      Enum.reduce(ingredients, {%{}, nil, MapSet.new()}, fn
+        ingredient, {failed, nil, skipped} ->
+          case refresh_one(ingredient, refresh) do
+            :ok ->
+              {failed, nil, skipped}
+
+            {:error, reason} ->
+              tripped = if reason in @breaker_reasons, do: reason
+              {Map.put(failed, ingredient.id, reason), tripped, skipped}
           end
 
-        {:error, reason} ->
-          Map.put(failed, ingredient.id, reason)
-      end
-    end)
+        ingredient, {failed, tripped, skipped} ->
+          {Map.put(failed, ingredient.id, tripped), tripped, MapSet.put(skipped, ingredient.id)}
+      end)
+
+    {failed, skipped}
+  end
+
+  defp refresh_one(ingredient, refresh) do
+    with {:ok, items} <- refresh.(ingredient.name), do: record(ingredient.id, items)
   end
 
   defp detail(reason) when is_atom(reason), do: Atom.to_string(reason)

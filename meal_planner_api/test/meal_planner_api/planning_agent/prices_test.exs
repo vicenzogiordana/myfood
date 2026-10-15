@@ -50,6 +50,95 @@ defmodule MealPlannerApi.PlanningAgent.PricesTest do
     end
   end
 
+  describe "lookup/2 when the scraper is down" do
+    # Reason => Ingredients memoized: only the attempted one, never a deadline.
+    for {reason, memoized} <- [scraper_timeout: 1, scraper_unreachable: 1, deadline_exceeded: 0] do
+      test "stops calling the scraper after the first #{reason}" do
+        reason = unquote(reason)
+        ingredients = for n <- 1..5, do: ingredient!("Fictitious breaker #{n}")
+        names = Enum.map(ingredients, & &1.name)
+        ids = Enum.map(ingredients, & &1.id)
+        test_pid = self()
+
+        refresh = fn name ->
+          send(test_pid, {:refreshed, name})
+          {:error, reason}
+        end
+
+        result = Prices.lookup(names, now: @now, refresh: refresh)
+
+        {:messages, messages} = Process.info(self(), :messages)
+        assert Enum.count(messages, &match?({:refreshed, _}, &1)) == 1
+
+        assert Enum.sort(Enum.map(result.warnings, & &1.ingredient)) == Enum.sort(names)
+
+        assert Enum.all?(
+                 result.warnings,
+                 &(&1.reason == :refresh_failed and &1.detail == reason)
+               )
+
+        # The next lookup retries every Ingredient left out of the memo.
+        assert map_size(result.refresh_memo) == unquote(memoized)
+        assert Enum.all?(Map.keys(result.refresh_memo), &(&1 in ids))
+      end
+    end
+
+    test "the next lookup retries the Ingredients that were skipped" do
+      names = for n <- 1..3, do: ingredient!("Fictitious retry #{n}").name
+
+      first =
+        Prices.lookup(names, now: @now, refresh: fn _name -> {:error, :scraper_timeout} end)
+
+      test_pid = self()
+
+      refresh = fn name ->
+        send(test_pid, {:refreshed, name})
+        {:ok, []}
+      end
+
+      Prices.lookup(names, now: @now, refresh: refresh, refresh_memo: first.refresh_memo)
+
+      {:messages, messages} = Process.info(self(), :messages)
+      assert Enum.count(messages, &match?({:refreshed, _}, &1)) == 2
+    end
+  end
+
+  describe "lookup/2 with more offers than the cap" do
+    test "keeps the cheapest offers of every requested Ingredient and flags the cut" do
+      # A plain global take would drop the alphabetically last Ingredients.
+      ingredients = for n <- 1..5, do: ingredient!("Fictitious many #{n}")
+      names = Enum.map(ingredients, & &1.name)
+
+      for ingredient <- ingredients do
+        for p <- 1..div(Prices.max_offers(), 2) do
+          product!(ingredient,
+            name: "#{ingredient.name} product #{p}",
+            price_cents: 100 + p,
+            observed_at: @now
+          )
+        end
+      end
+
+      result = Prices.lookup(names, now: @now)
+
+      assert length(result.prices) == Prices.max_offers()
+      assert result.missing == []
+
+      for name <- names do
+        kept =
+          result.prices
+          |> Enum.filter(&(&1.ingredient == name))
+          |> Enum.map(& &1.price_cents)
+
+        assert kept != []
+        assert kept == Enum.to_list(101..(100 + length(kept)))
+
+        assert %{reason: :offers_truncated} =
+                 Enum.find(result.warnings, &(&1.ingredient == name))
+      end
+    end
+  end
+
   describe "record/2" do
     test "returns an error for a product name wider than its column, recording nothing" do
       ingredient = ingredient!("Fictitious record")

@@ -175,6 +175,31 @@ OpenAI model calls; scraper calls remain read calls under `CallBounds`.
   `MIX_TEST_PARTITION` to the database name; isolation comes from
   `MYFOOD_TEST_DATABASE`.
 
+## Review round 3 (Jorge el Curioso, PR #126)
+
+Route: inline (two mapped findings, one source file plus its tests). The
+per-session cap of OpenAI model calls stays as is; these fixes only bound
+scraper calls inside one lookup.
+
+- [x] R6 No per-lookup circuit breaker; never-attempted Ingredients were
+  memoized as failed. `refresh_all` stops scraping the rest of the lookup
+  after the first `:scraper_timeout`, `:scraper_unreachable` or
+  `:deadline_exceeded`, giving the remaining Ingredients that reason as a
+  `refresh_failed` warning. Skipped Ingredients and every
+  `:deadline_exceeded` stay out of `refresh_memo`, so the next lookup
+  retries them. RED: `PricesTest` "when the scraper is down" saw 5 scrapes
+  for 5 Ingredients per reason, and a follow-up lookup scraped 0 of the 2
+  skipped; GREEN: 1 scrape, memo size 1 (0 for a deadline), 2 retries.
+- [x] R7 Silent truncation at `max_offers/0`. Offers are now taken
+  round-robin from each Ingredient's cheapest, so every Ingredient with
+  offers keeps some, and an Ingredient that lost offers gets an
+  `:offers_truncated` warning (which makes the tool outcome `partial`).
+  RED: 5 Ingredients x 100 offers returned no `offers_truncated` warning
+  (the global take keeps only the first 2 Ingredients' offers); GREEN: 200 offers,
+  each Ingredient's cheapest kept, each flagged.
+- Checks: `MIX_TEST_PARTITION=101 MYFOOD_TEST_DATABASE=meal_planner_api_test101
+  mix test` 1157 passed, 25 skipped; `mix precommit` same result.
+
 ## Next step
 
 Review gate (Jorge el Curioso) re-runs separately on the updated PR.
