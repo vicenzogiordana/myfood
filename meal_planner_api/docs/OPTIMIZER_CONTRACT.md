@@ -80,7 +80,10 @@ Errors (`{"type": "error", "error": …, "details": …}`):
 | `invalid_*`, `missing_payload` | Malformed request (including `invalid_variety_cap`, `invalid_prior_meals`) |
 | `solver_unavailable`, `abnormal` | Solver fault |
 
-Elixir callers interpret replies with
-`MealPlannerApi.Optimization.Contract.interpret/1` and classify a validated
+Elixir callers add the variety part of a request with
+`MealPlannerApi.Optimization.Variety.put(payload, Variety.prior_meals(account_id, range_from), cap)`
+(the cap comes from the Planning Session, `Variety.default_cap/0` = 2) and interpret replies with
+`MealPlannerApi.Optimization.Contract.interpret/1` (a variety infeasibility is
+`{:infeasible, [%{cause: :variety, slot: nil}]}`) and classify a validated
 Proposal with `MealPlannerApi.Planning.ProposalStatus.classify/2`: any
 Deviation makes it `requires_approval`.

@@ -140,6 +140,23 @@ defmodule MealPlannerApi.Optimization.ContractTest do
                Contract.interpret({:error, :infeasible, details})
     end
 
+    test "unsatisfiable variety is an infeasibility named variety, without a slot" do
+      details = %{"causes" => [%{"cause" => "variety"}]}
+
+      assert Contract.interpret({:error, :infeasible, details}) ==
+               {:infeasible, [%{cause: :variety, slot: nil}]}
+
+      assert Contract.interpret({:error, {:infeasible, details}}) ==
+               {:infeasible, [%{cause: :variety, slot: nil}]}
+    end
+
+    test "a slot-scoped cause still needs its slot" do
+      details = %{"causes" => [%{"cause" => "coverage"}]}
+
+      assert Contract.interpret({:error, :infeasible, details}) ==
+               {:error, :invalid_optimizer_response}
+    end
+
     test "a solver time limit is inconclusive, never infeasible" do
       assert Contract.interpret({:error, "inconclusive", %{"reason" => "time_limit"}}) ==
                {:inconclusive, :time_limit}

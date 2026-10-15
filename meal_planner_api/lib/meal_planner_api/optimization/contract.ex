@@ -1,13 +1,14 @@
 defmodule MealPlannerApi.Optimization.Contract do
   @moduledoc """
-  Elixir side of the optimizer v2 contract (spec #93, issue #97; see
+  Elixir side of the optimizer v2 contract (spec #93, issues #97 and #98; see
   `docs/OPTIMIZER_CONTRACT.md`).
 
-  The OR-Tools optimizer (SCIP backend, OR-Tools pinned in
+  The OR-Tools optimizer (CP-SAT backend, OR-Tools pinned in
   `requirements.txt`) always returns the closest plan with a per-goal
   Deviation report. Only the budget, daily calories and daily macros relax, in
-  the fixed priority budget > calories > macros; coverage, Restrictions and
-  Excluded Recipes never relax.
+  the fixed priority budget > calories > macros; coverage, Restrictions,
+  Excluded Recipes and the variety rules (`MealPlannerApi.Optimization.Variety`)
+  never relax.
 
   This module builds the nutrition part of a request from the Household
   Nutrition Goal and turns optimizer replies into typed outcomes:
@@ -16,7 +17,8 @@ defmodule MealPlannerApi.Optimization.Contract do
       `optimality` (`:optimal`, or `:feasible` when not proven optimal and to
       be disclosed)
     * `{:infeasible, causes}` — each cause names a hard rule
-      (`:coverage`, `:restriction`, `:excluded_recipe`) and its slot
+      (`:coverage`, `:restriction`, `:excluded_recipe`) and its slot, or is
+      `%{cause: :variety, slot: nil}` when the variety rules cannot be met
     * `{:inconclusive, :time_limit | :deadline}` — the solver or the caller
       ran out of time; never infeasible
     * `{:error, reason}` — any other failure, including malformed replies
@@ -29,7 +31,8 @@ defmodule MealPlannerApi.Optimization.Contract do
   @causes %{
     "coverage" => :coverage,
     "restriction" => :restriction,
-    "excluded_recipe" => :excluded_recipe
+    "excluded_recipe" => :excluded_recipe,
+    "variety" => :variety
   }
   @passthrough_errors [:optimizer_unavailable, :optimizer_crashed, :solver_unavailable]
 
@@ -49,8 +52,8 @@ defmodule MealPlannerApi.Optimization.Contract do
           optimality: :optimal | :feasible
         }
   @type cause :: %{
-          cause: :coverage | :restriction | :excluded_recipe,
-          slot: String.t()
+          cause: :coverage | :restriction | :excluded_recipe | :variety,
+          slot: String.t() | nil
         }
   @type outcome ::
           {:ok, plan()}
@@ -168,6 +171,10 @@ defmodule MealPlannerApi.Optimization.Contract do
   defp deviation_day("budget", nil), do: {:ok, nil}
   defp deviation_day("budget", _day), do: :error
   defp deviation_day(_goal, day), do: date(day)
+
+  # Variety spans days and slots, so it names no slot.
+  defp cause(%{"cause" => "variety"} = raw) when not is_map_key(raw, "slot"),
+    do: {:ok, %{cause: :variety, slot: nil}}
 
   defp cause(%{"cause" => cause, "slot" => slot})
        when is_map_key(@causes, cause) and is_binary(slot),
