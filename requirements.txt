@@ -1,0 +1,3 @@
+# Python dependencies of optimizador.py (OR-Tools solver behind the Elixir port).
+# Pinned: solver behaviour and statuses are part of the optimizer contract.
+ortools==9.15.6755
