@@ -9,7 +9,10 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
 
   The optional `checkpoint` callback receives every model state the turn
   produces (including the adapter's mid-call reservations), so the owner
-  keeps paid usage even when it kills the turn.
+  keeps paid usage even when it kills the turn. The optional `on_workspace`
+  callback receives the Workspace after every tool call, so a Stop keeps
+  what deterministic tools already produced (including a presented
+  Proposal).
   """
 
   alias MealPlannerApi.PlanningAgent.Tools
@@ -22,7 +25,8 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
           required(:tool_context) => Tools.context(),
           required(:max_iterations) => pos_integer(),
           required(:emit) => (map() -> any()),
-          optional(:checkpoint) => (term() -> any())
+          optional(:checkpoint) => (term() -> any()),
+          optional(:on_workspace) => (map() -> any())
         }
 
   @type outcome :: :completed | {:limit_reached, String.t()} | {:failed, term()}
@@ -87,6 +91,7 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
     Enum.reduce(calls, {:continue, turn}, fn call, {control, acc} ->
       arguments = if is_map(call.arguments), do: call.arguments, else: %{}
       {content, workspace, call_control} = Tools.execute(call.name, arguments, acc.tool_context)
+      Map.get(acc, :on_workspace, fn _workspace -> :ok end).(workspace)
 
       acc =
         acc

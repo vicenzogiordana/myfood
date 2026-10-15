@@ -224,6 +224,59 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     assert_push("agent_event", %{"type" => "session_cancelled"})
   end
 
+  test "a Member stops the agent mid-turn and the session survives", %{household: h} do
+    test_pid = self()
+
+    configure_agent([
+      fn _request ->
+        send(test_pid, :model_blocked)
+        Process.sleep(:infinity)
+      end,
+      {:text, "Ready when you are."}
+    ])
+
+    socket = join!(h, h.owner)
+    ref = push(socket, "start_session", @range)
+    assert_reply(ref, :ok, %{session_id: session_id})
+    ref = push(socket, "give_consent", %{})
+    assert_reply(ref, :ok, _)
+    ref = push(socket, "send_message", %{"text" => "Plan dinner"})
+    assert_reply(ref, :ok, _)
+    assert_receive :model_blocked, 2_000
+
+    ref = push(socket, "stop", %{})
+    assert_reply(ref, :ok, %{status: "stopped"})
+    assert_push("agent_event", %{"type" => "stopped", "session_id" => ^session_id})
+
+    ref = push(socket, "send_message", %{"text" => "Try again"})
+    assert_reply(ref, :ok, _)
+    assert_push("agent_event", %{"type" => "assistant_message", "text" => "Ready when you are."})
+    cancel!(socket)
+  end
+
+  test "the Owner cannot Stop another Member's session and a peer cannot Cancel it",
+       %{household: h} do
+    member_socket = join!(h, member!(h))
+    ref = push(member_socket, "start_session", @range)
+    assert_reply(ref, :ok, _)
+
+    owner_socket = join!(h, h.owner)
+    ref = push(owner_socket, "stop", %{})
+    assert_reply(ref, :error, %{reason: "forbidden"})
+
+    peer_socket = join!(h, member!(h))
+    ref = push(peer_socket, "cancel_session", %{})
+    assert_reply(ref, :error, %{reason: "forbidden"})
+
+    cancel!(member_socket)
+  end
+
+  test "stop without an active session is refused", %{household: h} do
+    socket = join!(h, h.owner)
+    ref = push(socket, "stop", %{})
+    assert_reply(ref, :error, %{reason: "no_active_session"})
+  end
+
   test "cancelling a session that dies before replying keeps the channel alive",
        %{household: h} do
     socket = join!(h, h.owner)

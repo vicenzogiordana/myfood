@@ -23,6 +23,10 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
     * `:port_runner` — module with `open_port/1` (default from
       `:optimizer_port_runner` config, else `OptimizerPortRunner`)
     * `:python_executable`, `:script_path` — forwarded to the port runner
+    * `:on_os_process` — 1-arity function told `{:started, os_pid}` as soon
+      as the subprocess exists and `{:closed, os_pid}` once this call no
+      longer owns it, so an owner (the Planning Session) can force-kill a
+      busy solver synchronously on Stop or Cancel
   """
 
   @behaviour MealPlannerApi.PlanningAgent.Optimizer
@@ -30,6 +34,7 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
   require Logger
 
   alias MealPlannerApi.Optimization.OptimizerPortRunner
+  alias MealPlannerApi.PlanningAgent.OsProcess
 
   @default_timeout_ms 120_000
   @known_errors ~w(infeasible unbounded abnormal solver_unavailable invalid_days invalid_slots
@@ -44,13 +49,17 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
 
     case open(opts) do
       {:ok, port} ->
-        reaper = start_reaper(port)
+        os_pid = os_pid(port)
+        notify = Keyword.get(opts, :on_os_process, fn _event -> :ok end)
+        reaper = start_reaper(os_pid)
+        if os_pid, do: notify.({:started, os_pid})
 
         try do
           run(port, payload, deadline)
         after
           close(port)
           send(reaper, :done)
+          if os_pid, do: notify.({:closed, os_pid})
         end
 
       :error ->
@@ -149,21 +158,20 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
   # the port only closes stdin, which a busy solver does not read. The reaper
   # monitors the caller and force-kills the OS process if the caller dies
   # before the call finishes.
-  defp start_reaper(port) do
+  defp start_reaper(os_pid) do
     owner = self()
-    os_pid = os_pid(port)
 
     spawn(fn ->
       ref = Process.monitor(owner)
 
       receive do
         :done -> :ok
-        {:DOWN, ^ref, :process, _, _} -> kill_os_pid(os_pid)
+        {:DOWN, ^ref, :process, _, _} -> OsProcess.kill(os_pid)
       end
     end)
   end
 
-  defp kill(port), do: port |> os_pid() |> kill_os_pid()
+  defp kill(port), do: port |> os_pid() |> OsProcess.kill()
 
   defp os_pid(port) do
     case Port.info(port, :os_pid) do
@@ -172,15 +180,6 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
     end
   rescue
     _ -> nil
-  end
-
-  defp kill_os_pid(nil), do: :ok
-
-  defp kill_os_pid(os_pid) do
-    System.cmd("kill", ["-9", Integer.to_string(os_pid)], stderr_to_stdout: true)
-    :ok
-  rescue
-    _ -> :ok
   end
 
   defp close(port) do

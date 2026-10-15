@@ -12,7 +12,11 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       Household returns `{:error, :session_already_active}`.
     * `record_consent/1` — the Member's explicit consent to external AI use.
     * `send_message/2` — a Member message; runs one agent turn.
-    * `cancel/2` — ends the session (session's Member or Household Owner).
+    * `stop/2` — Stop: halts the running turn; the Planning Session, its
+      Workspace and the last valid Proposal survive (session's Member only).
+    * `cancel/2` — Cancel: ends the session and discards its Workspace
+      (session's Member or Household Owner).
+    * `current_proposal/1` — the last valid Proposal shown, or `nil`.
     * `whereis/1` — the active session process of a Household, if any.
 
   ## Events
@@ -20,13 +24,28 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   Subscribers receive `{:planning_agent_event, session_id, event}` where
   `event["type"]` is one of `progress`, `assistant_message`, `question`,
   `proposal`, `optimizer_failed`, `consent_required`, `limit_reached`,
-  `agent_unavailable`, `turn_completed`, `session_cancelled`, `session_ended`.
+  `agent_unavailable`, `turn_completed`, `stopped`, `session_cancelled`,
+  `session_ended`.
 
   ## Limits
 
   Per request: `max_iterations` model calls (default 10) and a global
   deadline (default 5 minutes) after which the running turn is killed and
   its late results are discarded.
+
+  The paid-service spend cap and cumulative token cap bound the whole
+  Planning Session: the model adapter's ledger is initialised once at start
+  and carried across turns, so neither Stop nor a new message resets it.
+
+  ## Stop and Cancel
+
+  Both halt the running turn immediately with a `:brutal_kill`, adopt what
+  it already checkpointed (paid usage and the Workspace, so a Proposal it
+  presented survives a Stop), discard everything else it sends later, and
+  force-kill every optimizer OS process it started, waiting until each is
+  gone. Only then does Stop reply or Cancel release the Household's slot, so
+  old work can no longer act. The same halt runs at the time limit and on
+  shutdown.
   """
 
   use GenServer, restart: :temporary
@@ -34,7 +53,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   require Logger
 
   alias MealPlannerApi.Data.PlanningRepo
-  alias MealPlannerApi.PlanningAgent.{HouseholdContext, Loop}
+  alias MealPlannerApi.PlanningAgent.{HouseholdContext, Loop, OsProcess}
 
   @registry MealPlannerApi.PlanningAgent.Registry
   @supervisor MealPlannerApi.PlanningAgent.SessionSupervisor
@@ -133,6 +152,19 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   @spec max_message_bytes() :: pos_integer()
   def max_message_bytes, do: @max_message_bytes
 
+  @doc """
+  Stops the agent's current work. The Planning Session, its Workspace and the
+  last valid Proposal survive, and the Member can send a new message. Only
+  the session's Member may Stop; an idle session replies `:ok` too.
+  """
+  @spec stop(GenServer.server(), %{membership_id: Ecto.UUID.t(), owner?: boolean()}) ::
+          :ok | {:error, :forbidden}
+  def stop(session, actor), do: GenServer.call(session, {:stop, actor})
+
+  @doc "The last valid Proposal shown in this Planning Session, or `nil`."
+  @spec current_proposal(GenServer.server()) :: map() | nil
+  def current_proposal(session), do: GenServer.call(session, :current_proposal)
+
   @doc "Adds an event subscriber."
   @spec subscribe(GenServer.server(), pid()) :: :ok
   def subscribe(session, pid), do: GenServer.call(session, {:subscribe, pid})
@@ -191,6 +223,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       subscribers: %{},
       task: nil,
       deadline_ref: nil,
+      os_pids: MapSet.new(),
       max_iterations: args.max_iterations,
       deadline_ms: args.deadline_ms
     }
@@ -230,6 +263,19 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   end
 
   def handle_call({:subscribe, pid}, _from, state), do: {:reply, :ok, add_subscriber(state, pid)}
+
+  def handle_call({:stop, %{membership_id: actor}}, _from, state) do
+    if actor == state.membership_id do
+      state = stop_turn(state)
+      emit(state, %{"type" => "stopped"})
+      {:reply, :ok, state}
+    else
+      {:reply, {:error, :forbidden}, state}
+    end
+  end
+
+  def handle_call(:current_proposal, _from, state),
+    do: {:reply, state.workspace.proposal, state}
 
   def handle_call(:info, _from, state),
     do: {:reply, %{session_id: state.session_id, membership_id: state.membership_id}, state}
@@ -274,11 +320,29 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   def handle_info({:model_state, _stale_ref, _model_state}, state), do: {:noreply, state}
 
+  # Workspace checkpoints let a Stop keep what tools already produced.
+  def handle_info({:workspace, ref, workspace}, %{task: %Task{ref: ref}} = state),
+    do: {:noreply, %{state | workspace: workspace}}
+
+  def handle_info({:workspace, _stale_ref, _workspace}, state), do: {:noreply, state}
+
+  def handle_info({:os_process, ref, event}, %{task: %Task{ref: ref}} = state),
+    do: {:noreply, track_os_process(state, event)}
+
+  # A process reported by a turn that is already halted is killed at once.
+  def handle_info({:os_process, _stale_ref, {:started, os_pid}}, state) do
+    _ = OsProcess.kill(os_pid)
+    {:noreply, state}
+  end
+
+  def handle_info({:os_process, _stale_ref, _event}, state), do: {:noreply, state}
+
   def handle_info({ref, result}, %{task: %Task{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
 
+    # A finished turn closed every optimizer it opened.
     state = %{
-      clear_turn(state)
+      clear_turn(%{state | os_pids: MapSet.new()})
       | model_state: result.model_state,
         messages: result.messages,
         workspace: result.workspace
@@ -298,7 +362,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{task: %Task{ref: ref}} = state) do
     Logger.error("planning agent turn crashed: #{inspect(reason)}")
-    state = clear_turn(state)
+    state = state |> adopt_checkpoints(ref) |> kill_os_processes() |> clear_turn()
     emit(state, %{"type" => "agent_unavailable", "reason" => "internal_error"})
     {:noreply, state}
   end
@@ -399,12 +463,20 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         ref = receive(do: ({^holder, ref} -> ref))
         emit_fun = fn event -> send(session, {:agent_event, ref, event}) end
         checkpoint = fn model_state -> send(session, {:model_state, ref, seal(model_state)}) end
-        tool_context = Map.put(turn.tool_context, :emit, emit_fun)
+        on_os_process = fn event -> send(session, {:os_process, ref, event}) end
+
+        tool_context =
+          turn.tool_context
+          |> Map.put(:emit, emit_fun)
+          |> Map.update!(:optimizer, &with_os_process_hook(&1, on_os_process))
 
         result =
           %{turn | tool_context: tool_context, model_state: unseal(turn.model_state)}
           |> Map.put(:emit, emit_fun)
           |> Map.put(:checkpoint, checkpoint)
+          |> Map.put(:on_workspace, fn workspace ->
+            send(session, {:workspace, ref, workspace})
+          end)
           |> Loop.run()
 
         %{result | model_state: seal(result.model_state)}
@@ -419,18 +491,70 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   defp stop_turn(%{task: task} = state) do
     _ = Task.shutdown(task, :brutal_kill)
-    # The task is dead, so every checkpoint it sent is already queued: adopt
-    # the latest one so the killed turn's paid usage stays counted.
-    clear_turn(%{state | model_state: latest_checkpoint(task.ref, state.model_state)})
+
+    state
+    |> adopt_checkpoints(task.ref)
+    |> kill_os_processes()
+    |> clear_turn()
   end
 
-  defp latest_checkpoint(ref, model_state) do
+  # The task is dead, so everything it sent is already queued: adopt the
+  # latest model state (paid usage stays counted) and Workspace, learn every
+  # optimizer process it started, and drop its late events.
+  defp adopt_checkpoints(state, ref) do
     receive do
-      {:model_state, ^ref, newer} -> latest_checkpoint(ref, newer)
+      {:model_state, ^ref, sealed} -> adopt_checkpoints(%{state | model_state: sealed}, ref)
+      {:workspace, ^ref, workspace} -> adopt_checkpoints(%{state | workspace: workspace}, ref)
+      {:os_process, ^ref, event} -> adopt_checkpoints(track_os_process(state, event), ref)
+      {:agent_event, ^ref, _late} -> adopt_checkpoints(state, ref)
     after
-      0 -> model_state
+      0 -> state
     end
   end
+
+  defp track_os_process(state, {:started, os_pid}),
+    do: %{state | os_pids: MapSet.put(state.os_pids, os_pid)}
+
+  defp track_os_process(state, {:closed, os_pid}),
+    do: %{state | os_pids: MapSet.delete(state.os_pids, os_pid)}
+
+  defp track_os_process(state, _event), do: state
+
+  # Synchronous: returns once every optimizer process of the halted turn is
+  # gone, so nothing it started can still run when the session replies.
+  defp kill_os_processes(state) do
+    Enum.each(state.os_pids, fn os_pid ->
+      case OsProcess.kill(os_pid) do
+        :ok -> :ok
+        {:error, reason} -> Logger.error("planning agent optimizer kill: #{inspect(reason)}")
+      end
+    end)
+
+    %{state | os_pids: MapSet.new()}
+  end
+
+  # The session learns every OS process first; a hook configured on the
+  # optimizer still runs after it.
+  defp with_os_process_hook({module, opts}, hook) when is_list(opts) do
+    chained =
+      case Keyword.get(opts, :on_os_process) do
+        configured when is_function(configured, 1) ->
+          fn event ->
+            hook.(event)
+            configured.(event)
+          end
+
+        _ ->
+          hook
+      end
+
+    {module, Keyword.put(opts, :on_os_process, chained)}
+  end
+
+  defp with_os_process_hook(module, hook) when is_atom(module) and module != nil,
+    do: {module, [on_os_process: hook]}
+
+  defp with_os_process_hook(optimizer, _hook), do: optimizer
 
   defp clear_turn(state) do
     if state.deadline_ref, do: Process.cancel_timer(state.deadline_ref)

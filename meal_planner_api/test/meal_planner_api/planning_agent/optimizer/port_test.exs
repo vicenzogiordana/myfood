@@ -116,6 +116,16 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.PortTest do
     assert eventually_dead?(os_pid)
   end
 
+  test "reports the OS process to its owner when it starts and when the call releases it" do
+    test_pid = self()
+    notify = fn event -> send(test_pid, {:os_process, event}) end
+
+    assert {:ok, _} = PortOptimizer.solve(payload("solve"), opts(on_os_process: notify))
+
+    assert_received {:os_process, {:started, os_pid}}
+    assert_received {:os_process, {:closed, ^os_pid}}
+  end
+
   test "a missing executable is reported as unavailable" do
     assert {:error, :optimizer_unavailable, %{}} =
              PortOptimizer.solve(payload("solve"), opts(python_executable: "/nonexistent/python"))
