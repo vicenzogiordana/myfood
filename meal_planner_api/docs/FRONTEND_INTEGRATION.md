@@ -452,6 +452,45 @@ transferir ownership o eliminar la cuenta — no soportado todavía),
 
 ---
 
+## Household Settings: Nutrition Goal
+
+A Household has one Nutrition Goal: a **daily** range of calories and macros
+**per standard portion**. Any active Member can read and replace it. A
+Member's private macro focus (`macro_goal` in the dietary profile) is a
+Preference, not this numeric goal.
+
+| Method | Endpoint | Description | Required role |
+|--------|----------|-------------|---------------|
+| `GET` | `/api/accounts/:account_id/settings/nutrition-goal` | Read the Nutrition Goal (`data: null` when unset) | any active Member |
+| `PUT` | `/api/accounts/:account_id/settings/nutrition-goal` | Create or fully replace the Nutrition Goal | any active Member |
+
+```bash
+PUT /api/accounts/:account_id/settings/nutrition-goal
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "calories":  {"min": 1800, "max": 2200},
+  "protein_g": {"min": 90,   "max": 140},
+  "carbs_g":   {"min": 200,  "max": 300},
+  "fat_g":     {"min": 50,   "max": 80}
+}
+```
+
+**Response `200`:** `{"data": {"account_id": "...", "period": "daily",
+"per": "standard_portion", "calories": {"min": 1800, "max": 2200}, ...,
+"updated_at": "..."}}`.
+
+**Rules:** all four ranges are required; bounds are non-negative integers no
+greater than 2147483647 (kcal for `calories`, grams for macros) and `min` must
+not exceed `max`.
+
+**Errors:** `422 invalid_nutrition_goal` with a `details` map keyed by bound
+(e.g. `protein_g_min`); `403 account_mismatch` when the URL Household is not
+the token's Household.
+
+---
+
 ## WebSocket (Phoenix Channels)
 
 ### Canales Disponibles
