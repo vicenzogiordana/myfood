@@ -78,6 +78,30 @@ defmodule MealPlannerApi.PlanningAgent.PricesTest do
       assert length(result.prices) <= Prices.max_offers()
       assert length(result.warnings) == Prices.max_ingredients()
     end
+
+    test "with names narrows the named Ingredients instead of adding others" do
+      brand = "Fictitious Acme #{System.unique_integer([:positive])}"
+      milk = ingredient!("Fictitious milk #{System.unique_integer([:positive])}")
+      rice = ingredient!("Fictitious rice #{System.unique_integer([:positive])}")
+      product!(milk, brand: brand, observed_at: hours_ago(30))
+      product!(rice, brand: brand, observed_at: hours_ago(30))
+
+      test_pid = self()
+
+      refresh = fn name ->
+        send(test_pid, {:refreshed, name})
+        {:ok, []}
+      end
+
+      result = Prices.lookup([milk.name], product: brand, now: @now, refresh: refresh)
+
+      {:messages, messages} = Process.info(self(), :messages)
+      refreshed = for {:refreshed, name} <- messages, do: name
+
+      assert refreshed == [milk.name]
+      assert [_ | _] = result.prices
+      assert Enum.all?(result.prices, &(&1.ingredient == milk.name))
+    end
   end
 
   describe "lookup/2 with a brand query" do

@@ -285,6 +285,22 @@ review rounds) is split into three more slices:
   `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1305 passed,
   25 skipped; `mix precommit` (compile with warnings as errors, format,
   full suite) 1305 passed, 25 skipped.
+- S4 review round (Jorge el Curioso on PR #136), route: inline, one
+  confirmed medium-severity finding in `Prices.lookup/2`:
+  - With names and `product` both set, the looked-up Ingredients were the
+    named ones plus every Ingredient with a matching Product, so
+    `ingredients: ["milk"], product: "Acme"` scraped and returned other
+    Ingredients' Acme offers and used up the Ingredient and offer caps.
+    RED: the new `PricesTest` "with names narrows the named Ingredients
+    instead of adding others" refreshed both Milk and Rice. GREEN: the
+    Product search over every stored Product runs only without names;
+    with names the Product query only filters their offers.
+  - Focused `PricesTest` + `LivePricesTest` 38 passed.
+    `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1306 passed,
+    25 skipped; `mix precommit` 1306 passed, 25 skipped (one earlier
+    precommit run had one failure that did not reproduce on two reruns;
+    it was logged next to a "session lost its lock" warning, outside this
+    change).
 
 ## Next step
 

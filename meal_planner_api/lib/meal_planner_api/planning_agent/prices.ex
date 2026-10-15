@@ -128,10 +128,10 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
     * `names` — Ingredient names (case-insensitive exact match)
     * `:brand` — only Products of this brand (case-insensitive exact match)
     * `:product` — only Products whose name or brand contains this text
-      (case-insensitive); without names, it searches every stored Product
+      (case-insensitive); with names it only narrows their offers, without
+      names it searches every stored Product
 
-  At most `max_ingredients/0` Ingredients are read and refreshed, named
-  ones first.
+  At most `max_ingredients/0` Ingredients are read and refreshed.
 
   Other options: `:now` (default: the current time), `:refresh`, a
   function from an Ingredient name to the scraped items (see
@@ -175,10 +175,13 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
     wanted = names |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()
     named = ingredients_by_name(wanted)
 
-    # Named Ingredients come first, so a Product query never pushes them
-    # out of the capped set.
+    # With names, a Product query only narrows their offers; without names,
+    # it searches every stored Product.
     ingredients =
-      (Enum.sort_by(Map.values(named), & &1.name) ++ product_ingredients(product))
+      if(wanted == [],
+        do: product_ingredients(product),
+        else: Enum.sort_by(Map.values(named), & &1.name)
+      )
       |> Enum.uniq_by(& &1.id)
       |> Enum.take(@max_ingredients)
 
