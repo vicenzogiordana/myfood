@@ -96,7 +96,9 @@ review. Out: switching the legacy planner off (spec #93, after the battery).
   No change needed.
 
 - Closure: full `mix test` 1214 passed, 25 skipped; `mix precommit` exit 0
-  (1214 passed, 25 skipped; only pre-existing test warnings in untouched
+  (1214 passed, 25 skipped). After merging origin/main 3bfb4ec (#130):
+  `mix test` 1244 passed, 25 skipped; `mix precommit` exit 0 (1244 passed,
+  25 skipped; only pre-existing test warnings in untouched
   files). Delivery: `single-pr` (about 600 authored lines, mostly tests).
 
 ## Next step
