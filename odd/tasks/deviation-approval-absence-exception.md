@@ -48,7 +48,7 @@ OpenAI spend/token caps (already per Planning Session, unchanged here).
 - [x] A Proposal requiring approval cannot be confirmed without a Deviation Approval for that exact Proposal
 - [x] Changing the Proposal voids the approval
 - [x] Stored budget and Nutrition Goal are unchanged after approving
-- [ ] An Absence Exception lets the validator accept exactly the approved meals
+- [x] An Absence Exception lets the validator accept exactly the approved meals
 - [ ] The agent has no tool to grant either approval
 
 ## Tasks
@@ -58,7 +58,7 @@ OpenAI spend/token caps (already per Planning Session, unchanged here).
   - refusals: forbidden, busy, stale, no deviations, no session
   - void on a new or recalculated Proposal
   - budget and Nutrition Goal unchanged
-- [ ] **T2** Absence Exception (route: inline)
+- [x] **T2** Absence Exception (route: inline)
   - validation of member, Restriction and meals
   - validator accepts exactly the approved meals (tag and exact-ingredient allergies)
   - revalidated at confirm; not inherited by reuse
@@ -75,11 +75,12 @@ OpenAI spend/token caps (already per Planning Session, unchanged here).
 
 | Task | Commit | Tests |
 |------|--------|-------|
-| T1   | (this commit) | RED 0/5 (approve_deviations/3 undefined); GREEN 5/5; planning_agent suite 160 passed |
+| T1   | feaa930 | RED 0/5 (approve_deviations/3 undefined); GREEN 5/5; planning_agent suite 160 passed |
+| T2   | (this commit) | RED 5/10 (approve_absence_exception/3 undefined); GREEN 10/10; planning + planning_agent suites 185 passed |
 
 Note: `config/test.exs` does not append `MIX_TEST_PARTITION` to the DB name;
 isolation uses `MYFOOD_TEST_DATABASE=meal_planner_api_test103`.
 
 ## Next step
 
-T2.
+T3.

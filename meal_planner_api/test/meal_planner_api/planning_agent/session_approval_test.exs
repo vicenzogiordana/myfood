@@ -202,4 +202,181 @@ defmodule MealPlannerApi.PlanningAgent.SessionApprovalTest do
       assert {:ok, _} = confirm(h, recalculated["proposal_id"])
     end
   end
+
+  describe "Absence Exception" do
+    setup %{household: h} do
+      beef = ingredient!("Fictitious beef", [:contains_meat])
+      stew = recipe!("Beef stew", [beef])
+      vegetarian = member!(h)
+      diet!(vegetarian, :vegetarian)
+
+      %{stew: stew, vegetarian: vegetarian}
+    end
+
+    # A session planning the beef stew for Monday lunch and dinner; every
+    # later turn presents the same draft again.
+    defp start_stew!(household, stew, turns) do
+      script =
+        [
+          {:tool_calls, [{"run_optimizer", %{}}]},
+          {:tool_calls, [{"present_proposal", %{}}]},
+          {:text, "Here is your plan."}
+        ] ++
+          Enum.flat_map(1..turns//1, fn _ ->
+            [{:tool_calls, [{"present_proposal", %{}}]}, {:text, "Presented again."}]
+          end)
+
+      attrs = session_attrs(household, household.owner, {@monday, @monday})
+
+      {:ok, %{session_id: session_id, pid: pid}} =
+        Session.start(attrs,
+          model: {Scripted, script: script, notify: self()},
+          optimizer: {FakeOptimizer, result: FakeOptimizer.everywhere(stew.id)},
+          subscriber: self()
+        )
+
+      {session_id, pid}
+    end
+
+    # Runs one turn and returns the result of its last tool call.
+    defp turn!(session_id, pid, text) do
+      :ok = Session.send_message(pid, text)
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "run_finished"}}
+
+      nil
+      |> drain_requests()
+      |> Enum.filter(&(&1.role == :tool_result))
+      |> List.last()
+      |> Map.fetch!(:content)
+    end
+
+    defp drain_requests(last) do
+      receive do
+        {:scripted_model_request, %{messages: messages}} -> drain_requests(messages)
+      after
+        0 -> last
+      end
+    end
+
+    defp approve_absence(household, exception),
+      do:
+        Session.approve_absence_exception(
+          household.account_id,
+          household.owner.membership_id,
+          exception
+        )
+
+    defp lift(member, restriction, slots),
+      do: %{
+        member_id: member.user_id,
+        restriction: restriction,
+        meals: for(s <- slots, do: {@monday, s})
+      }
+
+    test "lets the validator accept exactly the approved meals",
+         %{household: h, stew: stew, vegetarian: vegetarian} do
+      {session_id, pid} = start_stew!(h, stew, 2)
+
+      first = turn!(session_id, pid, "Plan Monday")
+      assert first["status"] == "invalid"
+      assert Enum.map(first["violations"], & &1["slot"]) |> Enum.sort() == ["dinner", "lunch"]
+
+      # The vegetarian Member is away at Monday lunch only.
+      assert :ok = approve_absence(h, lift(vegetarian, {:diet, :vegetarian}, ["lunch"]))
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "absence_exception_approved"} = approved}
+
+      # Generic: the event names the meals, never the Member or Restriction.
+      assert approved["meals"] == [%{"date" => "2026-11-02", "slot" => "lunch"}]
+      refute Map.has_key?(approved, "member_id")
+
+      second = turn!(session_id, pid, "Present it again")
+      assert second["status"] == "invalid"
+
+      assert [%{"type" => "restriction_conflict", "slot" => "dinner"}] = second["violations"]
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "proposal"}}
+
+      assert :ok = approve_absence(h, lift(vegetarian, {:diet, :vegetarian}, ["dinner"]))
+      third = turn!(session_id, pid, "Present it again")
+      assert third["status"] == "valid"
+
+      assert_received {:planning_agent_event, ^session_id, %{"type" => "proposal"} = proposal}
+
+      # Confirmation revalidates with the same Absence Exceptions; the
+      # Member's profile is never edited.
+      assert {:ok, %{meals_count: 2}} = confirm(h, proposal["proposal_id"])
+
+      assert [%{diet_type: :vegetarian}] =
+               Repo.all(
+                 from(p in MealPlannerApi.Persistence.Accounts.UserDietaryProfile,
+                   where: p.user_id == ^vegetarian.user_id
+                 )
+               )
+    end
+
+    test "lifts an allergy, including the allergic ingredient itself", %{household: h} do
+      peanut = ingredient!("Fictitious peanut", [:peanut])
+      noodles = recipe!("Peanut noodles", [peanut])
+      allergic = member!(h)
+      allergy!(allergic, peanut)
+
+      {session_id, pid} = start_stew!(h, noodles, 1)
+      assert %{"status" => "invalid"} = turn!(session_id, pid, "Plan Monday")
+
+      assert :ok =
+               approve_absence(h, lift(allergic, {:allergy, :peanut}, ["lunch", "dinner"]))
+
+      assert %{"status" => "valid"} = turn!(session_id, pid, "Present it again")
+    end
+
+    test "only lifts the named Restriction of the named Member",
+         %{household: h, stew: stew, vegetarian: vegetarian} do
+      # A second vegetarian Member stays at the table.
+      h |> member!() |> diet!(:vegetarian)
+
+      {session_id, pid} = start_stew!(h, stew, 1)
+      assert %{"status" => "invalid"} = turn!(session_id, pid, "Plan Monday")
+
+      assert :ok =
+               approve_absence(h, lift(vegetarian, {:diet, :vegetarian}, ["lunch", "dinner"]))
+
+      assert %{"status" => "invalid", "violations" => [_, _]} =
+               turn!(session_id, pid, "Present it again")
+    end
+
+    test "is refused unless it names a Restriction a Member holds, for meals of the range",
+         %{household: h, stew: stew, vegetarian: vegetarian} do
+      {_session_id, _pid} = start_stew!(h, stew, 0)
+
+      invalid = [
+        lift(vegetarian, {:diet, :vegan}, ["lunch"]),
+        lift(vegetarian, {:allergy, :peanut}, ["lunch"]),
+        %{lift(vegetarian, {:diet, :vegetarian}, []) | meals: []},
+        %{lift(vegetarian, {:diet, :vegetarian}, ["lunch"]) | member_id: Ecto.UUID.generate()},
+        %{lift(vegetarian, {:diet, :vegetarian}, ["lunch"]) | meals: [{~D[2026-11-03], "lunch"}]},
+        lift(vegetarian, {:diet, :vegetarian}, ["breakfast"]),
+        %{member_id: vegetarian.user_id}
+      ]
+
+      for exception <- invalid do
+        assert {:error, :invalid_absence_exception} = approve_absence(h, exception)
+      end
+
+      other = member!(h)
+
+      assert {:error, :forbidden} =
+               Session.approve_absence_exception(
+                 h.account_id,
+                 other.membership_id,
+                 lift(vegetarian, {:diet, :vegetarian}, ["lunch"])
+               )
+    end
+
+    test "without a Planning Session nothing can be approved",
+         %{household: h, vegetarian: vegetarian} do
+      assert {:error, :session_not_active} =
+               approve_absence(h, lift(vegetarian, {:diet, :vegetarian}, ["lunch"]))
+    end
+  end
 end
