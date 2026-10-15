@@ -20,7 +20,7 @@ contract between the planning code and the solver (spec #93, issue #97).
 | `constraints.weekly_budget_cents` | Budget for the whole range |
 | `constraints.macro_bounds` | Optional daily `{min, max}` for `calories`, `protein_g`, `carbs_g`, `fat_g`; built from the Household Nutrition Goal by `MealPlannerApi.Optimization.Contract.nutrition_bounds/1` |
 | `excluded_recipe_ids` | Optional Excluded Recipes |
-| `time_limit_ms` | Optional solver deadline, default 120 000 |
+| `time_limit_ms` | Solver deadline. Python defaults to 120 000, but `OptimizerServer` always sends one below its own timeout (`optimizer_timeout_ms` minus up to 1.5 s) and clamps larger caller values, so slow solves end as `inconclusive` or a feasible incumbent instead of an Elixir timeout |
 
 ## Goal policy
 

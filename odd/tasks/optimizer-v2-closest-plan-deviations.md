@@ -81,6 +81,23 @@ ships the seam they call (see "Integration note").
   RED: 3 new `optimizer_server_test.exs` tests failed (16/19; two returned
   `{:error, :optimizer_error}`, the circuit test hit the open-circuit fallback). GREEN: 19/19.
 
+## Review round 2 (Jorge el Curioso, PR #115)
+
+| ID | Task | Route | Status |
+|----|------|-------|--------|
+| R2 | Solver deadline always expires before the Elixir request timeout | inline (bounded worker; single writer) | done |
+
+- [x] R2 — Finding: `optimizador.py` defaults `time_limit_ms` to 120 000 while no Elixir caller
+  sends one and `OptimizerServer` times out at 15 000, so slow solves hit the request timer
+  (`:optimizer_unavailable`, counted against the circuit breaker) instead of returning
+  `inconclusive` or a feasible incumbent. Fix: `dispatch_solve` sends
+  `bound_solver_deadline(payload)`: `time_limit_ms` = min(caller value, ceiling), where
+  ceiling = `min(optimizer_timeout_ms, optimizer_request_timeout_ms)` minus
+  `min(1 500, timeout/4)`, floor 1. Circuit policy, Python staging and timeout config unchanged.
+  RED: 2 new `solver deadline` tests failed (20/22; `time_limit_ms` was `nil`, and a caller
+  value of 120 000 passed through). GREEN: 22/22. Tests capture the real frame via a stub
+  port (`sh -c 'cat > file'`).
+
 ## Integration note
 
 `run_optimizer` should pass `Contract.nutrition_bounds(NutritionGoals.get(account_id))`
@@ -104,5 +121,7 @@ Wire this in whichever of #96/#97 merges second.
 - `mix precommit` (partitioned DB, `OPTIMIZER_PYTHON` set) → 938 passed, 20 skipped
 - R1 commit: the `fix(optimizer)` commit that follows T2 on this branch
 - R1: `mix test` and `mix precommit` (partitioned DB, `OPTIMIZER_PYTHON` set) → 941 passed, 20 skipped
+- R2 commit: the `fix(optimizer)` commit that bounds the solver deadline, after R1 on this branch
+- R2: `mix test` and `mix precommit` (partitioned DB, `OPTIMIZER_PYTHON` set) → 944 passed, 20 skipped
 - Note: `config/test.exs` does not append `MIX_TEST_PARTITION` to the DB name; isolation
   comes from `MYFOOD_TEST_DATABASE=meal_planner_api_test97`.

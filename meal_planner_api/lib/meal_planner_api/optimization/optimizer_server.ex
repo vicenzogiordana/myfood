@@ -33,6 +33,9 @@ defmodule MealPlannerApi.Optimization.OptimizerServer do
   @default_handshake_timeout_ms 3_000
   @default_frame_max_bytes 4 * 1024 * 1024
   @solver_verdicts ["infeasible", "inconclusive"]
+  # Headroom between the Python solver deadline and the Elixir timeouts, so
+  # the solver's reply (verdict or incumbent) arrives before the caller gives up.
+  @solver_deadline_margin_ms 1_500
 
   @enforce_keys []
   defstruct port: nil,
@@ -272,7 +275,7 @@ defmodule MealPlannerApi.Optimization.OptimizerServer do
       {:ok, state} ->
         request_id = UUID.uuid4()
         timer_ref = schedule_request_timeout(request_id)
-        send_solve_request(state.port, request_id, payload)
+        send_solve_request(state.port, request_id, bound_solver_deadline(payload))
 
         entry = %{
           from: from,
@@ -287,6 +290,36 @@ defmodule MealPlannerApi.Optimization.OptimizerServer do
       {:error, reason, state} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  # The solver must give up before Elixir does: otherwise a slow solve is cut
+  # by the request timer (reported as unavailable and counted against the
+  # circuit breaker) instead of returning its inconclusive verdict or best
+  # incumbent. A caller-supplied `time_limit_ms` is kept only below that
+  # ceiling.
+  defp bound_solver_deadline(payload) when is_map(payload) do
+    ceiling = solver_deadline_ceiling_ms()
+    {atom_limit, payload} = Map.pop(payload, :time_limit_ms)
+    {string_limit, payload} = Map.pop(payload, "time_limit_ms")
+
+    limit =
+      case string_limit || atom_limit do
+        requested when is_number(requested) and requested > 0 ->
+          min(trunc(requested), ceiling)
+
+        _ ->
+          ceiling
+      end
+
+    Map.put(payload, "time_limit_ms", limit)
+  end
+
+  defp bound_solver_deadline(payload), do: payload
+
+  defp solver_deadline_ceiling_ms do
+    timeout = min(optimizer_timeout_ms(), optimizer_request_timeout_ms())
+    margin = min(@solver_deadline_margin_ms, div(timeout, 4))
+    max(timeout - margin, 1)
   end
 
   defp schedule_request_timeout(request_id) do

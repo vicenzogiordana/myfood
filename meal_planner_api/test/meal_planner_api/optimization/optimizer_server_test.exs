@@ -1,3 +1,23 @@
+defmodule MealPlannerApi.Optimization.OptimizerServerTest.CapturePortRunner do
+  @moduledoc false
+  # Stub port whose child appends every received frame to the file stored in
+  # `:persistent_term` under this module, so tests can read what crossed the port.
+
+  def open_port(_opts \\ []) do
+    path = :persistent_term.get(__MODULE__)
+
+    port =
+      Port.open({:spawn_executable, System.find_executable("sh")}, [
+        :binary,
+        :exit_status,
+        :use_stdio,
+        args: ["-c", ~s(exec cat > "$0"), path]
+      ])
+
+    {:ok, port}
+  end
+end
+
 defmodule MealPlannerApi.Optimization.OptimizerServerTest do
   @moduledoc """
   Focused lifecycle tests for `OptimizerServer`. Each test starts the GenServer
@@ -11,6 +31,7 @@ defmodule MealPlannerApi.Optimization.OptimizerServerTest do
 
   alias MealPlannerApi.Optimization.Contract
   alias MealPlannerApi.Optimization.OptimizerServer
+  alias MealPlannerApi.Optimization.OptimizerServerTest.CapturePortRunner
   alias MealPlannerApi.Optimization.TestSupport.FakePortRunner
 
   @payload %{
@@ -432,6 +453,42 @@ defmodule MealPlannerApi.Optimization.OptimizerServerTest do
     end
   end
 
+  describe "solver deadline" do
+    @describetag :tmp_dir
+
+    test "sends a time_limit_ms strictly below the Elixir timeout when the caller sets none",
+         %{tmp_dir: tmp_dir} do
+      Application.put_env(:meal_planner_api, :optimizer_timeout_ms, 5_000)
+      Application.put_env(:meal_planner_api, :optimizer_request_timeout_ms, 5_000)
+
+      sent = capture_solve_payload!(tmp_dir, @payload)
+
+      assert is_integer(sent["time_limit_ms"])
+      assert sent["time_limit_ms"] > 0
+      assert sent["time_limit_ms"] < 5_000
+    end
+
+    test "clamps a caller-supplied time_limit_ms above the Elixir timeout",
+         %{tmp_dir: tmp_dir} do
+      Application.put_env(:meal_planner_api, :optimizer_timeout_ms, 5_000)
+      Application.put_env(:meal_planner_api, :optimizer_request_timeout_ms, 5_000)
+
+      sent = capture_solve_payload!(tmp_dir, Map.put(@payload, :time_limit_ms, 120_000))
+
+      assert sent["time_limit_ms"] < 5_000
+    end
+
+    test "keeps a caller-supplied time_limit_ms that already fits the timeout",
+         %{tmp_dir: tmp_dir} do
+      Application.put_env(:meal_planner_api, :optimizer_timeout_ms, 5_000)
+      Application.put_env(:meal_planner_api, :optimizer_request_timeout_ms, 5_000)
+
+      sent = capture_solve_payload!(tmp_dir, Map.put(@payload, "time_limit_ms", 800))
+
+      assert sent["time_limit_ms"] == 800
+    end
+  end
+
   describe "public error atoms" do
     test "GenServer.call/3 timeout still maps to :optimizer_timeout (caller-visible)" do
       # Configure the caller's GenServer.call timeout short, but keep the
@@ -485,6 +542,53 @@ defmodule MealPlannerApi.Optimization.OptimizerServerTest do
     :ok = await_handshake_ready(pid)
 
     {pid, port, name}
+  end
+
+  # Starts the server on a stub port whose child writes every frame it
+  # receives to a file, issues one solve, and returns the decoded payload
+  # exactly as it crossed the port.
+  defp capture_solve_payload!(tmp_dir, payload) do
+    capture_path = Path.join(tmp_dir, "frames.jsonl")
+    :persistent_term.put(CapturePortRunner, capture_path)
+    Application.put_env(:meal_planner_api, :optimizer_port_runner, CapturePortRunner)
+
+    on_exit(fn -> :persistent_term.erase(CapturePortRunner) end)
+
+    pid = start_supervised!({OptimizerServer, []}, id: unique_name())
+    port = :sys.get_state(pid).port
+    assert is_port(port), "CapturePortRunner did not open a port"
+    send(pid, {port, {:data, ~s({"type":"ready","version":"1.0"}\n)}})
+    :ok = await_handshake_ready(pid)
+
+    _task = Task.async(fn -> OptimizerServer.select_weekly_menu(payload) end)
+    _request_id = await_pending(pid)
+
+    solve_frame = await_solve_frame(capture_path)
+    solve_frame["payload"]
+  end
+
+  defp await_solve_frame(path, attempts \\ 100) do
+    frame =
+      with {:ok, contents} <- File.read(path) do
+        contents
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["type"] == "solve"))
+      else
+        _ -> nil
+      end
+
+    cond do
+      frame != nil ->
+        frame
+
+      attempts == 0 ->
+        flunk("no solve frame reached the stub port")
+
+      true ->
+        Process.sleep(10)
+        await_solve_frame(path, attempts - 1)
+    end
   end
 
   defp error_frame_reply(pid, port, error, details) do
