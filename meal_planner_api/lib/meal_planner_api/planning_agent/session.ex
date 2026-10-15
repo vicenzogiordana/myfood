@@ -490,13 +490,26 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   defp stop_turn(%{task: nil} = state), do: state
 
   defp stop_turn(%{task: task} = state) do
-    _ = Task.shutdown(task, :brutal_kill)
+    shutdown = Task.shutdown(task, :brutal_kill)
 
     state
     |> adopt_checkpoints(task.ref)
+    |> adopt_finished_turn(shutdown)
     |> kill_os_processes()
     |> clear_turn()
   end
+
+  # A turn that replied before the shutdown already settled: Task.shutdown
+  # consumed its reply, so keep its messages, model state and Workspace.
+  defp adopt_finished_turn(state, {:ok, result}),
+    do: %{
+      state
+      | model_state: result.model_state,
+        messages: result.messages,
+        workspace: result.workspace
+    }
+
+  defp adopt_finished_turn(state, _shutdown), do: state
 
   # The task is dead, so everything it sent is already queued: adopt the
   # latest model state (paid usage stays counted) and Workspace, learn every

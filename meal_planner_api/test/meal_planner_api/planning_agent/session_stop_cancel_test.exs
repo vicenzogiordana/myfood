@@ -77,6 +77,16 @@ defmodule MealPlannerApi.PlanningAgent.SessionStopCancelTest do
     )
   end
 
+  defp mailbox_len(pid), do: elem(Process.info(pid, :message_queue_len), 1)
+
+  defp wait_until(fun, attempts \\ 200) do
+    cond do
+      fun.() -> :ok
+      attempts == 0 -> flunk("condition not met in time")
+      true -> Process.sleep(5) && wait_until(fun, attempts - 1)
+    end
+  end
+
   # Signal 0 only checks that the OS process exists.
   defp os_alive?(os_pid) do
     {_, status} = System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
@@ -158,6 +168,37 @@ defmodule MealPlannerApi.PlanningAgent.SessionStopCancelTest do
       refute_receive {:planning_agent_event, ^session_id, %{"type" => "assistant_message"}}, 600
       refute_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
       assert Session.current_proposal(pid) == nil
+    end
+
+    test "a Stop racing a turn that already replied keeps that turn's messages and model state",
+         %{household: h, member: member} do
+      test_pid = self()
+
+      finishing = fn _request ->
+        send(test_pid, {:model_waiting, self()})
+        receive(do: (:finish -> {:text, "Final answer"}))
+      end
+
+      {_session_id, pid} = start!(h, member, [finishing])
+      :ok = Session.send_message(pid, "Plan")
+      assert_receive {:model_waiting, task_pid}, 2_000
+
+      # Queue the Stop ahead of the turn's reply, so the session handles the
+      # Stop while the finished turn's result already sits in its mailbox.
+      :ok = :sys.suspend(pid)
+      stopper = Task.async(fn -> Session.stop(pid, actor(member)) end)
+      wait_until(fn -> mailbox_len(pid) >= 1 end)
+
+      task_ref = Process.monitor(task_pid)
+      send(task_pid, :finish)
+      assert_receive {:DOWN, ^task_ref, :process, ^task_pid, _}, 2_000
+      :ok = :sys.resume(pid)
+
+      assert Task.await(stopper) == :ok
+
+      state = :sys.get_state(pid)
+      assert %{role: :assistant, content: "Final answer"} = List.last(state.messages)
+      assert %{calls: 1, script: []} = state.model_state.()
     end
 
     test "a stopped session accepts a new message", %{household: h, member: member} do
