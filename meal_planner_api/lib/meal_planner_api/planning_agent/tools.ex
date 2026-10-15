@@ -31,15 +31,13 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   in model arguments is ignored. Unknown tools are rejected by code.
   """
 
-  alias MealPlannerApi.Planning.ProposalStatus
-
   alias MealPlannerApi.PlanningAgent.{
     CallBounds,
     MealPlan,
     Prices,
     ProjectedPantry,
+    Proposal,
     ProposalValidator,
-    Purchase,
     RecipeSearch
   }
 
@@ -299,28 +297,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
     case ProposalValidator.validate(ctx.workspace.draft, ctx) do
       {:valid, meals} ->
-        purchase = Purchase.for_meals(meals, ctx.account_id)
-        deviations = budget_deviations(purchase, ctx.household.budget_cents)
-        status = ProposalStatus.classify([], deviations) |> Atom.to_string()
-
-        proposal = %{
-          "type" => "proposal",
-          "proposal_id" => Ecto.UUID.generate(),
-          "status" => status,
-          "meals" =>
-            Enum.map(meals, fn meal ->
-              %{
-                "date" => Date.to_iso8601(meal.date),
-                "slot" => meal.slot,
-                "recipe_id" => meal.recipe_id,
-                "name" => meal.name
-              }
-            end),
-          "purchase" => Purchase.to_data(purchase),
-          "consumed_cost" => Purchase.consumed_data(purchase),
-          "budget" => budget_data(purchase, ctx.household.budget_cents),
-          "deviations" => deviations
-        }
+        {proposal, purchase} = Proposal.build(meals, ctx)
+        status = proposal["status"]
+        deviations = proposal["deviations"]
 
         emit(ctx, proposal)
 
@@ -388,53 +367,6 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
   defp run(_name, _arguments, ctx),
     do: {%{"error" => "unknown_tool"}, ctx.workspace, :continue}
-
-  # ---------------------------------------------------------------------------
-  # Budget
-  # ---------------------------------------------------------------------------
-
-  # The budget is compared against the Purchase total. A budget of zero means
-  # the Household has not set one. With missing prices the total is a lower
-  # bound: overspend is still certain, but fitting the budget is unknown.
-  defp budget_deviations(purchase, budget_cents)
-       when is_integer(budget_cents) and budget_cents > 0 and
-              purchase.total_cents > budget_cents do
-    [
-      %{
-        "type" => "budget",
-        "budget_cents" => budget_cents,
-        "total_cents" => purchase.total_cents,
-        "difference_cents" => purchase.total_cents - budget_cents
-      }
-    ]
-  end
-
-  defp budget_deviations(_purchase, _budget_cents), do: []
-
-  defp budget_data(purchase, budget_cents) when is_integer(budget_cents) and budget_cents > 0 do
-    within =
-      cond do
-        purchase.total_cents > budget_cents -> false
-        purchase.complete? -> true
-        true -> nil
-      end
-
-    %{
-      "budget_cents" => budget_cents,
-      "purchase_total_cents" => purchase.total_cents,
-      "within_budget" => within,
-      "uncertain" => not purchase.complete?
-    }
-  end
-
-  defp budget_data(purchase, _budget_cents) do
-    %{
-      "budget_cents" => nil,
-      "purchase_total_cents" => purchase.total_cents,
-      "within_budget" => nil,
-      "uncertain" => not purchase.complete?
-    }
-  end
 
   # ---------------------------------------------------------------------------
   # Optimizer
