@@ -439,16 +439,44 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   # Optimizer
   # ---------------------------------------------------------------------------
 
+  # AI-created Recipe Drafts of the Workspace are candidates for their slots
+  # beside the searched recipes; the validator checks them like any recipe.
   defp candidates(ctx, exclude) do
+    drafts = ctx |> drafts() |> Map.values() |> Enum.filter(&RecipeDraft.plannable?/1)
+
     Enum.reduce_while(ctx.slots, {:ok, %{}}, fn slot, {:ok, acc} ->
       filters = %{slot: slot, exclude_recipe_ids: exclude, limit: @optimizer_candidates_per_slot}
 
+      slot_drafts =
+        drafts
+        |> Enum.filter(&(slot in &1.slots and &1.id not in exclude))
+        |> Enum.sort_by(&{&1.name, &1.id})
+        |> Enum.map(&draft_candidate/1)
+
       case search(ctx, filters) do
-        {:ok, []} -> {:halt, {:error, :no_candidates, slot}}
-        {:ok, recipes} -> {:cont, {:ok, Map.put(acc, slot, Enum.map(recipes, &candidate/1))}}
-        {:error, _reason} = error -> {:halt, error}
+        {:ok, recipes} ->
+          case Enum.map(recipes, &candidate/1) ++ slot_drafts do
+            [] -> {:halt, {:error, :no_candidates, slot}}
+            candidates -> {:cont, {:ok, Map.put(acc, slot, candidates)}}
+          end
+
+        {:error, _reason} = error ->
+          {:halt, error}
       end
     end)
+  end
+
+  defp draft_candidate(draft) do
+    per_serving = draft.nutrition["per_serving"]
+
+    candidate(%{
+      id: draft.id,
+      name: draft.name,
+      calories_per_serving: per_serving["calories"],
+      protein_g_per_serving: per_serving["protein_g"],
+      carbs_g_per_serving: per_serving["carbs_g"],
+      fat_g_per_serving: per_serving["fat_g"]
+    })
   end
 
   # Candidate costs and the Nutrition Goal enter the optimizer with the
@@ -584,7 +612,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   # Helpers
   # ---------------------------------------------------------------------------
 
-  defp drafts(ctx), do: Map.get(ctx.workspace, :recipe_drafts, %{})
+  defp drafts(ctx), do: RecipeDraft.in_context(ctx)
 
   defp with_nutrition_outcome(%{"nutrition" => %{"complete" => true}} = recipe), do: recipe
 

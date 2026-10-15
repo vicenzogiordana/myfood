@@ -267,7 +267,8 @@ defmodule MealPlannerApi.PlanningAgent.SessionMealPlanTest do
       assert Map.keys(proposal) ==
                ~w(budget consumed_cost deviations meals proposal_id purchase status type)
 
-      assert Enum.all?(meals, &(Map.keys(&1) == ~w(date name recipe_id slot)))
+      # Recipe Origin and the Draft marker are shown with every Proposal meal.
+      assert Enum.all?(meals, &(Map.keys(&1) == ~w(date draft name origin recipe_id slot)))
     end
 
     test "never reuses another Household's meals", %{household: h, recipes: r} do

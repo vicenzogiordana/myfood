@@ -191,6 +191,15 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
       else: %{"outcome" => "partial", "missing" => missing}
   end
 
+  @doc """
+  The Drafts of a session or tool context, by id: `ctx.recipe_drafts`, else
+  the Workspace's.
+  """
+  @spec in_context(map()) :: %{Ecto.UUID.t() => t()}
+  def in_context(%{recipe_drafts: drafts}) when is_map(drafts), do: drafts
+  def in_context(%{workspace: %{recipe_drafts: drafts}}) when is_map(drafts), do: drafts
+  def in_context(_ctx), do: %{}
+
   @doc "Whether the Draft may be planned: only AI-created Drafts are, until saved."
   @spec plannable?(t()) :: boolean()
   def plannable?(draft), do: draft.source == :ai_generated

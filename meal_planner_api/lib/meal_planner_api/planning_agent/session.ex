@@ -599,7 +599,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       account_id: state.account_id,
       range: state.range,
       slots: state.slots,
-      household: household
+      household: household,
+      recipe_drafts: state.workspace.recipe_drafts
     }
 
     with {:valid, meals} <- ProposalValidator.validate(Proposal.meals(shown), ctx),
@@ -629,14 +630,26 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   defp approved(%{"status" => "valid"}), do: :ok
   defp approved(_shown), do: {:error, :approval_required}
 
+  # Recipe Drafts the Proposal uses are saved with it as AI-created
+  # Household Recipes; unused Drafts are discarded with the Workspace.
   defp save(state, shown, purchase) do
+    meals = Proposal.meals(shown)
+
+    recipes =
+      meals
+      |> Enum.map(& &1.recipe_id)
+      |> Enum.uniq()
+      |> Enum.flat_map(&List.wrap(state.workspace.recipe_drafts[&1]))
+
     attrs = %{
       confirmation_id: shown["proposal_id"],
       account_id: state.account_id,
       session_id: state.session_id,
       membership_id: state.membership_id,
+      user_id: state.user_id,
       range: state.range,
-      meals: Proposal.meals(shown),
+      meals: meals,
+      recipes: recipes,
       purchase: purchase
     }
 
@@ -876,7 +889,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     "proposal_invalidated" => ~w(proposal_id reason violations),
     "confirmation_unresolved" => ~w(proposal_id)
   }
-  @meal_fields ~w(date slot recipe_id name)
+  @meal_fields ~w(date slot recipe_id name origin draft)
 
   # Streaming carries progress only: known event types with known fields.
   # Anything else, such as raw tool output or model reasoning, is dropped.

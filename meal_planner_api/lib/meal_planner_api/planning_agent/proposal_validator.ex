@@ -8,7 +8,9 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
 
     * coverage — exactly one meal per day and slot of the range
     * availability — every recipe exists, is visible to the Household, is not
-      superseded and suits its slot
+      superseded and suits its slot. An AI-created Recipe Draft of the
+      Workspace (`MealPlannerApi.PlanningAgent.RecipeDraft`) counts as
+      available; a dictated Draft is not plannable until the Member saves it
     * Restrictions — `MealPlannerApi.Planning.RestrictionValidator` over every
       Member, plus ingredients a Member is allergic to
 
@@ -20,13 +22,15 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
   import Ecto.Query
 
   alias MealPlannerApi.Persistence.Catalog.{Recipe, RecipeIngredient}
-  alias MealPlannerApi.Planning.RestrictionValidator
+  alias MealPlannerApi.Planning.{RecipeOrigin, RestrictionValidator}
+  alias MealPlannerApi.PlanningAgent.RecipeDraft
   alias MealPlannerApi.Repo
 
   @type meal :: %{date: Date.t(), slot: String.t(), recipe_id: String.t()}
 
   @doc """
-  Validates `meals`. Returns `{:valid, meals}` with recipe names attached, or
+  Validates `meals`. Returns `{:valid, meals}` with each recipe's `:name`,
+  `:origin` (Recipe Origin label) and `:draft` attached, or
   `{:invalid, violations}`.
   """
   @spec validate([meal()], map()) :: {:valid, [map()]} | {:invalid, [map()]}
@@ -34,16 +38,26 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
     {from_date, to_date} = ctx.range
     expected = for date <- Date.range(from_date, to_date), slot <- ctx.slots, do: {date, slot}
 
-    recipes = load_recipes(meals, ctx.account_id)
+    drafts =
+      ctx |> RecipeDraft.in_context() |> Map.filter(fn {_, d} -> RecipeDraft.plannable?(d) end)
+
+    recipes = meals |> load_recipes(ctx.account_id) |> Map.merge(draft_recipes(meals, drafts))
 
     violations =
       coverage_violations(meals, expected) ++
         availability_violations(meals, recipes) ++
-        restriction_violations(meals, recipes, ctx.household)
+        restriction_violations(meals, recipes, drafts, ctx.household)
 
     case violations do
-      [] -> {:valid, Enum.map(meals, &Map.put(&1, :name, Map.fetch!(recipes, &1.recipe_id).name))}
-      _ -> {:invalid, violations}
+      [] ->
+        {:valid,
+         Enum.map(meals, fn meal ->
+           recipe = Map.fetch!(recipes, meal.recipe_id)
+           Map.merge(meal, %{name: recipe.name, origin: recipe.origin, draft: recipe.draft})
+         end)}
+
+      _ ->
+        {:invalid, violations}
     end
   end
 
@@ -99,11 +113,16 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
     end)
   end
 
-  defp restriction_violations(meals, recipes, household) do
+  defp restriction_violations(meals, recipes, drafts, household) do
     known = Enum.filter(meals, &Map.has_key?(recipes, &1.recipe_id))
 
+    used_drafts =
+      known |> Enum.map(& &1.recipe_id) |> Enum.uniq() |> Enum.flat_map(&List.wrap(drafts[&1]))
+
     tag_conflicts =
-      case RestrictionValidator.validate(known, household.members) do
+      case RestrictionValidator.validate(known, household.members,
+             tags_by_recipe: RecipeDraft.reviewed_tags(used_drafts)
+           ) do
         :ok -> []
         {:error, conflicts} -> Enum.map(conflicts, &{&1.date, &1.slot, &1.message})
       end
@@ -123,6 +142,7 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
         )
         |> Repo.all()
         |> MapSet.new()
+        |> MapSet.union(allergy_drafts(used_drafts, household))
       end
 
     allergy_conflicts =
@@ -139,6 +159,32 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
     end)
   end
 
+  defp allergy_drafts(drafts, household) do
+    for draft <- drafts,
+        Enum.any?(
+          RecipeDraft.ingredient_ids(draft),
+          &MapSet.member?(household.allergic_ingredient_ids, &1)
+        ),
+        into: MapSet.new(),
+        do: draft.id
+  end
+
+  defp draft_recipes(meals, drafts) do
+    for %{recipe_id: id} <- meals,
+        draft = drafts[id],
+        draft != nil,
+        into: %{},
+        do:
+          {id,
+           %{
+             id: id,
+             name: draft.name,
+             suitable_for_slots: draft.slots,
+             origin: RecipeOrigin.label(draft.source),
+             draft: true
+           }}
+  end
+
   defp load_recipes(meals, account_id) do
     ids = meals |> Enum.map(& &1.recipe_id) |> Enum.flat_map(&cast_uuid/1) |> Enum.uniq()
 
@@ -146,10 +192,18 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
       where: r.id in ^ids,
       where: is_nil(r.superseded_by_id),
       where: is_nil(r.account_id) or r.account_id == ^account_id,
-      select: %{id: r.id, name: r.name, suitable_for_slots: r.suitable_for_slots}
+      select: %{
+        id: r.id,
+        name: r.name,
+        suitable_for_slots: r.suitable_for_slots,
+        source: r.source
+      }
     )
     |> Repo.all()
-    |> Map.new(&{&1.id, &1})
+    |> Map.new(fn recipe ->
+      {recipe.id,
+       recipe |> Map.put(:origin, RecipeOrigin.label(recipe.source)) |> Map.put(:draft, false)}
+    end)
   end
 
   defp cast_uuid(value) do

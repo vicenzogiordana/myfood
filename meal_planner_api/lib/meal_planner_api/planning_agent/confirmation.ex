@@ -9,8 +9,10 @@ defmodule MealPlannerApi.PlanningAgent.Confirmation do
        so a cancelled or expired session cannot be confirmed)
     2. the confirmation row is inserted; its id is the confirmation
        identity (the Proposal id), so the same confirmation never saves twice
-    3. the Proposal's Planned Meals are saved
-    4. each Purchase line is appended to the Shopping List as a new pending
+    3. the Recipe Drafts the Proposal uses are saved as private AI-created
+       Household Recipes, keeping their ids (never as Catalog Recipes)
+    4. the Proposal's Planned Meals are saved
+    5. each Purchase line is appended to the Shopping List as a new pending
        line, attributed to the earliest Planned Meal needing its ingredient.
        Existing lines, pending and in-cart included, are never touched.
 
@@ -37,6 +39,7 @@ defmodule MealPlannerApi.PlanningAgent.Confirmation do
   alias MealPlannerApi.Persistence.Catalog.RecipeIngredient
   alias MealPlannerApi.Persistence.Planning.{AgentConfirmation, ScheduledMeal}
   alias MealPlannerApi.Persistence.Shopping.ShoppingItem
+  alias MealPlannerApi.PlanningAgent.RecipeDraft
   alias MealPlannerApi.Repo
 
   @reconcile_window_ms 30_000
@@ -54,8 +57,10 @@ defmodule MealPlannerApi.PlanningAgent.Confirmation do
           account_id: Ecto.UUID.t(),
           session_id: Ecto.UUID.t(),
           membership_id: Ecto.UUID.t(),
+          user_id: Ecto.UUID.t() | nil,
           range: {Date.t(), Date.t()},
           meals: [%{date: Date.t(), slot: String.t(), recipe_id: Ecto.UUID.t()}],
+          recipes: [RecipeDraft.t()],
           purchase: MealPlannerApi.PlanningAgent.Purchase.t()
         }
 
@@ -155,6 +160,7 @@ defmodule MealPlannerApi.PlanningAgent.Confirmation do
       |> repo.insert()
       |> refusal(:already_confirmed)
     end)
+    |> Ecto.Multi.run(:recipes, fn repo, _ -> insert_recipes(repo, attrs) end)
     |> Ecto.Multi.run(:planned_meals, fn repo, _ -> insert_meals(repo, attrs) end)
     |> Ecto.Multi.run(:shopping_lines, fn repo, %{planned_meals: meals} ->
       append_lines(repo, attrs, meals)
@@ -203,6 +209,18 @@ defmodule MealPlannerApi.PlanningAgent.Confirmation do
           reconcile(store, attrs, deadline, poll_ms)
         end
     end
+  end
+
+  defp insert_recipes(repo, attrs) do
+    attrs
+    |> Map.get(:recipes, [])
+    |> Enum.filter(&RecipeDraft.plannable?/1)
+    |> Enum.reduce_while({:ok, 0}, fn draft, {:ok, count} ->
+      case RecipeDraft.persist(repo, draft, attrs.account_id, Map.get(attrs, :user_id)) do
+        {:ok, _recipe} -> {:cont, {:ok, count + 1}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp insert_meals(repo, attrs) do
