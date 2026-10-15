@@ -7,6 +7,8 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.PortTest do
 
   use ExUnit.Case, async: true
 
+  @moduletag :capture_log
+
   alias MealPlannerApi.PlanningAgent.Optimizer.Port, as: PortOptimizer
 
   @script Path.expand("../../../support/fixtures/fake_optimizer.py", __DIR__)
