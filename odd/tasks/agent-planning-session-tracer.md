@@ -48,29 +48,29 @@ contract changes (variety, pins, relaxation). Numeric spend/token caps are a hum
 
 ## Acceptance criteria
 
-- [ ] A Member can start a Planning Session over the channel; a second Member of the same Household is told one is already active
-- [ ] Without recorded consent the session refuses to call the external provider
-- [ ] With the scripted model, a session produces a Proposal event carrying a code-owned validity status
-- [ ] An invalid optimizer result is never shown; its violations go back to the agent
-- [ ] Optimizer failure produces a clear error to the agent and the Member, never a fallback plan
-- [ ] The OpenAI adapter refuses to run when spend or token caps are unset, and reserves worst-case cost before each call
-- [ ] Tool arguments naming another Household are ignored in favour of the session's Household
-- [ ] Recipe and tool text is treated as data (a prompt-injection fixture does not change behaviour)
-- [ ] Session-level tests run through the session module with scripted model and fakes; a few ChannelCase tests cover wiring
+- [x] A Member can start a Planning Session over the channel; a second Member of the same Household is told one is already active
+- [x] Without recorded consent the session refuses to call the external provider
+- [x] With the scripted model, a session produces a Proposal event carrying a code-owned validity status
+- [x] An invalid optimizer result is never shown; its violations go back to the agent
+- [x] Optimizer failure produces a clear error to the agent and the Member, never a fallback plan
+- [x] The OpenAI adapter refuses to run when spend or token caps are unset, and reserves worst-case cost before each call
+- [x] Tool arguments naming another Household are ignored in favour of the session's Household
+- [x] Recipe and tool text is treated as data (a prompt-injection fixture does not change behaviour)
+- [x] Session-level tests run through the session module with scripted model and fakes; a few ChannelCase tests cover wiring
 
 ## Tasks
 
 Delivery strategy: `single-pr` (the pipeline requests one PR per issue; forecast ~2000
-authored lines, above the ~400 heuristic because the tracer bullet must land the full seam
+authored lines, actual 3734 added lines including tests and docs, above the ~400 heuristic because the tracer bullet must land the full seam
 with its tests at once; commits stay reviewable work units).
 
 | ID | Task | Route | Status |
 |----|------|-------|--------|
-| T1 | Session module, model interface, scripted adapter, consent, household lock, context, limits | inline (bounded worker; no sub-delegation allowed) | pending |
-| T2 | Tools: search_recipes, run_optimizer, present_proposal, ask_human; validator; injection and household-override tests | inline | pending |
-| T3 | Port optimizer adapter over the port runner (no fallback), port-boundary tests with a fake script | inline | pending |
-| T4 | OpenAI Responses adapter + spend ledger | inline | pending |
-| T5 | Phoenix channel adapter, config, docs | inline | pending |
+| T1 | Session module, model interface, scripted adapter, consent, household lock, context, limits | inline (bounded worker; no sub-delegation allowed) | done (`49cc275`) |
+| T2 | Tools: search_recipes, run_optimizer, present_proposal, ask_human; validator; injection and household-override tests | inline | done (`2095ee2`) |
+| T3 | Port optimizer adapter over the port runner (no fallback), port-boundary tests with a fake script | inline | done (`23542aa, 086808b`) |
+| T4 | OpenAI Responses adapter + spend ledger | inline | done (`49a307b`) |
+| T5 | Phoenix channel adapter, config, docs | inline | done (`f35cb9b`) |
 
 ## Checks
 
@@ -82,3 +82,25 @@ with its tests at once; commits stay reviewable work units).
 - `config/test.exs` does not append `MIX_TEST_PARTITION` to the DB name; isolation uses the
   existing `MYFOOD_TEST_DATABASE` override (`meal_planner_api_test_96`), no config change.
 - Baseline before changes: 923 passed, 20 skipped.
+- T1 RED: `session_test.exs` 0/14 (`Session.start/2` undefined); GREEN 14/14.
+- T2 RED: `session_tools_test.exs` 1/13 (only the unknown-tool case passed); GREEN 14/14
+  after splitting the name/ingredient search case into two sessions.
+- T3 RED: `optimizer/port_test.exs` 0/6 (module missing); GREEN 6/6 against
+  `test/support/fixtures/fake_optimizer.py` (python3 stand-in; real OR-Tools not installed locally).
+- T4 RED: `model/openai_responses_test.exs` 0/9; GREEN 9/9 (Req.Test stub, no network).
+- T5 RED: `planning_agent_channel_test.exs` failed (channel module missing); GREEN 5/5.
+- Full suite (`MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test_96 mix precommit`):
+  exit 0, 971 passed, 20 skipped. Remaining compiler warnings are pre-existing in unrelated test files.
+
+## Known limits handed to later slices of #93
+
+- Purchase calculation and budget deviations (`requires_approval`), Nutrition Goal in the
+  optimizer, variety, pins and relaxation: candidates enter with zero cost and wide bounds.
+- Grace and recovery: the session ends when its last subscriber leaves.
+- Stop, and force-killing a running optimizer when a turn is cancelled (the deadline kills the
+  turn task; the subprocess then receives EOF).
+- Numeric spend and token caps and prices: unset by default (human decision).
+
+## Next step
+
+Open the PR (Closes #96, Part of #93) and hand it to the Jorge review gate.
