@@ -348,6 +348,41 @@ defmodule MealPlannerApi.PlanningAgent.SessionToolsTest do
       assert_receive {:scripted_model_request, _}
       refute_receive {:scripted_model_request, _}, 100
     end
+
+    test "no tool call after the question runs; each is answered as skipped", %{household: h} do
+      {session_id, pid} =
+        start!(h, [
+          {:tool_calls,
+           [
+             {"ask_human", %{"question" => "Lunch or dinner only?"}},
+             {"run_optimizer", %{}},
+             {"present_proposal", %{}}
+           ]},
+          {:text, "Thanks"}
+        ])
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "question"}}
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+      refute_received {:optimizer_payload, _}
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "proposal"}}
+      assert Session.current_proposal(pid) == nil
+
+      :ok = Session.send_message(pid, "Lunch only")
+      assert_receive {:scripted_model_request, _first}
+      assert_receive {:scripted_model_request, second}
+
+      results =
+        for %{role: :tool_result, name: name, content: content} <- second.messages,
+            do: {name, content}
+
+      assert [
+               {"ask_human", %{"status" => "asked"}},
+               {"run_optimizer", %{"error" => "skipped_after_question"}},
+               {"present_proposal", %{"error" => "skipped_after_question"}}
+             ] = results
+    end
   end
 
   describe "prompt injection" do

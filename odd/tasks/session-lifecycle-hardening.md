@@ -41,7 +41,7 @@ review. Out: switching the legacy planner off (spec #93, after the battery).
 - [x] T2 Idle expiry: a connected but inactive session ends after `:idle_ms` (default 30 min) and releases the slot (route: inline, one file + test)
 - [x] T3 Legacy start refuses while an agent session holds the Household lock (route: inline; migration + repo + server + tests)
 - [x] T4 Sweeper tests against agent lock rows (route: inline, tests only)
-- [ ] T5 No tool call runs after `ask_human` ends the turn; proposal clearing reviewed (route: inline, one file + test)
+- [x] T5 No tool call runs after `ask_human` ends the turn; proposal clearing reviewed (route: inline, one file + test)
 
 ## Acceptance criteria
 
@@ -79,8 +79,22 @@ review. Out: switching the legacy planner off (spec #93, after the battery).
   process whose row was swept stops on its next renewal). Test-first
   exception: characterization tests, no RED possible; teeth checked by a
   mutation (Sweeper ignoring the lease) that failed 3 of 4. GREEN:
-  `session_sweeper_test.exs` 4 passed.
+  `session_sweeper_test.exs` 4 passed. Commit 607979e.
+- T5: `Loop.run_tools/2` now answers every call after `ask_human` in the
+  same batch with `skipped_after_question` without running it (a batch
+  `ask_human` + `run_optimizer` + `present_proposal` used to spend on the
+  optimizer and could show a Proposal beside the question). RED: the new
+  `session_tools_test.exs` test saw the optimizer payload; GREEN:
+  `test/meal_planner_api/planning_agent/` 239 passed.
+- T5 review of `workspace.proposal` (it now has readers: `confirm/3`,
+  `approve_deviations/3`, `resume/2`, `current_proposal/1`): it is set only
+  by `present_proposal` (`Workspace.present/3`), cleared by
+  `Workspace.void_proposal/1` when a confirmation revalidation invalidates
+  it, and dropped with the Workspace whenever the session ends (confirm,
+  cancel, grace or idle expiry). Workspace edits keep the shown Proposal on
+  purpose: it stays what the Member sees, and confirmation revalidates it.
+  No change needed.
 
 ## Next step
 
-T5.
+Full suite, `mix precommit`, PR.

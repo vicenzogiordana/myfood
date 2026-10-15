@@ -137,26 +137,40 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
         append(acc, %{role: :tool_call, id: call.id, name: call.name, arguments: call.arguments})
       end)
 
-    Enum.reduce(calls, {:continue, turn, []}, fn call, {control, acc, fingerprints} ->
-      arguments = if is_map(call.arguments), do: call.arguments, else: %{}
-      {content, workspace, call_control} = Tools.execute(call.name, arguments, acc.tool_context)
-      Map.get(acc, :on_workspace, fn _workspace -> :ok end).(workspace)
+    Enum.reduce(calls, {:continue, turn, []}, fn
+      # The turn already ended on a question: the Member answers it before
+      # any later call of the batch may act (it could show a Proposal or
+      # spend on the optimizer). Each one still gets a result, as the
+      # provider requires.
+      call, {:end_turn, acc, fingerprints} ->
+        skipped = %{"error" => "skipped_after_question"}
+        acc = append(acc, %{role: :tool_result, id: call.id, name: call.name, content: skipped})
+        {:end_turn, acc, fingerprints}
 
-      # Progress only: the tool's name and outcome kind, never its output.
-      acc.emit.(%{
-        "type" => "progress",
-        "step" => "tool_finished",
-        "tool" => tool_label(call.name),
-        "outcome" => content["outcome"]
-      })
-
-      acc =
-        acc
-        |> Map.update!(:tool_context, &%{&1 | workspace: workspace})
-        |> append(%{role: :tool_result, id: call.id, name: call.name, content: content})
-
-      {merge_control(control, call_control), acc, fingerprint(call.name, content, fingerprints)}
+      call, {:continue, acc, fingerprints} ->
+        run_tool(call, acc, fingerprints)
     end)
+  end
+
+  defp run_tool(call, acc, fingerprints) do
+    arguments = if is_map(call.arguments), do: call.arguments, else: %{}
+    {content, workspace, call_control} = Tools.execute(call.name, arguments, acc.tool_context)
+    Map.get(acc, :on_workspace, fn _workspace -> :ok end).(workspace)
+
+    # Progress only: the tool's name and outcome kind, never its output.
+    acc.emit.(%{
+      "type" => "progress",
+      "step" => "tool_finished",
+      "tool" => tool_label(call.name),
+      "outcome" => content["outcome"]
+    })
+
+    acc =
+      acc
+      |> Map.update!(:tool_context, &%{&1 | workspace: workspace})
+      |> append(%{role: :tool_result, id: call.id, name: call.name, content: content})
+
+    {call_control, acc, fingerprint(call.name, content, fingerprints)}
   end
 
   # Verifiable progress is evidence: a complete or partial tool result. Its
@@ -172,9 +186,6 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
   defp tool_label(name) do
     if Enum.any?(Tools.definitions(), &(&1.name == name)), do: name, else: "unknown"
   end
-
-  defp merge_control(:end_turn, _), do: :end_turn
-  defp merge_control(_, control), do: control
 
   defp append(turn, message), do: %{turn | messages: turn.messages ++ [message]}
 
