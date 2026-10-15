@@ -292,4 +292,192 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
       assert_receive :solved
     end
   end
+
+  describe "limits and authorization to continue" do
+    defp fake_recipe(n),
+      do: %{
+        id: Ecto.UUID.generate(),
+        name: "Fictitious recipe #{n}",
+        slots: ["lunch"],
+        ingredients: [],
+        calories_per_serving: nil
+      }
+
+    defp search_forever(query),
+      do: fn _request -> {:tool_calls, [{"search_recipes", %{"query" => query}}]} end
+
+    test "iterations are counted per Planning Session, not per message", %{household: h} do
+      script = [
+        {:tool_calls, [{"search_recipes", %{"query" => "rice"}}]},
+        {:text, "First answer."},
+        {:tool_calls, [{"search_recipes", %{"query" => "bowl"}}]},
+        {:text, "never"}
+      ]
+
+      {session_id, pid} = start!(h, script, max_iterations: 3)
+
+      :ok = Session.send_message(pid, "Plan")
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}, 1_000
+
+      # Two of three iterations are used; the new message gets only one.
+      :ok = Session.send_message(pid, "Plan more")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{
+                        "type" => "limit_reached",
+                        "limit" => "iterations",
+                        "requires_authorization" => true
+                      }},
+                     1_000
+
+      assert model_requests() == 3
+    end
+
+    test "after a limit, nothing runs until the Member authorizes continuing", %{household: h} do
+      # Every search finds a new recipe, so only the iteration limit applies.
+      steps = FakeRecipeSearch.steps!(Enum.map(1..9, &{:ok, [fake_recipe(&1)]}))
+      script = Enum.map(1..9, &search_forever("query #{&1}"))
+
+      {session_id, pid} =
+        start!(h, script, max_iterations: 2, recipe_search: {FakeRecipeSearch, steps: steps})
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "iterations"}},
+                     1_000
+
+      assert model_requests() == 2
+
+      assert {:error, :authorization_required} = Session.send_message(pid, "Go on")
+      assert model_requests() == 0
+
+      assert :ok = Session.authorize_continuation(pid, h.owner.membership_id)
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "iterations"}},
+                     1_000
+
+      # The authorization granted exactly one more allowance of iterations.
+      assert model_requests() == 2
+    end
+
+    test "only the session's Member may authorize continuing", %{household: h} do
+      member = member!(h)
+      consent!(h, member)
+      attrs = session_attrs(h, member, {@monday, @tuesday})
+
+      {:ok, %{session_id: session_id, pid: pid}} =
+        Session.start(attrs,
+          model: {Scripted, script: [search_forever("a"), search_forever("b")], notify: self()},
+          subscriber: self(),
+          max_iterations: 1
+        )
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "limit_reached"}}, 1_000
+
+      assert {:error, :forbidden} = Session.authorize_continuation(pid, h.owner.membership_id)
+      assert :ok = Session.authorize_continuation(pid, member.membership_id)
+    end
+
+    test "authorizing without a reached limit is refused", %{household: h} do
+      {_session_id, pid} = start!(h, [])
+
+      assert {:error, :no_limit_reached} =
+               Session.authorize_continuation(pid, h.owner.membership_id)
+    end
+
+    test "three attempts without verifiable progress stop and ask the Member", %{household: h} do
+      # Every rewording finds the same recipe: new words, no new evidence.
+      script = Enum.map(["rice", "bowl", "Fictitious", "rice bowl", "rice"], &search_forever/1)
+      {session_id, pid} = start!(h, script)
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{
+                        "type" => "limit_reached",
+                        "limit" => "no_progress",
+                        "requires_authorization" => true
+                      }},
+                     1_000
+
+      # One attempt brought evidence, the next three did not.
+      assert model_requests() == 4
+      assert {:error, :authorization_required} = Session.send_message(pid, "Go on")
+
+      assert :ok = Session.authorize_continuation(pid, h.owner.membership_id)
+      assert_receive {:scripted_model_request, _}, 1_000
+    end
+
+    test "failed tool calls are not progress", %{household: h} do
+      steps = FakeRecipeSearch.steps!(List.duplicate(:fail, 20))
+      script = Enum.map(1..5, &search_forever("query #{&1}"))
+
+      {session_id, pid} =
+        start!(h, script, recipe_search: {FakeRecipeSearch, steps: steps})
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "no_progress"}},
+                     2_000
+
+      assert model_requests() == 3
+    end
+
+    test "a time limit also requires authorization to continue", %{household: h} do
+      slow = fn _request -> Process.sleep(1_000) && {:text, "late"} end
+
+      {session_id, pid} =
+        start!(h, [slow, {:text, "Continued."}],
+          call_policies: %{model: %{timeout_ms: 5_000}},
+          deadline_ms: 100
+        )
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{
+                        "type" => "limit_reached",
+                        "limit" => "time",
+                        "requires_authorization" => true
+                      }},
+                     1_000
+
+      assert {:error, :authorization_required} = Session.send_message(pid, "Again")
+      assert :ok = Session.authorize_continuation(pid, h.owner.membership_id)
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "assistant_message", "text" => "Continued."}},
+                     1_000
+    end
+
+    test "iterations of a turn killed at the deadline stay counted", %{household: h} do
+      slow = fn _request -> Process.sleep(1_000) && {:text, "late"} end
+
+      {session_id, pid} =
+        start!(h, [search_forever("rice"), slow, {:text, "never"}],
+          call_policies: %{model: %{timeout_ms: 5_000}},
+          deadline_ms: 200,
+          max_iterations: 2
+        )
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "time"}},
+                     1_000
+
+      assert :ok = Session.authorize_continuation(pid, h.owner.membership_id)
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "iterations"}},
+                     1_000
+
+      refute_received {:planning_agent_event, ^session_id, %{"text" => "never"}}
+    end
+  end
 end

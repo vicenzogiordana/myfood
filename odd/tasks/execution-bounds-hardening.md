@@ -41,20 +41,21 @@ report no outcome kind. Spec #93 and the #86 contract require all of that.
 
 ## Acceptance criteria
 
-- [ ] Each deadline and retry budget is enforced and observable in session tests
-- [ ] Non-retryable errors are not retried
-- [ ] Three no-progress attempts stop the run and ask the Member
-- [ ] Continuing past a limit requires explicit authorization
+- [x] Each deadline and retry budget is enforced and observable in session tests
+- [x] Non-retryable errors are not retried
+- [x] Three no-progress attempts stop the run and ask the Member
+- [x] Continuing past a limit requires explicit authorization
 - [ ] Outcome kinds are reported for tools and runs
 - [ ] Streamed events contain no raw tool output or model reasoning
 
 ## Tasks
 
-- [ ] T1 Per-call deadlines, retry budgets and error classification
+- [x] T1 Per-call deadlines, retry budgets and error classification
   (route: inline, single bounded worker; trigger evidence: worker owns the
-  whole issue). Commit: see T1 evidence below.
-- [ ] T2 Session-level allowance, no-progress detection and authorization
-  to continue. Commit: see T2 evidence below.
+  whole issue). Commit: e1a7ab7.
+- [x] T2 Session-level allowance, no-progress detection and authorization
+  to continue (route: inline). Commit: see the T2 commit on this branch
+  (feat(planning-agent): stop at session limits ...).
 - [ ] T3 Outcome kinds for tools and runs, event allowlist, missing is never
   zero. Commit: see T3 evidence below.
 
@@ -65,4 +66,9 @@ report no outcome kind. Spec #93 and the #86 contract require all of that.
 
 ## Progress and evidence
 
-Filled per task with the commit identity and observed checks.
+- T1 (e1a7ab7): RED observed for 8 session bounds tests, 5 OpenAI status
+  classification tests and the closed-port test; GREEN after wiring. Planning
+  agent suite 104 passed; full suite 1054/1055 with one failure in the legacy
+  `PlanningChannelTest` that passes on rerun (flaky, untouched code).
+- T2: RED observed for 8 allowance session tests; GREEN after wiring.
+  Planning agent and agent channel suites 115 passed.

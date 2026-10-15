@@ -108,6 +108,10 @@ defmodule MealPlannerApi.PlanningAgent.CallBounds do
           {:ok, _value, _state} = ok ->
             ok
 
+          # The attempt was cut by the global deadline, not by its own.
+          {:error, :timeout, state} when timeout_ms == remaining ->
+            {:error, :deadline_exceeded, state}
+
           {:error, reason, state} = error ->
             delay = backoff(policy, number)
 

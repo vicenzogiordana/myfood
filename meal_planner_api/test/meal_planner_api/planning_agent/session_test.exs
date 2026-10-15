@@ -236,7 +236,9 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
                       %{"type" => "limit_reached", "limit" => "time"}},
                      1_000
 
-      :ok = Session.send_message(pid, "Plan again")
+      # Continuing past the time limit needs the Member's authorization; the
+      # spend cap is never extended by it.
+      :ok = Session.authorize_continuation(pid, owner.membership_id)
 
       assert_receive {:planning_agent_event, ^session_id,
                       %{"type" => "agent_unavailable", "reason" => "spend_cap_reached"}},

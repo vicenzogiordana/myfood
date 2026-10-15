@@ -12,6 +12,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       Household returns `{:error, :session_already_active}`.
     * `record_consent/1` — the Member's explicit consent to external AI use.
     * `send_message/2` — a Member message; runs one agent turn.
+    * `authorize_continuation/2` — the session Member's explicit
+      authorization to continue after a limit was reached.
     * `cancel/2` — ends the session (session's Member or Household Owner).
     * `whereis/1` — the active session process of a Household, if any.
 
@@ -24,9 +26,22 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   ## Limits
 
-  Per request: `max_iterations` model calls (default 10) and a global
-  deadline (default 5 minutes) after which the running turn is killed and
-  its late results are discarded.
+    * `max_iterations` agent iterations (model calls, default 10) per
+      Planning Session; a new Member message does not reset them
+    * 3 consecutive attempts without verifiable progress
+      (see `MealPlannerApi.PlanningAgent.Allowance`)
+    * a global deadline per request (default 5 minutes) after which the
+      running turn is killed and its late results are discarded
+    * per-call deadlines and retry budgets
+      (see `MealPlannerApi.PlanningAgent.CallBounds`)
+
+  Reaching any of the first three stops the run and emits `limit_reached`
+  with `"requires_authorization" => true`. From then on `send_message/2`
+  refuses with `:authorization_required` until the session's Member calls
+  `authorize_continuation/2`, which extends only the reached limit and
+  resumes the request. Counters never reset on their own. The spend and
+  token caps of the model adapter are per Planning Session as well and are
+  never extended by an authorization.
   """
 
   use GenServer, restart: :temporary
@@ -34,7 +49,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   require Logger
 
   alias MealPlannerApi.Data.PlanningRepo
-  alias MealPlannerApi.PlanningAgent.{CallBounds, HouseholdContext, Loop}
+  alias MealPlannerApi.PlanningAgent.{Allowance, CallBounds, HouseholdContext, Loop}
 
   @registry MealPlannerApi.PlanningAgent.Registry
   @supervisor MealPlannerApi.PlanningAgent.SessionSupervisor
@@ -132,8 +147,25 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   refused with `:message_too_long` and never stored.
   """
   @spec send_message(GenServer.server(), String.t()) ::
-          :ok | {:error, :consent_required | :busy | :invalid_message | :message_too_long}
+          :ok
+          | {:error,
+             :consent_required
+             | :busy
+             | :invalid_message
+             | :message_too_long
+             | :authorization_required}
   def send_message(session, text), do: GenServer.call(session, {:send_message, text})
+
+  @doc """
+  The session Member's explicit authorization to continue after a limit was
+  reached: extends that limit only and resumes the request. Refuses with
+  `:forbidden` for anyone else (the Owner included) and with
+  `:no_limit_reached` when no limit is pending.
+  """
+  @spec authorize_continuation(GenServer.server(), Ecto.UUID.t()) ::
+          :ok | {:error, :forbidden | :no_limit_reached}
+  def authorize_continuation(session, membership_id),
+    do: GenServer.call(session, {:authorize_continuation, membership_id})
 
   @doc "The largest Member message, in bytes, a session accepts."
   @spec max_message_bytes() :: pos_integer()
@@ -197,7 +229,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       subscribers: %{},
       task: nil,
       deadline_ref: nil,
-      max_iterations: args.max_iterations,
+      allowance: Allowance.new(args.max_iterations),
+      pending_limit: nil,
       deadline_ms: args.deadline_ms,
       call_policies: CallBounds.policies(args.call_policies),
       recipe_search: args.recipe_search,
@@ -234,8 +267,26 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       state.task != nil ->
         {:reply, {:error, :busy}, state}
 
+      state.pending_limit != nil ->
+        {:reply, {:error, :authorization_required}, state}
+
       true ->
         state = %{state | messages: state.messages ++ [%{role: :user, content: text}]}
+        {:reply, :ok, start_turn(state)}
+    end
+  end
+
+  def handle_call({:authorize_continuation, membership_id}, _from, state) do
+    cond do
+      membership_id != state.membership_id ->
+        {:reply, {:error, :forbidden}, state}
+
+      state.pending_limit == nil ->
+        {:reply, {:error, :no_limit_reached}, state}
+
+      true ->
+        allowance = Allowance.authorize(state.allowance, state.pending_limit)
+        state = %{state | allowance: allowance, pending_limit: nil}
         {:reply, :ok, start_turn(state)}
     end
   end
@@ -285,6 +336,12 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   def handle_info({:model_state, _stale_ref, _model_state}, state), do: {:noreply, state}
 
+  # Allowance checkpoints keep counted iterations of a turn that is killed.
+  def handle_info({:allowance, ref, allowance}, %{task: %Task{ref: ref}} = state),
+    do: {:noreply, %{state | allowance: allowance}}
+
+  def handle_info({:allowance, _stale_ref, _allowance}, state), do: {:noreply, state}
+
   def handle_info({ref, result}, %{task: %Task{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
 
@@ -292,17 +349,16 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       clear_turn(state)
       | model_state: result.model_state,
         messages: result.messages,
-        workspace: result.workspace
+        workspace: result.workspace,
+        allowance: result.allowance
     }
 
-    if result.outcome == :completed, do: emit(state, %{"type" => "turn_completed"})
-    {:noreply, state}
+    {:noreply, finish_run(state, result.outcome)}
   end
 
   def handle_info({:deadline, ref}, %{task: %Task{ref: ref}} = state) do
     state = stop_turn(state)
-    emit(state, %{"type" => "limit_reached", "limit" => "time"})
-    {:noreply, state}
+    {:noreply, finish_run(state, {:limit_reached, "time"})}
   end
 
   def handle_info({:deadline, _stale}, state), do: {:noreply, state}
@@ -399,7 +455,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       model_state: state.model_state,
       instructions: state.instructions,
       messages: state.messages,
-      max_iterations: state.max_iterations,
+      allowance: state.allowance,
       tool_context: %{
         account_id: state.account_id,
         session_id: state.session_id,
@@ -417,6 +473,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         ref = receive(do: ({^holder, ref} -> ref))
         emit_fun = fn event -> send(session, {:agent_event, ref, event}) end
         checkpoint = fn model_state -> send(session, {:model_state, ref, seal(model_state)}) end
+        report_allowance = fn allowance -> send(session, {:allowance, ref, allowance}) end
 
         bounds =
           CallBounds.new(
@@ -440,6 +497,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
           |> Map.put(:emit, emit_fun)
           |> Map.put(:bounds, bounds)
           |> Map.put(:checkpoint, checkpoint)
+          |> Map.put(:report_allowance, report_allowance)
           |> Loop.run()
 
         %{result | model_state: seal(result.model_state)}
@@ -455,17 +513,42 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   defp stop_turn(%{task: task} = state) do
     _ = Task.shutdown(task, :brutal_kill)
     # The task is dead, so every checkpoint it sent is already queued: adopt
-    # the latest one so the killed turn's paid usage stays counted.
-    clear_turn(%{state | model_state: latest_checkpoint(task.ref, state.model_state)})
+    # the latest ones so the killed turn's paid usage and iterations stay
+    # counted.
+    clear_turn(%{
+      state
+      | model_state: latest_checkpoint(:model_state, task.ref, state.model_state),
+        allowance: latest_checkpoint(:allowance, task.ref, state.allowance)
+    })
   end
 
-  defp latest_checkpoint(ref, model_state) do
+  defp latest_checkpoint(tag, ref, value) do
     receive do
-      {:model_state, ^ref, newer} -> latest_checkpoint(ref, newer)
+      {^tag, ^ref, newer} -> latest_checkpoint(tag, ref, newer)
     after
-      0 -> model_state
+      0 -> value
     end
   end
+
+  # The run's terminal events come from its outcome. A reached limit stops
+  # execution until the Member authorizes continuing.
+  defp finish_run(state, :completed) do
+    emit(state, %{"type" => "turn_completed"})
+    state
+  end
+
+  defp finish_run(state, {:limit_reached, limit}) do
+    emit(state, %{"type" => "limit_reached", "limit" => limit, "requires_authorization" => true})
+    %{state | pending_limit: limit}
+  end
+
+  defp finish_run(state, {:failed, reason}) do
+    emit(state, %{"type" => "agent_unavailable", "reason" => reason_string(reason)})
+    state
+  end
+
+  defp reason_string(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_string(_reason), do: "provider_error"
 
   defp clear_turn(state) do
     if state.deadline_ref, do: Process.cancel_timer(state.deadline_ref)
