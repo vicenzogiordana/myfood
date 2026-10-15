@@ -192,6 +192,38 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     assert Process.alive?(socket.channel_pid)
   end
 
+  test "after a limit the Member authorizes continuing through the channel", %{household: h} do
+    search = {:tool_calls, [{"search_recipes", %{"query" => "soup"}}]}
+    configure_agent(List.duplicate(search, 4) ++ [{:text, "Continued."}])
+
+    socket = join!(h, h.owner)
+    ref = push(socket, "start_session", @range)
+    assert_reply(ref, :ok, _)
+    ref = push(socket, "give_consent", %{})
+    assert_reply(ref, :ok, _)
+
+    ref = push(socket, "authorize_continuation", %{})
+    assert_reply(ref, :error, %{reason: "no_limit_reached"})
+
+    ref = push(socket, "send_message", %{"text" => "Plan dinner"})
+    assert_reply(ref, :ok, _)
+
+    assert_push("agent_event", %{
+      "type" => "limit_reached",
+      "limit" => "no_progress",
+      "requires_authorization" => true
+    })
+
+    ref = push(socket, "send_message", %{"text" => "Go on"})
+    assert_reply(ref, :error, %{reason: "authorization_required"})
+
+    ref = push(socket, "authorize_continuation", %{})
+    assert_reply(ref, :ok, _)
+
+    assert_push("agent_event", %{"type" => "assistant_message", "text" => "Continued."})
+    cancel!(socket)
+  end
+
   test "after consent a message produces a validated Proposal event", %{household: h} do
     socket = join!(h, h.owner)
     ref = push(socket, "start_session", @range)
@@ -211,6 +243,55 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     })
 
     assert_push("agent_event", %{"type" => "turn_completed"})
+    cancel!(socket)
+  end
+
+  test "the Member saves a dictated recipe through the channel", %{household: h} do
+    leek = ingredient!("Fictitious dictated leek")
+
+    configure_agent([
+      {:tool_calls,
+       [
+         {"create_recipe",
+          %{
+            "name" => "Fictitious family leek pie",
+            "servings" => 4,
+            "slots" => ["dinner"],
+            "origin" => "user_created",
+            "ingredients" => [%{"ingredient" => leek.name, "quantity" => 300, "unit" => "g"}],
+            "steps" => ["Bake."]
+          }}
+       ]},
+      {:text, "Here is your recipe; press save to keep it."}
+    ])
+
+    socket = join!(h, h.owner)
+
+    ref = push(socket, "save_recipe", %{"recipe_id" => Ecto.UUID.generate()})
+    assert_reply(ref, :error, %{reason: "no_active_session"})
+
+    ref = push(socket, "start_session", @range)
+    assert_reply(ref, :ok, _)
+    ref = push(socket, "give_consent", %{})
+    assert_reply(ref, :ok, _)
+    ref = push(socket, "send_message", %{"text" => "My family leek pie: ..."})
+    assert_reply(ref, :ok, _)
+
+    assert_push("agent_event", %{
+      "type" => "recipe_draft",
+      "origin" => "user_created",
+      "recipe_id" => recipe_id
+    })
+
+    assert_push("agent_event", %{"type" => "turn_completed"})
+
+    ref = push(socket, "save_recipe", %{})
+    assert_reply(ref, :error, %{reason: "invalid_payload"})
+
+    ref = push(socket, "save_recipe", %{"recipe_id" => recipe_id})
+    assert_reply(ref, :ok, %{recipe_id: ^recipe_id, origin: "user_created"})
+    assert_push("agent_event", %{"type" => "recipe_saved", "recipe_id" => ^recipe_id})
+
     cancel!(socket)
   end
 
