@@ -11,6 +11,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       must pass `present_proposal` like any optimizer plan
     * `run_optimizer` — the existing optimizer over Restriction-safe candidates;
       failures are typed errors, never a fallback plan
+    * `lookup_prices` — stored prices with provenance; missing prices are
+      reported, never invented
     * `present_proposal` — always validates the latest optimizer plan; only a
       valid plan is shown to the Member, otherwise violations go back
     * `ask_human` — one question; ends the turn
@@ -20,7 +22,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   in model arguments is ignored. Unknown tools are rejected by code.
   """
 
-  alias MealPlannerApi.PlanningAgent.{MealPlan, ProposalValidator, RecipeSearch}
+  alias MealPlannerApi.PlanningAgent.{MealPlan, Prices, ProposalValidator, RecipeSearch}
 
   @type context :: %{
           required(:account_id) => Ecto.UUID.t(),
@@ -34,6 +36,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   @type control :: :continue | :end_turn
 
   @optimizer_candidates_per_slot 50
+  @max_price_lookups 50
   @wide_bounds %{"min" => 0, "max" => 1_000_000}
 
   @doc "Tool definitions offered to the model."
@@ -103,6 +106,27 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
           "properties" => %{
             "exclude_recipe_ids" => %{"type" => "array", "items" => %{"type" => "string"}}
           },
+          "additionalProperties" => false
+        }
+      },
+      %{
+        name: "lookup_prices",
+        description:
+          "Read stored prices of the Products covering the named ingredients, with product, " <>
+            "presentation, supermarket, currency and observation date. Ingredients without a " <>
+            "stored price are listed as missing; never assume a price for them.",
+        parameters: %{
+          "type" => "object",
+          "properties" => %{
+            "ingredients" => %{
+              "type" => "array",
+              "items" => %{"type" => "string"},
+              "minItems" => 1,
+              "maxItems" => @max_price_lookups,
+              "description" => "Ingredient names, as returned by search_recipes"
+            }
+          },
+          "required" => ["ingredients"],
           "additionalProperties" => false
         }
       },
@@ -246,6 +270,29 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
       {:invalid, violations} ->
         {%{"status" => "invalid", "violations" => violations}, ctx.workspace, :continue}
+    end
+  end
+
+  def execute("lookup_prices", args, ctx) do
+    emit(ctx, %{"type" => "progress", "step" => "looking_up_prices"})
+
+    case args |> Map.get("ingredients") |> List.wrap() |> Enum.filter(&is_binary/1) do
+      [] ->
+        {%{"error" => "ingredients_required"}, ctx.workspace, :continue}
+
+      names ->
+        %{prices: prices, missing: missing} =
+          names |> Enum.take(@max_price_lookups) |> Prices.lookup_names()
+
+        result = %{
+          "prices" => Enum.map(prices, &Prices.offer_data/1),
+          "missing" =>
+            Enum.map(missing, fn m ->
+              %{"ingredient" => m.ingredient, "reason" => Atom.to_string(m.reason)}
+            end)
+        }
+
+        {result, ctx.workspace, :continue}
     end
   end
 
