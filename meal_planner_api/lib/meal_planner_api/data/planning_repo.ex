@@ -328,6 +328,61 @@ defmodule MealPlannerApi.Data.PlanningRepo do
   end
 
   @doc """
+  Inserts an `:active` session only when the Household has no active
+  Planning Session at all (spec #93: one Planning Session per Household).
+
+  A transaction-scoped advisory lock keyed on the Household serialises
+  concurrent starts, so two Members racing cannot both win. The legacy
+  overlap EXCLUDE constraint still applies underneath.
+  """
+  @spec create_household_session(Ecto.UUID.t(), map()) ::
+          {:ok, PlanningSession.t()} | {:error, :session_already_active | term()}
+  def create_household_session(account_id, attrs) when is_map(attrs) do
+    Repo.transaction(fn ->
+      Repo.query!("SELECT pg_advisory_xact_lock(hashtext($1))", [
+        "planning_session:" <> account_id
+      ])
+
+      active? =
+        Repo.exists?(
+          from(s in PlanningSession, where: s.account_id == ^account_id and s.status == :active)
+        )
+
+      if active? do
+        Repo.rollback(:session_already_active)
+      else
+        case create_session(account_id, attrs) do
+          {:ok, session} -> session
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end
+    end)
+  end
+
+  @doc "Extends the lease of an active session so the sweeper does not expire it."
+  @spec renew_lease(Ecto.UUID.t(), Ecto.UUID.t(), DateTime.t()) :: :ok | {:error, :not_active}
+  def renew_lease(account_id, session_id, %DateTime{} = until) do
+    from(s in PlanningSession,
+      where: s.id == ^session_id and s.account_id == ^account_id and s.status == :active
+    )
+    |> Repo.update_all(set: [lease_expires_at: until, updated_at: DateTime.utc_now()])
+    |> case do
+      {1, _} -> :ok
+      {0, _} -> {:error, :not_active}
+    end
+  end
+
+  @doc "Whether any meal is already scheduled for the Household within the range."
+  @spec range_planned?(Ecto.UUID.t(), Date.t(), Date.t()) :: boolean()
+  def range_planned?(account_id, %Date{} = from_date, %Date{} = to_date) do
+    Repo.exists?(
+      from(m in ScheduledMeal,
+        where: m.account_id == ^account_id and m.date >= ^from_date and m.date <= ^to_date
+      )
+    )
+  end
+
+  @doc """
   Transitions `:active` → `:cancelled` on the named session.
 
   Authorization:
