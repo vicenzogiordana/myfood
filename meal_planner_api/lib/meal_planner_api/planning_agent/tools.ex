@@ -495,7 +495,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     emit(ctx, %{"type" => "progress", "step" => "looking_up_prices"})
 
     names = args |> Map.get("ingredients") |> List.wrap() |> Enum.filter(&is_binary/1)
-    product = string_arg(args, "product")
+    # A blank Product query is absent, so it cannot bypass the guard below.
+    product = trimmed_arg(args, "product")
 
     case {names, product} do
       {[], nil} ->
@@ -509,7 +510,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             now: now(ctx),
             refresh: &scrape(ctx, &1),
             refresh_memo: Map.get(ctx.workspace, :price_refreshes, %{}),
-            brand: string_arg(args, "brand"),
+            brand: trimmed_arg(args, "brand"),
             product: product
           )
 
@@ -882,6 +883,13 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     case Map.get(args, key) do
       value when is_binary(value) and value != "" -> value
       _ -> nil
+    end
+  end
+
+  defp trimmed_arg(args, key) do
+    case string_arg(args, key) do
+      nil -> nil
+      value -> if String.trim(value) == "", do: nil, else: value
     end
   end
 

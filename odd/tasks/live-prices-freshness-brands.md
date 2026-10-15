@@ -248,6 +248,19 @@ PR #126 was split into four chained PRs to main (strategy
   passed, 25 skipped; `mix precommit` (compile with warnings as errors,
   format, full suite) 1297 passed, 25 skipped. The shared test database
   needed `mix ecto.migrate` for the new table first.
+- S3 review round (Jorge el Curioso on PR #134), route: inline, one
+  confirmed low-severity finding in `Tools`:
+  - A whitespace-only `product` passed `string_arg/2`, so `lookup_prices`
+    skipped the `ingredients_required` guard and `Prices.normalize/1`
+    trimmed it to nil: an empty result with no error. RED: `lookup_prices`
+    with `%{"product" => "  "}` and with `%{"ingredients" => [],
+    "product" => "\n"}` returned empty prices instead of the error (2
+    failures). GREEN: `run("lookup_prices")` reads `product` and `brand`
+    through a new `trimmed_arg/2` that maps blank to nil; `string_arg/2`
+    and `Prices.lookup` are unchanged.
+  - Focused `PurchaseToolsTest` 16 passed.
+    `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1299 passed,
+    25 skipped; `mix precommit` 1299 passed, 25 skipped.
 
 ## Next step
 
