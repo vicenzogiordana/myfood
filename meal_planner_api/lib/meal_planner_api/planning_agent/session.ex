@@ -30,6 +30,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       exact displayed Proposal (see "Approvals").
     * `approve_absence_exception/3` — the session Member's Absence Exception
       for an absent Member (see "Approvals").
+    * `resume/2` — the session Member's return: rejoins the Planning
+      Session within its grace (see "Absence grace").
     * `whereis/1` — the active session process of a Household, if any.
 
   ## Events
@@ -122,13 +124,30 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   The model state is created once at `start/2` and kept across Member
   messages, so the spend and token caps are never reset between requests.
+
+  ## Absence grace
+
+  The Member is absent while no subscriber is connected. Leaving or
+  disconnecting keeps the Planning Session, its Workspace, the last
+  Proposal and the Household's slot for a grace of `:grace_ms` (default
+  15 minutes): the session's lease is fixed to the grace deadline. While
+  the Member is absent no new model call starts (a call already in flight
+  may finish, then the run ends with `run_finished` outcome `interrupted`)
+  and nothing is saved: `confirm/3` and `save_recipe/3` refuse with
+  `:member_absent`. `resume/2` within the grace cancels the expiry; it is
+  refused with `:forbidden` for anyone but the session's Member, and for a
+  Member no longer active in the Household. When the grace expires the
+  running work is cancelled, the Workspace discarded and the slot released.
   """
 
   use GenServer, restart: :temporary
 
   require Logger
 
+  import Ecto.Query, only: [from: 2]
+
   alias MealPlannerApi.Data.PlanningRepo
+  alias MealPlannerApi.Persistence.Accounts.AccountMembership
 
   alias MealPlannerApi.PlanningAgent.{
     Allowance,
@@ -152,7 +171,10 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   @default_max_iterations 10
   @default_deadline_ms 5 * 60 * 1000
-  @lease_seconds 120
+  @default_grace_ms 15 * 60 * 1000
+  # While the Member is present the lease covers at least this long, so the
+  # sweeper never expires a session that is still renewing it.
+  @min_lease_ms 120_000
   @lease_renew_ms 30_000
   @max_range_days 31
   # Bounds what a Member message adds to the stored transcript, which is
@@ -209,7 +231,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
          :ok <- validate_slots(attrs.slots),
          :ok <- ensure_unplanned(attrs.account_id, from_date, to_date),
          {:ok, model_state} <- model.init(model_opts),
-         {:ok, row} <- lock(attrs, from_date, to_date) do
+         grace_ms = Keyword.get(opts, :grace_ms, @default_grace_ms),
+         {:ok, row} <- lock(attrs, from_date, to_date, grace_ms) do
       init_args = %{
         attrs: attrs,
         session_id: row.id,
@@ -222,7 +245,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         call_policies: Keyword.get(opts, :call_policies, %{}),
         recipe_search: Keyword.get(opts, :recipe_search),
         confirmation_store: Keyword.get_lazy(opts, :confirmation_store, &Confirmation.store/0),
-        confirmation_opts: Keyword.take(opts, [:reconcile_ms, :poll_ms])
+        confirmation_opts: Keyword.take(opts, [:reconcile_ms, :poll_ms]),
+        grace_ms: grace_ms
       }
 
       case DynamicSupervisor.start_child(@supervisor, {__MODULE__, init_args}) do
@@ -425,6 +449,54 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     end
   end
 
+  @doc """
+  The session Member's return to the Household's Planning Session within its
+  grace: `attrs` names the Member (`account_id`, `user_id`, `membership_id`)
+  and `opts[:subscriber]` the pid that receives events from now on. Replies
+  with the session and its last valid Proposal, so a reconnecting client
+  reads authoritative state. Refuses with:
+
+    * `:forbidden` — not the session's Member, or no longer an active
+      Member of the Household
+    * `:no_session` — no Planning Session to return to (it ended, or its
+      grace expired)
+  """
+  @spec resume(map(), keyword()) ::
+          {:ok, %{session_id: Ecto.UUID.t(), pid: pid(), proposal: map() | nil}}
+          | {:error, :forbidden | :no_session | term()}
+  def resume(attrs, opts \\ []) do
+    subscriber = Keyword.get(opts, :subscriber)
+
+    with :ok <- ensure_active_member(attrs) do
+      case whereis(attrs.account_id) do
+        nil ->
+          {:error, :no_session}
+
+        pid ->
+          try do
+            GenServer.call(pid, {:resume, attrs.membership_id, subscriber})
+          catch
+            :exit, {reason, _} when reason in [:noproc, :normal] -> {:error, :no_session}
+          end
+      end
+    end
+  end
+
+  # Revoked access blocks the return: the Member must still hold an active
+  # membership of this Household.
+  defp ensure_active_member(%{account_id: account_id, user_id: user_id, membership_id: id}) do
+    active? =
+      Repo.exists?(
+        from(m in AccountMembership,
+          where:
+            m.id == ^id and m.account_id == ^account_id and m.user_id == ^user_id and
+              m.status == :active
+        )
+      )
+
+    if active?, do: :ok, else: {:error, :forbidden}
+  end
+
   @doc "Returns the session id and owning membership of a running session."
   @spec info(GenServer.server()) :: %{session_id: Ecto.UUID.t(), membership_id: Ecto.UUID.t()}
   def info(session), do: GenServer.call(session, :info)
@@ -481,10 +553,15 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       confirmation_opts: args.confirmation_opts,
       # Read by the running turn without a message round trip: no retry
       # starts while no Member is connected.
-      presence: :atomics.new(1, [])
+      presence: :atomics.new(1, []),
+      grace_ms: args.grace_ms,
+      grace_ref: nil,
+      grace_deadline: nil
     }
 
-    state = if args.subscriber, do: add_subscriber(state, args.subscriber), else: state
+    state =
+      if args.subscriber, do: add_subscriber(state, args.subscriber), else: go_absent(state)
+
     schedule_lease_renewal()
     {:ok, state}
   end
@@ -537,6 +614,16 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   end
 
   def handle_call({:subscribe, pid}, _from, state), do: {:reply, :ok, add_subscriber(state, pid)}
+
+  def handle_call({:resume, membership_id, _subscriber}, _from, state)
+      when membership_id != state.membership_id,
+      do: {:reply, {:error, :forbidden}, state}
+
+  def handle_call({:resume, _membership_id, subscriber}, _from, state) do
+    state = if is_pid(subscriber), do: add_subscriber(state, subscriber), else: state
+    reply = %{session_id: state.session_id, pid: self(), proposal: state.workspace.proposal}
+    {:reply, {:ok, reply}, state}
+  end
 
   def handle_call({:stop, %{membership_id: actor}}, _from, state) do
     if actor == state.membership_id do
@@ -600,6 +687,10 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   def handle_call({:save_recipe, _membership_id, _recipe_id}, _from, %{task: %Task{}} = state),
     do: {:reply, {:error, :busy}, state}
+
+  def handle_call({:save_recipe, _membership_id, _recipe_id}, _from, %{subscribers: subs} = state)
+      when map_size(subs) == 0,
+      do: {:reply, {:error, :member_absent}, state}
 
   def handle_call({:save_recipe, _membership_id, recipe_id}, _from, state) do
     case Map.fetch(state.workspace.recipe_drafts, recipe_id) do
@@ -760,21 +851,26 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
     case Map.pop(state.subscribers, pid) do
       {^ref, subscribers} when map_size(subscribers) == 0 ->
-        :atomics.put(state.presence, 1, 0)
-
-        # Grace and recovery belong to a later slice of #93: for now the
-        # Planning Session ends when its last subscriber is gone.
-        {:stop, :normal, %{state | subscribers: subscribers}}
+        {:noreply, go_absent(%{state | subscribers: subscribers})}
 
       {_, subscribers} ->
         {:noreply, %{state | subscribers: subscribers}}
     end
   end
 
-  def handle_info(:renew_lease, state) do
-    until = DateTime.add(DateTime.utc_now(), @lease_seconds, :second)
+  # The Member did not return within the grace: the running work is
+  # cancelled, the Workspace discarded and the Household's slot released.
+  def handle_info({:grace_expired, ref}, %{grace_ref: ref} = state) do
+    state = cancel_run(state)
+    _ = PlanningRepo.expire_session(state.account_id, state.session_id)
+    emit(state, %{"type" => "session_ended"})
+    {:stop, :normal, %{state | session_id: nil, grace_ref: nil}}
+  end
 
-    case PlanningRepo.renew_lease(state.account_id, state.session_id, until) do
+  def handle_info({:grace_expired, _stale}, state), do: {:noreply, state}
+
+  def handle_info(:renew_lease, state) do
+    case renew_lease(state) do
       :ok ->
         schedule_lease_renewal()
         {:noreply, state}
@@ -838,6 +934,10 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   defp confirm_current(%{task: %Task{}} = state, _proposal_id),
     do: {:reply, {:error, :busy}, state}
+
+  defp confirm_current(%{subscribers: subscribers} = state, _proposal_id)
+       when map_size(subscribers) == 0,
+       do: {:reply, {:error, :member_absent}, state}
 
   defp confirm_current(%{workspace: %{proposal: %{"proposal_id" => id} = shown}} = state, id) do
     commit(state, shown)
@@ -1081,6 +1181,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       instructions: state.instructions,
       messages: state.messages,
       allowance: state.allowance,
+      present?: fn -> :atomics.get(presence, 1) == 1 end,
       tool_context: %{
         account_id: state.account_id,
         session_id: state.session_id,
@@ -1266,6 +1367,12 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     %{state | pending_limit: limit}
   end
 
+  # The Member left while the run was working: no new model call started.
+  defp finish_run(state, {:interrupted, _reason}) do
+    emit(state, %{"type" => "run_finished", "outcome" => "interrupted"})
+    state
+  end
+
   defp finish_run(state, {:failed, reason}) do
     emit(state, %{"type" => "agent_unavailable", "reason" => reason_string(reason)})
     emit(state, %{"type" => "run_finished", "outcome" => "failure"})
@@ -1296,9 +1403,42 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       state
     else
       :atomics.put(state.presence, 1, 1)
-      %{state | subscribers: Map.put(state.subscribers, pid, Process.monitor(pid))}
+      state = %{state | subscribers: Map.put(state.subscribers, pid, Process.monitor(pid))}
+      return(state)
     end
   end
+
+  # The Member is back within the grace: the expiry is cancelled and the
+  # lease covers the next grace again.
+  defp return(%{grace_ref: nil} = state), do: state
+
+  defp return(state) do
+    Process.cancel_timer(state.grace_ref)
+    state = %{state | grace_ref: nil, grace_deadline: nil}
+    _ = renew_lease(state)
+    state
+  end
+
+  # The last subscriber is gone: the grace starts and the lease is fixed to
+  # its deadline, so the slot is held exactly that long, also across a
+  # restart.
+  defp go_absent(state) do
+    :atomics.put(state.presence, 1, 0)
+    deadline = DateTime.add(DateTime.utc_now(), state.grace_ms, :millisecond)
+    ref = make_ref()
+    Process.send_after(self(), {:grace_expired, ref}, state.grace_ms)
+    state = %{state | grace_ref: ref, grace_deadline: deadline}
+    _ = renew_lease(state)
+    state
+  end
+
+  defp renew_lease(state) do
+    until = state.grace_deadline || present_lease(state.grace_ms)
+    PlanningRepo.renew_lease(state.account_id, state.session_id, until)
+  end
+
+  defp present_lease(grace_ms),
+    do: DateTime.add(DateTime.utc_now(), max(grace_ms, @min_lease_ms), :millisecond)
 
   defp emit(state, event) do
     case sanitize(event) do
@@ -1375,13 +1515,13 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       else: :ok
   end
 
-  defp lock(attrs, from_date, to_date) do
+  defp lock(attrs, from_date, to_date, grace_ms) do
     PlanningRepo.create_household_session(attrs.account_id, %{
       range_from: from_date,
       range_to: to_date,
       lock_owner_user_id: attrs.user_id,
       lock_owner_membership_id: attrs.membership_id,
-      lease_expires_at: DateTime.add(DateTime.utc_now(), @lease_seconds, :second)
+      lease_expires_at: present_lease(grace_ms)
     })
   end
 
