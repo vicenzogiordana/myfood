@@ -15,6 +15,11 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
     * `:optimizer_timeout` — no answer within the deadline (inconclusive)
     * `:optimizer_crashed` — the subprocess exited before answering, or
       was already gone when a request was written
+    * `:optimizer_busy` — the global cap on concurrent optimizer
+      subprocesses of every Planning Session was full, so no subprocess
+      started (issue #118)
+    * `:optimizer_unconfigured` — the concurrency cap is not configured; it
+      is a human decision, so no subprocess ever starts without it
     * the optimizer's own error reason (for example `:infeasible`) with its
       details
 
@@ -24,6 +29,11 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
     * `:port_runner` — module with `open_port/1` (default from
       `:optimizer_port_runner` config, else `OptimizerPortRunner`)
     * `:python_executable`, `:script_path` — forwarded to the port runner
+    * `:max_concurrent_runs` — global cap on optimizer subprocesses running
+      at once (default from `config :meal_planner_api,
+      MealPlannerApi.PlanningAgent.Optimizer.Port`, unset by default)
+    * `:concurrency_limiter` — the `MealPlannerApi.PlanningAgent.ConcurrencyLimiter`
+      holding the slots (default: the planning agent's)
     * `:on_os_process` — 1-arity function told `{:started, os_pid}` as soon
       as the subprocess exists and `{:closed, os_pid}` once this call no
       longer owns it, so an owner (the Planning Session) can force-kill a
@@ -35,7 +45,7 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
   require Logger
 
   alias MealPlannerApi.Optimization.OptimizerPortRunner
-  alias MealPlannerApi.PlanningAgent.OsProcess
+  alias MealPlannerApi.PlanningAgent.{ConcurrencyLimiter, OsProcess}
 
   @default_timeout_ms 120_000
   @known_errors ~w(infeasible unbounded abnormal solver_unavailable invalid_days invalid_slots
@@ -45,6 +55,27 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
 
   @impl true
   def solve(payload, opts \\ []) do
+    limiter = Keyword.get(opts, :concurrency_limiter, ConcurrencyLimiter)
+
+    cap =
+      Keyword.get_lazy(opts, :max_concurrent_runs, fn ->
+        :meal_planner_api
+        |> Application.get_env(__MODULE__, [])
+        |> Keyword.get(:max_concurrent_runs)
+      end)
+
+    # The slot is held by the calling process, so a caller killed mid-solve
+    # frees it as well.
+    case ConcurrencyLimiter.run(limiter, :optimizer_runs, cap, fn ->
+           run_subprocess(payload, opts)
+         end) do
+      {:ok, result} -> result
+      {:error, :at_capacity} -> {:error, :optimizer_busy, %{}}
+      {:error, :unconfigured} -> {:error, :optimizer_unconfigured, %{}}
+    end
+  end
+
+  defp run_subprocess(payload, opts) do
     timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
     deadline = System.monotonic_time(:millisecond) + timeout_ms
 

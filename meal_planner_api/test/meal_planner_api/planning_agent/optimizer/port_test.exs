@@ -9,6 +9,7 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.PortTest do
 
   @moduletag :capture_log
 
+  alias MealPlannerApi.PlanningAgent.ConcurrencyLimiter
   alias MealPlannerApi.PlanningAgent.Optimizer.Port, as: PortOptimizer
 
   @script Path.expand("../../../support/fixtures/fake_optimizer.py", __DIR__)
@@ -29,7 +30,11 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.PortTest do
   defp opts(extra \\ []),
     do:
       Keyword.merge(
-        [python_executable: System.find_executable("python3"), script_path: @script],
+        [
+          python_executable: System.find_executable("python3"),
+          script_path: @script,
+          max_concurrent_runs: 100
+        ],
         extra
       )
 
@@ -40,6 +45,77 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.PortTest do
              %{"day" => "2026-11-02", "slot" => "lunch", "recipe_id" => "r-lunch"},
              %{"day" => "2026-11-02", "slot" => "dinner", "recipe_id" => "r-dinner"}
            ]
+  end
+
+  describe "global concurrency cap" do
+    setup do
+      name = :"limiter_#{System.unique_integer([:positive])}"
+      start_supervised!({ConcurrencyLimiter, name: name})
+      %{limiter: name}
+    end
+
+    test "a run over the cap is refused before any subprocess starts", %{limiter: limiter} do
+      test = self()
+
+      holder =
+        spawn(fn ->
+          ConcurrencyLimiter.run(limiter, :optimizer_runs, 1, fn ->
+            send(test, :holding)
+            Process.sleep(:infinity)
+          end)
+        end)
+
+      assert_receive :holding
+
+      notify = fn event -> send(test, {:os_process, event}) end
+
+      assert {:error, :optimizer_busy, %{}} =
+               PortOptimizer.solve(
+                 payload("solve"),
+                 opts(max_concurrent_runs: 1, concurrency_limiter: limiter, on_os_process: notify)
+               )
+
+      refute_received {:os_process, _}
+
+      Process.exit(holder, :kill)
+      wait_until_free(limiter)
+
+      assert {:ok, %{"meals" => [_, _]}} =
+               PortOptimizer.solve(
+                 payload("solve"),
+                 opts(max_concurrent_runs: 1, concurrency_limiter: limiter)
+               )
+    end
+
+    test "every finished run frees its slot, failures included", %{limiter: limiter} do
+      capped = opts(max_concurrent_runs: 1, concurrency_limiter: limiter)
+
+      assert {:error, :optimizer_crashed, _} = PortOptimizer.solve(payload("crash"), capped)
+      assert {:error, :infeasible, _} = PortOptimizer.solve(payload("error"), capped)
+      assert {:ok, _} = PortOptimizer.solve(payload("solve"), capped)
+      assert ConcurrencyLimiter.in_use(limiter, :optimizer_runs) == 0
+    end
+
+    test "an unset or invalid cap refuses as unconfigured without starting a subprocess" do
+      for cap <- [nil, 0, "2"] do
+        assert {:error, :optimizer_unconfigured, %{}} =
+                 PortOptimizer.solve(payload("solve"), opts(max_concurrent_runs: cap))
+      end
+    end
+
+    test "the cap defaults to the application configuration" do
+      assert Application.get_env(:meal_planner_api, PortOptimizer)[:max_concurrent_runs] == nil
+
+      assert {:error, :optimizer_unconfigured, %{}} =
+               PortOptimizer.solve(payload("solve"), Keyword.delete(opts(), :max_concurrent_runs))
+    end
+  end
+
+  defp wait_until_free(limiter) do
+    if ConcurrencyLimiter.in_use(limiter, :optimizer_runs) > 0 do
+      Process.sleep(5)
+      wait_until_free(limiter)
+    end
   end
 
   test "skips non-protocol output lines" do
