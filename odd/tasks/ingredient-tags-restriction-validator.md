@@ -38,20 +38,20 @@ budget/coverage/variety checks of the unified validator (later slices of #93).
 
 ## Tasks
 
-- [ ] T1 Ingredient Tags storage: tag, suggest, accept, reviewed tags per recipe (route: inline; single writer, no delegation in bounded worker)
-- [ ] T2 Restriction -> forbidden tag mapping (vegetarian, vegan, pescatarian, celiac, omnivore, allergy)
-- [ ] T3 Restriction validator with Absence Exceptions and generic conflicts
-- [ ] T4 Docs: CONTEXT.md note on forbidden-tag mapping
+- [x] T1 Ingredient Tags storage: tag, suggest, accept, reviewed tags per recipe (route: inline; single writer, no delegation in bounded worker)
+- [x] T2 Restriction -> forbidden tag mapping (vegetarian, vegan, pescatarian, celiac, omnivore, allergy)
+- [x] T3 Restriction validator with Absence Exceptions and generic conflicts
+- [x] T4 Docs: CONTEXT.md note on forbidden-tag mapping
 
 ## Acceptance criteria
 
-- [ ] Ingredients can be tagged, and tag suggestions are stored as unreviewed until a reviewer accepts them
-- [ ] Diet-to-forbidden-tag mapping covers vegetarian, vegan, pescatarian and celiac; omnivore forbids nothing
-- [ ] Validator rejects a meal whose recipe ingredients carry a tag forbidden by any Member's Restriction
-- [ ] An Absence Exception lifts exactly its Restriction for exactly its meals and nothing else
-- [ ] Disliked ingredients are never treated as violations
-- [ ] Conflict messages never reveal which Member holds the Restriction
-- [ ] Tests exercise the validator through its public interface with fictitious fixtures
+- [x] Ingredients can be tagged, and tag suggestions are stored as unreviewed until a reviewer accepts them
+- [x] Diet-to-forbidden-tag mapping covers vegetarian, vegan, pescatarian and celiac; omnivore forbids nothing
+- [x] Validator rejects a meal whose recipe ingredients carry a tag forbidden by any Member's Restriction
+- [x] An Absence Exception lifts exactly its Restriction for exactly its meals and nothing else
+- [x] Disliked ingredients are never treated as violations
+- [x] Conflict messages never reveal which Member holds the Restriction
+- [x] Tests exercise the validator through its public interface with fictitious fixtures
 
 ## Checks
 
@@ -60,4 +60,13 @@ budget/coverage/variety checks of the unified validator (later slices of #93).
 
 ## Progress / evidence
 
-See commit log of the branch; filled in on completion.
+All tasks (T1-T4) landed in commit `7ddacf6` (feat(planning): add ingredient tags and restriction validator). Route: inline in a bounded worker. The unit is ~775 authored lines, mostly tests; kept as one coherent behavior.
+
+- RED: 17/17 new tests failed with undefined `Catalog.tag_ingredient/2`, `Restrictions`, `RestrictionValidator`.
+- GREEN: `mix test test/meal_planner_api/planning/restriction_validator_test.exs` -> 17 passed.
+- `mix precommit` (partition 94 DB) -> exit 0, 909 passed, 20 skipped.
+- Note: `config/test.exs` does not append `MIX_TEST_PARTITION` to the DB name; isolation used `MYFOOD_TEST_DATABASE=meal_planner_api_test94` (created and migrated manually, no `test` alias creates it).
+
+Follow-ups (out of scope): storing Member allergen Restrictions, loading Restrictions from profiles, the reviewed classification pass over the catalog.
+
+Next step: Jorge el Curioso review of the PR.
