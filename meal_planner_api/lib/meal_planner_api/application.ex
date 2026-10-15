@@ -22,6 +22,9 @@ defmodule MealPlannerApi.Application do
       # Periodic sweeper for stale `PlanningSession` leases. Default tick is
       # 30_000 ms; override via `:planning_session_sweeper_interval` config.
       MealPlannerApi.Generation.PlanningSession.Sweeper,
+      # Planning agent (spec #93): one supervised Session process per active
+      # Planning Session, plus the task supervisor running agent turns.
+      MealPlannerApi.PlanningAgent.Supervisor,
       MealPlannerApi.CartSweeper,
       # Start a worker by calling: MealPlannerApi.Worker.start_link(arg)
       # {MealPlannerApi.Worker, arg},

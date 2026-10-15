@@ -65,6 +65,25 @@ if config_env() != :test do
       |> Kernel.in(["true", "1", "yes", "on"])
 end
 
+# Planning agent OpenAI adapter. Every cap and price stays nil unless set, and
+# the adapter refuses paid execution while any of them is missing.
+if config_env() != :test do
+  optional_integer = fn name ->
+    case System.get_env(name) do
+      nil -> nil
+      "" -> nil
+      value -> String.to_integer(String.trim(value))
+    end
+  end
+
+  config :meal_planner_api, MealPlannerApi.PlanningAgent.Model.OpenAIResponses,
+    api_key: System.get_env("OPENAI_API_KEY"),
+    spend_cap_micros: optional_integer.("PLANNING_AGENT_SPEND_CAP_MICROS"),
+    token_cap: optional_integer.("PLANNING_AGENT_TOKEN_CAP"),
+    input_price_micros_per_mtok: optional_integer.("OPENAI_INPUT_PRICE_MICROS_PER_MTOK"),
+    output_price_micros_per_mtok: optional_integer.("OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK")
+end
+
 config :meal_planner_api,
   gemini_model: System.get_env("GEMINI_MODEL", "gemini-2.5-flash-lite"),
   gemini_base_url: System.get_env("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"),

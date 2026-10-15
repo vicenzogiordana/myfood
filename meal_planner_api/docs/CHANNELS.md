@@ -191,6 +191,52 @@ Real-time meal planning workflow coordination.
 
 ---
 
+### planning_agent:* — Culinary Agent Planning Session (spec #93)
+
+Topic: `planning_agent:<household_id>` (the current membership's `account_id`). Lives
+beside the legacy `planning:*` flow; it is a thin adapter over
+`MealPlannerApi.PlanningAgent.Session`. The Household always comes from the
+membership, never from a payload.
+
+One Planning Session per Household: while one is active, any other Member's
+`start_session` is refused with `session_already_active` (also when its range overlaps
+the active one; `overlapping_range` is only the store's last-resort guard). The session ends when it is
+cancelled or when its Member's socket leaves (grace and recovery come later).
+
+#### Incoming Events
+
+| Event | Payload | Reply |
+|-------|---------|-------|
+| `start_session` | `{range_from, range_to, slots?}` — ISO dates, at most 31 days of unplanned days; `slots` from `breakfast`, `lunch`, `snack`, `dinner` (default `lunch`, `dinner`) | `{session_id}` or `{reason}`: `session_already_active`, `range_already_planned`, `overlapping_range`, `invalid_range`, `invalid_slots`, `subscription_required`, `spend_caps_unconfigured`, `pricing_unconfigured`, `provider_unconfigured`, `internal_error` |
+| `give_consent` | `{}` — explicit consent before the first external AI use | `ok` |
+| `send_message` | `{text}` — a non-blank string of at most 4,000 bytes | `ok`, or `{reason}`: `invalid_message` (missing, non-string or blank `text`), `message_too_long`, `consent_required`, `busy`, `no_active_session`, `internal_error` |
+| `cancel_session` | `{}` — the session's Member or the Household Owner | `{status: "cancelled"}` or `{reason}`: `forbidden`, `no_active_session` |
+| any other event | — | `{reason}`: `invalid_payload` |
+
+#### Outgoing Events
+
+Every event is pushed as `agent_event` with `type` and `session_id`:
+
+| `type` | Payload | Meaning |
+|--------|---------|---------|
+| `progress` | `{step}` — `thinking`, `searching_recipes`, `running_optimizer`, `validating_proposal` | The agent is working (no raw reasoning or tool output) |
+| `assistant_message` | `{text}` | Agent reply |
+| `question` | `{text}` | The agent asks one question; the turn ended |
+| `proposal` | `{proposal_id, status, meals: [{date, slot, recipe_id, name}]}` | A Proposal validated by code; `status` is code-owned (`valid`) |
+| `optimizer_failed` | `{reason}` | The optimizer failed; no fallback plan is produced |
+| `consent_required` | `{}` | Consent must be given before the agent can call the AI provider |
+| `limit_reached` | `{limit}` — `iterations` or `time` | The request hit 10 iterations or 5 minutes |
+| `agent_unavailable` | `{reason}` | The AI provider cannot be used now (including `spend_cap_reached`) |
+| `turn_completed` | `{}` | The agent finished answering |
+| `session_cancelled` / `session_ended` | `{}` | The Planning Session is over |
+
+Paid execution requires `OPENAI_API_KEY`, `PLANNING_AGENT_SPEND_CAP_MICROS`,
+`PLANNING_AGENT_TOKEN_CAP`, `OPENAI_INPUT_PRICE_MICROS_PER_MTOK` and
+`OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK`; without them `start_session` replies
+`spend_caps_unconfigured` (or `pricing_unconfigured` / `provider_unconfigured`).
+
+---
+
 ### cooking:* — Cooking Mode
 
 Real-time cooking guidance and timer synchronization.
