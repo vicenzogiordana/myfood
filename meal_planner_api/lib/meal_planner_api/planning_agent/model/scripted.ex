@@ -14,6 +14,9 @@ defmodule MealPlannerApi.PlanningAgent.Model.Scripted do
     * `:notify` — pid that receives `{:scripted_model_request, request}` for
       every call, so tests can assert on what the model was sent
 
+  A consumed step is reported through the request's optional `:checkpoint`
+  callback before it runs, so a step interrupted by Stop is not replayed.
+
   When the script is exhausted `respond/2` returns `{:error, :script_exhausted}`.
   """
 
@@ -34,7 +37,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.Scripted do
     notify(state, request)
     state = %{state | script: rest, calls: state.calls + 1}
     # Like a dispatched paid call, the consumed step is reported before it
-    # resolves, so a step killed at its deadline is not replayed.
+    # resolves, so a step killed at its deadline or by Stop is not replayed.
     checkpoint(request, state)
 
     case resolve(step, request) do

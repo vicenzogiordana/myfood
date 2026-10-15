@@ -66,7 +66,8 @@ if config_env() != :test do
 end
 
 # Planning agent OpenAI adapter. Every cap and price stays nil unless set, and
-# the adapter refuses paid execution while any of them is missing.
+# the adapter refuses paid execution while any of them is missing. The spend
+# cap (micro-USD) and token cap apply per Planning Session.
 if config_env() != :test do
   optional_integer = fn name ->
     case System.get_env(name) do

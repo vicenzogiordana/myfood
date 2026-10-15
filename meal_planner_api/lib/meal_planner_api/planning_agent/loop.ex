@@ -13,7 +13,10 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
   The optional `checkpoint` callback receives every model state the turn
   produces (including the adapter's mid-call reservations), and the optional
   `report_allowance` callback every allowance change, so the owner keeps
-  paid usage and counted iterations even when it kills the turn.
+  paid usage and counted iterations even when it kills the turn. The
+  optional `on_workspace` callback receives the Workspace after every tool
+  call, so a Stop keeps what deterministic tools already produced
+  (including a presented Proposal).
   """
 
   alias MealPlannerApi.PlanningAgent.{Allowance, CallBounds, Tools}
@@ -28,7 +31,8 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
           required(:emit) => (map() -> any()),
           optional(:checkpoint) => (term() -> any()),
           optional(:report_allowance) => (Allowance.t() -> any()),
-          optional(:bounds) => CallBounds.t()
+          optional(:bounds) => CallBounds.t(),
+          optional(:on_workspace) => (map() -> any())
         }
 
   @type outcome :: :completed | {:limit_reached, String.t()} | {:failed, term()}
@@ -123,6 +127,7 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
     Enum.reduce(calls, {:continue, turn, []}, fn call, {control, acc, fingerprints} ->
       arguments = if is_map(call.arguments), do: call.arguments, else: %{}
       {content, workspace, call_control} = Tools.execute(call.name, arguments, acc.tool_context)
+      Map.get(acc, :on_workspace, fn _workspace -> :ok end).(workspace)
 
       # Progress only: the tool's name and outcome kind, never its output.
       acc.emit.(%{
