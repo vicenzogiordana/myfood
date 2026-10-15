@@ -37,6 +37,9 @@ defmodule MealPlannerApi.Persistence.Planning.PlanningSession do
     field(:lease_expires_at, :utc_datetime_usec)
     field(:started_at, :utc_datetime_usec)
     field(:terminal_at, :utc_datetime_usec)
+    # Owned by an agent Planning Session (spec #93), which holds the whole
+    # Household; legacy rows only lock their range.
+    field(:agent, :boolean, default: false)
 
     belongs_to(:account, MealPlannerApi.Persistence.Accounts.Account)
     belongs_to(:lock_owner_user, MealPlannerApi.Persistence.Accounts.User)
@@ -77,7 +80,8 @@ defmodule MealPlannerApi.Persistence.Planning.PlanningSession do
       :lock_owner_user_id,
       :lock_owner_membership_id,
       :lease_expires_at,
-      :started_at
+      :started_at,
+      :agent
     ])
     |> put_default_status(:active)
     |> validate_required([
