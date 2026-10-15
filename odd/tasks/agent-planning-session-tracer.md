@@ -73,6 +73,7 @@ with its tests at once; commits stay reviewable work units).
 | T5 | Phoenix channel adapter, config, docs | inline | done (`f35cb9b`) |
 | R1 | Jorge round 1 (PR #114): ledger survives killed turns, unknown usage settles at the reservation, refused cancel still expires | inline | done (see Review round 1) |
 | R2 | Jorge round 2 (PR #114): bound Member message size; stop claiming code enforces budget and Nutrition Goal | inline | done (see Review round 2) |
+| R3 | Jorge round 3 (PR #114): reap the optimizer when the turn is brutally killed; drop the draft on failed re-runs; 14-digit consent migration version | inline | done (see Review round 3) |
 
 ## Checks
 
@@ -133,15 +134,37 @@ Checks: focused files 21/25 RED then 25/25 GREEN;
 `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix test` 980 passed,
 20 skipped; `mix precommit` exit 0, 980 passed, 20 skipped.
 
+## Review round 3 (Jorge el Curioso, PR #114)
+
+Confirmed findings and fixes:
+
+1. TR-1: a brutally killed turn orphaned the Python optimizer (medium). `Optimizer.Port.solve/2`
+   now starts a reaper process that monitors the caller and runs `kill -9` on the OS pid if
+   the caller dies before the call finishes (`:brutal_kill` skips the `after` block). RED:
+   new `port_test.exs` case "a brutally killed caller does not orphan the optimizer process"
+   (hang fixture, `Task.shutdown(:brutal_kill)`, `kill -0` still succeeded) 6/7; GREEN 7/7.
+2. CD-3: `present_proposal` could show a stale draft after a failed `run_optimizer`
+   (low). The `no_candidates` and `search_failed` branches now reset `draft: nil`, like the
+   optimizer-error branch. RED: new `session_tools_test.exs` case got a `valid` proposal
+   instead of `no_plan_to_present` (14/15); GREEN 15/15.
+3. CD-1: the consent migration had a 15-digit version that sorted after every future
+   14-digit migration (low). Renamed to `20261015120000_create_ai_processing_consents.exs`,
+   contents unchanged. No runnable RED (ordering only); structural check: test DB dropped,
+   created and migrated from scratch (33 migrated), `mix ecto.migrations` lists it `up`
+   after `20261014120000_create_ingredient_tags`. The merged #95 15-digit migration is a
+   pre-existing follow-up, untouched.
+
+Checks: `MIX_TEST_PARTITION=96 MYFOOD_TEST_DATABASE=meal_planner_api_test96 mix test`
+982 passed, 20 skipped; `mix precommit` exit 0, 982 passed, 20 skipped.
+
 ## Known limits handed to later slices of #93
 
 - Purchase calculation and budget deviations (`requires_approval`), Nutrition Goal in the
   optimizer, variety, pins and relaxation: candidates enter with zero cost and wide bounds.
 - Grace and recovery: the session ends when its last subscriber leaves.
-- Stop, and force-killing a running optimizer when a turn is cancelled (the deadline kills the
-  turn task; the subprocess then receives EOF).
+- Stop (a cancelled or timed-out turn now force-kills its optimizer subprocess).
 - Numeric spend and token caps and prices: unset by default (human decision).
 
 ## Next step
 
-Re-run the Jorge review gate on PR #114 after review round 2.
+Re-run the Jorge review gate on PR #114 after review round 3.

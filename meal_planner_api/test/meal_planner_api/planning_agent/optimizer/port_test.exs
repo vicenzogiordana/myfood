@@ -65,6 +65,57 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.PortTest do
              PortOptimizer.solve(payload("crash"), opts())
   end
 
+  defmodule ObservedRunner do
+    @moduledoc false
+    # Opens the real port and reports its OS pid to the observing test.
+    def open_port(opts) do
+      {:ok, port} = MealPlannerApi.Optimization.OptimizerPortRunner.open_port(opts)
+      {:os_pid, os_pid} = Port.info(port, :os_pid)
+      send(:persistent_term.get({__MODULE__, :observer}), {:optimizer_os_pid, os_pid})
+      {:ok, port}
+    end
+  end
+
+  defp os_alive?(os_pid) do
+    {_, status} = System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
+    status == 0
+  end
+
+  defp eventually_dead?(os_pid, attempts \\ 40) do
+    cond do
+      not os_alive?(os_pid) ->
+        true
+
+      attempts == 0 ->
+        false
+
+      true ->
+        Process.sleep(50)
+        eventually_dead?(os_pid, attempts - 1)
+    end
+  end
+
+  test "a brutally killed caller does not orphan the optimizer process" do
+    :persistent_term.put({ObservedRunner, :observer}, self())
+    on_exit(fn -> :persistent_term.erase({ObservedRunner, :observer}) end)
+
+    task =
+      Task.async(fn ->
+        PortOptimizer.solve(
+          payload("hang"),
+          opts(port_runner: ObservedRunner, timeout_ms: 30_000)
+        )
+      end)
+
+    assert_receive {:optimizer_os_pid, os_pid}, 5_000
+    Process.sleep(200)
+    assert os_alive?(os_pid)
+
+    Task.shutdown(task, :brutal_kill)
+
+    assert eventually_dead?(os_pid)
+  end
+
   test "a missing executable is reported as unavailable" do
     assert {:error, :optimizer_unavailable, %{}} =
              PortOptimizer.solve(payload("solve"), opts(python_executable: "/nonexistent/python"))

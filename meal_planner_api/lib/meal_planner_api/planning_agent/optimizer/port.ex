@@ -6,7 +6,8 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
   named singleton optimizer server").
 
   Each call owns its subprocess: handshake, one solve request, then the port
-  is closed. On timeout the OS process is force-killed. Every failure is a
+  is closed. On timeout, or when the calling process dies first (for example
+  a `:brutal_kill` cancel), the OS process is force-killed. Every failure is a
   typed error and there is no greedy fallback:
 
     * `:optimizer_unavailable` — the subprocess could not start or never
@@ -43,10 +44,13 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
 
     case open(opts) do
       {:ok, port} ->
+        reaper = start_reaper(port)
+
         try do
           run(port, payload, deadline)
         after
           close(port)
+          send(reaper, :done)
         end
 
       :error ->
@@ -141,11 +145,40 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
       :error
   end
 
-  defp kill(port) do
+  # A caller killed with `:brutal_kill` skips the `after` block, and closing
+  # the port only closes stdin, which a busy solver does not read. The reaper
+  # monitors the caller and force-kills the OS process if the caller dies
+  # before the call finishes.
+  defp start_reaper(port) do
+    owner = self()
+    os_pid = os_pid(port)
+
+    spawn(fn ->
+      ref = Process.monitor(owner)
+
+      receive do
+        :done -> :ok
+        {:DOWN, ^ref, :process, _, _} -> kill_os_pid(os_pid)
+      end
+    end)
+  end
+
+  defp kill(port), do: port |> os_pid() |> kill_os_pid()
+
+  defp os_pid(port) do
     case Port.info(port, :os_pid) do
-      {:os_pid, os_pid} -> System.cmd("kill", ["-9", Integer.to_string(os_pid)])
-      _ -> :ok
+      {:os_pid, os_pid} -> os_pid
+      _ -> nil
     end
+  rescue
+    _ -> nil
+  end
+
+  defp kill_os_pid(nil), do: :ok
+
+  defp kill_os_pid(os_pid) do
+    System.cmd("kill", ["-9", Integer.to_string(os_pid)], stderr_to_stdout: true)
+    :ok
   rescue
     _ -> :ok
   end

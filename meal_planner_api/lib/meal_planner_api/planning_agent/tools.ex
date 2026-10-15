@@ -129,11 +129,13 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       {%{"status" => "ok", "meals" => Enum.map(meals, &meal_data(&1, names))}, workspace,
        :continue}
     else
+      # Every failed run discards the earlier draft so present_proposal cannot
+      # show a plan the agent just asked to change.
       {:error, :no_candidates, slot} ->
-        {%{"error" => "no_candidates", "slot" => slot}, ctx.workspace, :continue}
+        {%{"error" => "no_candidates", "slot" => slot}, %{ctx.workspace | draft: nil}, :continue}
 
       {:error, :search_failed} ->
-        {%{"error" => "search_failed"}, ctx.workspace, :continue}
+        {%{"error" => "search_failed"}, %{ctx.workspace | draft: nil}, :continue}
 
       {:error, reason, details} ->
         reason = reason_string(reason)

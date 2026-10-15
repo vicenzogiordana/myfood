@@ -269,6 +269,32 @@ defmodule MealPlannerApi.PlanningAgent.SessionToolsTest do
       assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
       refute_received {:planning_agent_event, ^session_id, %{"type" => "proposal"}}
     end
+
+    test "a failed re-run discards the earlier draft so it cannot be presented",
+         %{household: h, recipes: r} do
+      exclude_all = Enum.map(Map.values(r), & &1.id)
+
+      {session_id, pid} =
+        start!(h, [
+          {:tool_calls, [{"run_optimizer", %{}}]},
+          {:tool_calls, [{"run_optimizer", %{"exclude_recipe_ids" => exclude_all}}]},
+          {:tool_calls, [{"present_proposal", %{}}]},
+          {:text, "No plan."}
+        ])
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:scripted_model_request, _}
+      assert_receive {:scripted_model_request, _}
+      assert_receive {:scripted_model_request, third}
+      assert %{"error" => "no_candidates"} = last_tool_result(third)
+
+      assert_receive {:scripted_model_request, fourth}
+      assert %{"error" => "no_plan_to_present"} = last_tool_result(fourth)
+
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "proposal"}}
+    end
   end
 
   describe "ask_human" do
