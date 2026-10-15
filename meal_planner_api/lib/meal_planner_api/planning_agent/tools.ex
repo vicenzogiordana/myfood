@@ -7,6 +7,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       excluded by code
     * `get_plan` — the Household's Planned Meals by date or range (planned,
       not eaten)
+    * `reuse_plan` — a past stretch of the Meal Plan as the new draft; it
+      must pass `present_proposal` like any optimizer plan
     * `run_optimizer` — the existing optimizer over Restriction-safe candidates;
       failures are typed errors, never a fallback plan
     * `present_proposal` — always validates the latest optimizer plan; only a
@@ -70,6 +72,24 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             }
           },
           "required" => ["from"],
+          "additionalProperties" => false
+        }
+      },
+      %{
+        name: "reuse_plan",
+        description:
+          "Use the Planned Meals of a past stretch, starting at source_from and as long as " <>
+            "the Planning Range, as the new draft (e.g. repeat the week before last). Only " <>
+            "day, slot and recipe are copied; call present_proposal to validate and show it.",
+        parameters: %{
+          "type" => "object",
+          "properties" => %{
+            "source_from" => %{
+              "type" => "string",
+              "description" => "First past date to copy, YYYY-MM-DD, before the Planning Range"
+            }
+          },
+          "required" => ["source_from"],
           "additionalProperties" => false
         }
       },
@@ -140,6 +160,22 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
       {:error, :invalid_range} ->
         {%{"error" => "invalid_range"}, ctx.workspace, :continue}
+    end
+  end
+
+  def execute("reuse_plan", args, ctx) do
+    emit(ctx, %{"type" => "progress", "step" => "reading_plan"})
+
+    case MealPlan.reuse(ctx.account_id, Map.get(args, "source_from"), ctx.range, ctx.slots) do
+      {:ok, meals} ->
+        draft = Enum.map(meals, &Map.take(&1, [:date, :slot, :recipe_id]))
+
+        {%{"status" => "ok", "meals" => Enum.map(meals, &planned_meal_data/1)},
+         %{ctx.workspace | draft: draft}, :continue}
+
+      # A failed reuse discards the earlier draft, as a failed optimizer run does.
+      {:error, reason} ->
+        {%{"error" => Atom.to_string(reason)}, %{ctx.workspace | draft: nil}, :continue}
     end
   end
 

@@ -1,8 +1,9 @@
 defmodule MealPlannerApi.PlanningAgent.MealPlan do
   @moduledoc """
   Read-only view of a Household's Meal Plan for the planning agent (spec #93,
-  #105): the confirmed Planned Meals of a date range. It reports what was
-  planned, never whether a meal was eaten.
+  #105): the confirmed Planned Meals of a date range, and their reuse as a
+  draft for a new Planning Range. It reports what was planned, never whether
+  a meal was eaten.
 
   Every read is scoped to the given Household, which callers take from the
   Planning Session, never from model arguments.
@@ -76,6 +77,49 @@ defmodule MealPlannerApi.PlanningAgent.MealPlan do
       }
     end)
     |> Enum.sort_by(&{Date.to_gregorian_days(&1.date), Map.fetch!(@slot_order, &1.slot)})
+  end
+
+  @doc """
+  Maps the Planned Meals of a past window onto the Planning Range for reuse
+  ("repeat the week before last").
+
+  The window starts at the ISO date `source_from`, spans as many days as the
+  Planning Range and must end before it starts. Each meal moves by the same
+  day offset; only the session's `slots` are kept, as are only meals whose
+  recipe still exists. The result carries day, slot and recipe only: portions,
+  recipe versions, Deviation Approvals and Absence Exceptions of the past plan
+  are never inherited, so the draft must pass full validation again.
+  """
+  @spec reuse(Ecto.UUID.t(), term(), {Date.t(), Date.t()}, [String.t()]) ::
+          {:ok, [planned_meal()]} | {:error, :invalid_source | :no_planned_meals}
+  def reuse(account_id, source_from, {range_from, range_to}, slots) do
+    with {:ok, source_date} <- parse_source(source_from),
+         source_to = Date.add(source_date, Date.diff(range_to, range_from)),
+         :ok <- ensure_before(source_to, range_from) do
+      offset = Date.diff(range_from, source_date)
+
+      account_id
+      |> list({source_date, source_to})
+      |> Enum.filter(&(&1.slot in slots and is_binary(&1.recipe_id)))
+      |> Enum.map(&%{&1 | date: Date.add(&1.date, offset)})
+      |> case do
+        [] -> {:error, :no_planned_meals}
+        meals -> {:ok, meals}
+      end
+    end
+  end
+
+  defp parse_source(source_from) when is_binary(source_from) do
+    case Date.from_iso8601(source_from) do
+      {:ok, date} -> {:ok, date}
+      {:error, _} -> {:error, :invalid_source}
+    end
+  end
+
+  defp parse_source(_source_from), do: {:error, :invalid_source}
+
+  defp ensure_before(source_to, range_from) do
+    if Date.compare(source_to, range_from) == :lt, do: :ok, else: {:error, :invalid_source}
   end
 
   defp snapshot_name(%{"name" => name}) when is_binary(name), do: name

@@ -147,4 +147,139 @@ defmodule MealPlannerApi.PlanningAgent.SessionMealPlanTest do
       assert Enum.map(results, & &1["error"]) == List.duplicate("invalid_range", 4)
     end
   end
+
+  describe "reuse_plan" do
+    test "reusing the week before last produces a fresh Proposal that passes full validation",
+         %{household: h, recipes: r} do
+      plan_week!(h, r)
+
+      {session_id, [reused, presented]} =
+        run_tools(h, [
+          {"reuse_plan", %{"source_from" => "2026-11-02"}},
+          {"present_proposal", %{}}
+        ])
+
+      expected = [
+        {"2026-11-16", "lunch", r.rice_salad.id},
+        {"2026-11-16", "dinner", r.lentil_stew.id},
+        {"2026-11-17", "lunch", r.lentil_stew.id},
+        {"2026-11-17", "dinner", r.chicken_rice.id}
+      ]
+
+      assert reused["status"] == "ok"
+      assert Enum.map(reused["meals"], &{&1["date"], &1["slot"], &1["recipe_id"]}) == expected
+      assert presented["status"] == "valid"
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "proposal", "status" => "valid", "meals" => meals} = proposal}
+
+      assert proposal["proposal_id"] == presented["proposal_id"]
+      assert Enum.map(meals, &{&1["date"], &1["slot"], &1["recipe_id"]}) == expected
+      refute_received {:optimizer_payload, _}
+    end
+
+    test "only the session's slots are reused and dates follow the Planning Range",
+         %{household: h, recipes: r} do
+      plan_week!(h, r)
+      scheduled_meal!(h, @past_monday, :breakfast, r.rice_salad)
+
+      {_session_id, [reused]} =
+        run_tools(h, [{"reuse_plan", %{"source_from" => "2026-11-02"}}])
+
+      assert Enum.map(reused["meals"], &{&1["date"], &1["slot"]}) == [
+               {"2026-11-16", "lunch"},
+               {"2026-11-16", "dinner"},
+               {"2026-11-17", "lunch"},
+               {"2026-11-17", "dinner"}
+             ]
+    end
+
+    test "a reused meal that breaks a current Restriction is not shown, so no past " <>
+           "Absence Exception carries over",
+         %{household: h, recipes: r} do
+      # The past Tuesday dinner held meat, e.g. while the vegetarian Member was
+      # away under an Absence Exception. Reuse must revalidate it today.
+      plan_week!(h, r)
+      diet!(member!(h), :vegetarian)
+
+      {session_id, [_reused, presented]} =
+        run_tools(h, [
+          {"reuse_plan", %{"source_from" => "2026-11-02"}},
+          {"present_proposal", %{}}
+        ])
+
+      assert presented["status"] == "invalid"
+
+      assert [%{"type" => "restriction_conflict", "date" => "2026-11-17", "slot" => "dinner"}] =
+               presented["violations"]
+
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "proposal"}}
+    end
+
+    test "gaps of the past week are reported by the validator, never filled silently",
+         %{household: h, recipes: r} do
+      scheduled_meal!(h, @past_monday, :lunch, r.rice_salad)
+      scheduled_meal!(h, @past_monday, :dinner, r.lentil_stew)
+
+      {_session_id, [reused, presented]} =
+        run_tools(h, [
+          {"reuse_plan", %{"source_from" => "2026-11-02"}},
+          {"present_proposal", %{}}
+        ])
+
+      assert length(reused["meals"]) == 2
+      assert presented["status"] == "invalid"
+
+      assert Enum.map(presented["violations"], &{&1["type"], &1["date"], &1["slot"]}) == [
+               {"missing_meal", "2026-11-17", "lunch"},
+               {"missing_meal", "2026-11-17", "dinner"}
+             ]
+    end
+
+    test "carries over only day, slot and recipe: no portions, approvals or exceptions",
+         %{household: h, recipes: r} do
+      plan_week!(h, r)
+
+      {session_id, [reused, _presented]} =
+        run_tools(h, [
+          {"reuse_plan", %{"source_from" => "2026-11-02"}},
+          {"present_proposal", %{}}
+        ])
+
+      assert Enum.all?(reused["meals"], &(Map.keys(&1) == ~w(date name recipe_id slot)))
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "proposal", "meals" => meals} = proposal}
+
+      assert Map.keys(proposal) == ~w(meals proposal_id status type)
+      assert Enum.all?(meals, &(Map.keys(&1) == ~w(date name recipe_id slot)))
+    end
+
+    test "never reuses another Household's meals", %{household: h, recipes: r} do
+      other = household!("Other Fictitious Household")
+      plan_week!(other, r)
+
+      {_session_id, [reused, presented]} =
+        run_tools(h, [
+          {"reuse_plan", %{"source_from" => "2026-11-02", "account_id" => other.account_id}},
+          {"present_proposal", %{}}
+        ])
+
+      assert reused == %{"error" => "no_planned_meals"}
+      assert presented == %{"error" => "no_plan_to_present"}
+    end
+
+    test "rejects a source that is malformed or not entirely before the Planning Range",
+         %{household: h} do
+      {_session_id, results} =
+        run_tools(h, [
+          {"reuse_plan", %{}},
+          {"reuse_plan", %{"source_from" => "last week"}},
+          {"reuse_plan", %{"source_from" => "2026-11-16"}},
+          {"reuse_plan", %{"source_from" => "2026-11-15"}}
+        ])
+
+      assert Enum.map(results, & &1["error"]) == List.duplicate("invalid_source", 4)
+    end
+  end
 end

@@ -41,17 +41,17 @@ inherited.
 
 | ID | Task | Route | Status |
 |----|------|-------|--------|
-| T1 | `get_plan` tool + tests (date, range, household isolation, invalid input) | inline (2 files: tool + test) | pending |
-| T2 | `reuse_plan` tool + tests (fresh valid Proposal, current Restriction revalidation, no inherited approvals/exceptions, slots/dates mapped) | inline | pending |
+| T1 | `get_plan` tool + tests (date, range, household isolation, invalid input) | inline (new read module + tool clause; mechanical) | done (`add6af9`) |
+| T2 | `reuse_plan` tool + tests (fresh valid Proposal, current Restriction revalidation, no inherited approvals/exceptions, slots/dates mapped) | inline | done (commit after `add6af9`, see git log) |
 
-- [ ] T1 get_plan
-- [ ] T2 reuse_plan
+- [x] T1 get_plan — RED 0/4, GREEN 4/4 (`add6af9`)
+- [x] T2 reuse_plan — RED 4/11, GREEN 11/11
 
 ## Acceptance criteria
 
-- [ ] get_plan returns Planned Meals for a date or range of the session's Household only
-- [ ] Reusing a past week produces a fresh Proposal that passes full validation
-- [ ] No past approval or exception carries over
+- [x] get_plan returns Planned Meals for a date or range of the session's Household only
+- [x] Reusing a past week produces a fresh Proposal that passes full validation
+- [x] No past approval or exception carries over
 
 ## Checks
 
@@ -61,3 +61,14 @@ inherited.
 ## Progress
 
 - Baseline: `mix test test/meal_planner_api/planning_agent` 59 passed.
+- T1: `get_plan` via `PlanningAgent.MealPlan.list/2`, bounded to 92 days, `invalid_range` otherwise.
+- T2: `reuse_plan` via `PlanningAgent.MealPlan.reuse/4`; draft holds date/slot/recipe only;
+  current Restrictions and coverage revalidated by `present_proposal`.
+- Agent tests: `mix test test/meal_planner_api/planning_agent` 70 passed.
+- Note: the relayed user remark about a per-session OpenAI spend cap concerns #118;
+  the existing `SpendLedger` already lives in the session's model state (per Planning
+  Session). No change made here.
+
+## Next step
+
+Open PR (Closes #105, Part of #93).
