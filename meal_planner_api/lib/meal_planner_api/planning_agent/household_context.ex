@@ -15,6 +15,8 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
       becomes `{:allergy, tag}` for each reviewed allergen tag it carries
 
   Disliked ingredients are Preferences: disclosed to the model, never enforced.
+  Brand Preferences come from household settings and are disclosed to the
+  model the same way (see `MealPlannerApi.BrandPreferences`).
   """
 
   import Ecto.Query
@@ -22,12 +24,14 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
   alias MealPlannerApi.Persistence.Accounts.{
     Account,
     AccountMembership,
+    HouseholdBrandPreference,
     UserDietaryProfile,
     UserExcludedIngredient
   }
 
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApi.Persistence.Catalog.Ingredient
+  alias MealPlannerApi.BrandPreferences
   alias MealPlannerApi.NutritionGoals
   alias MealPlannerApi.PlanningAgent.Consent
   alias MealPlannerApi.Planning.Restrictions
@@ -49,6 +53,7 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
           disliked_ingredients: [String.t()],
           budget_cents: non_neg_integer(),
           nutrition_goal: map() | nil,
+          brand_preferences: [BrandPreferences.preference()],
           consent?: boolean()
         }
 
@@ -127,6 +132,7 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
         exclusions |> Enum.filter(&(&1.reason == :dislike)) |> Enum.map(& &1.name) |> Enum.uniq(),
       budget_cents: budget(account_id),
       nutrition_goal: NutritionGoals.get(account_id),
+      brand_preferences: BrandPreferences.list(account_id),
       consent?: Consent.granted?(account_id, user_id)
     }
   end
@@ -158,6 +164,7 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
 
     Household preferences (not enforced by code):
     - Disliked ingredients (Preferences, avoid and disclose when used): #{list(context.disliked_ingredients)}
+    - Brand Preferences from household settings (the brand the household prefers for an ingredient): #{brands(Map.get(context, :brand_preferences, []))}
 
     Grocery budget (checked by code): #{budget_line(context.budget_cents)}
     - present_proposal compares it against the Purchase total, the packages to buy net of the Projected Pantry. Report its result; never compute it yourself.
@@ -190,6 +197,16 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
       names -> Enum.join(names, ", ")
     end
   end
+
+  defp brands([]), do: "none"
+
+  defp brands(preferences),
+    do:
+      Enum.map_join(
+        preferences,
+        "; ",
+        &"#{&1.ingredient}: #{HouseholdBrandPreference.single_line(&1.brand)}"
+      )
 
   defp forbidden_ingredient_count(context) do
     case MapSet.size(context.allergic_ingredient_ids) do

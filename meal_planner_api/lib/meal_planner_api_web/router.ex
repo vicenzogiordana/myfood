@@ -229,5 +229,20 @@ defmodule MealPlannerApiWeb.Router do
     # Household settings — Nutrition Goal (issue #95). Any active Member.
     get("/settings/nutrition-goal", HouseholdNutritionGoalController, :show)
     put("/settings/nutrition-goal", HouseholdNutritionGoalController, :update)
+
+    # Household settings — Brand Preferences (issue #101). Any active Member.
+    get("/settings/brand-preferences", HouseholdBrandPreferenceController, :index)
+
+    put(
+      "/settings/brand-preferences/:ingredient_id",
+      HouseholdBrandPreferenceController,
+      :update
+    )
+
+    delete(
+      "/settings/brand-preferences/:ingredient_id",
+      HouseholdBrandPreferenceController,
+      :delete
+    )
   end
 end
