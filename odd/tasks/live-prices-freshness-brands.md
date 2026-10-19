@@ -135,26 +135,29 @@ review rounds) is split into three more slices:
   `feat/issue-101-part-4-household-brand-preferences`.
 - [x] S4 Brand and Product price queries (split slice 2/3, route: inline,
   one bounded worker landing code already written and reviewed in #126 and
-  #134, applied by hand onto main's `Prices` so the S2 review fixes stay).
-  `Prices.lookup/2` takes `:brand` (case-insensitive exact match) and
-  `:product` (case-insensitive substring of the Product name or brand,
-  `LIKE` wildcards matched literally; without names it searches every
-  stored Product, named Ingredients first within the 50-Ingredient cap).
-  Freshness is judged on every offer of an Ingredient before the filter,
-  because the scrape is keyed by Ingredient name: a brand missing from
-  fresh offers is reported `no_matching_brand` without a live call, and a
-  brand missing from stale offers is looked up live. A named Ingredient
-  with other offers is missing as `no_matching_brand` or
-  `no_matching_product`; a Product query without names that matches
-  nothing is missing as `no_matching_product`. `lookup_prices` gains
-  optional `brand` and `product` parameters (`ingredients` no longer
-  required when `product` is given). `Prices.stored_brand/2` (the stored
-  spelling of a brand for an Ingredient) is added for the next slice.
-  Review fixes from #134 kept: freshness before the brand filter, and a
-  blank `brand` or `product` is absent in `lookup_prices`, so a
-  whitespace-only `product` cannot bypass `ingredients_required`.
-  Commit: the `feat(planning-agent): query prices by brand and Product`
-  commit (ad50c77) on `feat/issue-101-part-5-brand-product-price-queries`.
+  #134, applied by hand onto main's `Prices` so the S2 review fixes stay;
+  reworked to the settled contract below after three Jorge rounds on #136).
+  Settled `lookup_prices` contract (product decision 2026-10-19):
+  `ingredients` is required (schema `required`, tool description); a call
+  without names, or with only blank names, returns `ingredients_required`
+  with a reason asking for the names, and there is no catalog-wide Product
+  search. Optional `brand` (case-insensitive exact match) and `product`
+  (case-insensitive substring of the Product name, matched literally) only
+  narrow the named Ingredients' offers and combine with AND. An Ingredient
+  is refreshed live when it has no offer, any stale offer (freshness is
+  judged on all its offers, because the scrape is keyed by Ingredient
+  name) or, with a brand, no stored offer of that brand. Filters apply
+  before the caps: at most 50 names are looked up (the first given; the
+  rest get `ingredients_truncated` warnings and are not reported missing)
+  and at most 200 offers returned (round-robin, `offers_truncated`);
+  `truncated` is true when either cap cut the result. A `missing` entry
+  names the Ingredient plus every filter asked, with reason
+  `unknown_ingredient`, `no_stored_price` or `no_matching_offer` (replacing
+  `no_matching_brand` and `no_matching_product`, which blamed one filter).
+  `Prices.stored_brand/2` (the stored spelling of a brand for an
+  Ingredient) is kept for the next slice. Commits: `ad50c77` and the
+  contract rework commit on
+  `feat/issue-101-part-5-brand-product-price-queries`.
 - [ ] S5 Purchase steered by Session Brands and Brand Preferences (split
   slice 3/3).
 
@@ -332,6 +335,22 @@ review rounds) is split into three more slices:
   - Focused `PricesTest` 20 passed.
     `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1309 passed,
     25 skipped; `mix precommit` 1309 passed, 25 skipped.
+
+- S4 contract rework (settled design, 2026-10-19), route: inline, one
+  bounded worker. Resolves the confirmed Jorge findings on #136: union of
+  unrelated Ingredients, the silent 50-Ingredient cap of the nameless
+  search, the brand blamed for a combined miss, and the brand dropped from
+  a nameless miss. RED: 17 failures across `PricesTest`, `LivePricesTest`
+  and `PurchaseToolsTest` (brand-only, product-only and blank-name calls
+  not rejected, schema without `required`, fresh offers of another brand
+  not looked up live, `no_matching_brand` instead of `no_matching_offer`,
+  combined miss missing a filter, Product text matching the brand, no
+  `truncated` key, names past the cap reported `no_stored_price`). GREEN:
+  focused run 65 passed; `MYFOOD_TEST_DATABASE=meal_planner_api_test101
+  mix precommit` (compile with warnings as errors, format, full suite)
+  1317 passed, 25 skipped. Removed with the nameless mode: the Product
+  search over every stored Product, its `ingredients_truncated` warning
+  with a `nil` Ingredient, its `no_matching_product` miss and their tests.
 
 ## Next step
 

@@ -73,6 +73,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   @type control :: :continue | :end_turn
 
   @optimizer_candidates_per_slot 50
+  # Matches `Prices.max_ingredients/0`: the lookup flags any names past it.
   @max_price_lookups 50
   @wide_bounds %{"min" => 0, "max" => 1_000_000}
 
@@ -219,8 +220,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "presentation, supermarket, currency, observation date and age. Missing or stale " <>
             "prices are refreshed live; when that fails the old price keeps its real age and a " <>
             "warning is returned. Ingredients without a price are listed as missing; never " <>
-            "assume a price for them, and tell the household when a price is stale. Give " <>
-            "ingredients, a product text, or both; brand narrows either.",
+            "assume a price for them, and tell the household when a price is stale. The " <>
+            "ingredients are required; brand and product only narrow their offers, together, " <>
+            "and a missing entry names every filter asked. When `truncated` is true, some " <>
+            "ingredients or offers were left out; the warnings say which.",
         parameters: %{
           "type" => "object",
           "properties" => %{
@@ -234,15 +237,16 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "brand" => %{
               "type" => "string",
               "description" =>
-                "Only Products of this brand, e.g. to answer how much a brand costs"
+                "Only the named ingredients' Products of this brand, e.g. to answer how " <>
+                  "much a brand costs; looked up live when no stored Product has it"
             },
             "product" => %{
               "type" => "string",
               "description" =>
-                "Only Products whose name or brand contains this text; without ingredients " <>
-                  "it searches every stored Product"
+                "Only the named ingredients' Products whose name contains this text"
             }
           },
+          "required" => ["ingredients"],
           "additionalProperties" => false
         }
       },
@@ -494,30 +498,42 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   defp run("lookup_prices", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "looking_up_prices"})
 
-    names = args |> Map.get("ingredients") |> List.wrap() |> Enum.filter(&is_binary/1)
-    # A blank Product query is absent, so it cannot bypass the guard below.
-    product = trimmed_arg(args, "product")
+    names =
+      args
+      |> Map.get("ingredients")
+      |> List.wrap()
+      |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
 
-    case {names, product} do
-      {[], nil} ->
-        {%{"error" => "ingredients_required"}, ctx.workspace, :continue}
+    case names do
+      [] ->
+        # Brand and Product only narrow named Ingredients; there is no
+        # catalog-wide price search.
+        {%{
+           "error" => "ingredients_required",
+           "reason" => "Pass the ingredient names; brand and product only narrow their offers."
+         }, ctx.workspace, :continue}
 
-      {names, product} ->
-        %{prices: prices, missing: missing, warnings: warnings, refresh_memo: memo} =
-          names
-          |> Enum.take(@max_price_lookups)
-          |> Prices.lookup(
+      names ->
+        %{
+          prices: prices,
+          missing: missing,
+          warnings: warnings,
+          truncated: truncated,
+          refresh_memo: memo
+        } =
+          Prices.lookup(names,
             now: now(ctx),
             refresh: &scrape(ctx, &1),
             refresh_memo: Map.get(ctx.workspace, :price_refreshes, %{}),
             brand: trimmed_arg(args, "brand"),
-            product: product
+            product: trimmed_arg(args, "product")
           )
 
         result = %{
           "prices" => Enum.map(prices, &Prices.offer_data/1),
           "missing" => Enum.map(missing, &Prices.missing_data/1),
-          "warnings" => Enum.map(warnings, &Prices.warning_data/1)
+          "warnings" => Enum.map(warnings, &Prices.warning_data/1),
+          "truncated" => truncated
         }
 
         # Missing prices are named, never zero, and stale or unrefreshed

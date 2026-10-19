@@ -285,6 +285,24 @@ defmodule MealPlannerApi.PlanningAgent.LivePricesTest do
       %{pasta: pasta}
     end
 
+    for {label, args} <- [
+          {"a brand", %{"brand" => "Fictitious Luchetti"}},
+          {"a product", %{"product" => "spaghetti"}},
+          {"a brand and a product",
+           %{"brand" => "Fictitious Luchetti", "product" => "spaghetti"}},
+          {"blank ingredients and a brand",
+           %{"ingredients" => [" "], "brand" => "Fictitious Luchetti"}}
+        ] do
+      test "without ingredients, #{label} is a tool error asking for names", %{household: h} do
+        result = run_tool(h, "lookup_prices", unquote(Macro.escape(args)))
+
+        refute_received {:fake_scraper_fetch, _}
+        assert %{"error" => "ingredients_required", "reason" => reason} = result
+        assert reason =~ "ingredient names"
+        refute Map.has_key?(result, "prices")
+      end
+    end
+
     test "a brand query returns only that brand's Products with prices",
          %{household: h, pasta: pasta} do
       result =
@@ -304,20 +322,31 @@ defmodule MealPlannerApi.PlanningAgent.LivePricesTest do
              ] = result["prices"]
 
       assert result["missing"] == []
+      assert result["truncated"] == false
     end
 
-    test "a brand missing from fresh prices is reported missing without a live call",
+    test "a brand without a stored Product is looked up live, even with fresh prices",
          %{household: h, pasta: pasta} do
-      result =
-        run_tool(h, "lookup_prices", %{
-          "ingredients" => [pasta.name],
-          "brand" => "Fictitious Don Vicente"
-        })
+      live =
+        FakeScraper.item(
+          product: "Fictitious fusilli",
+          brand: "Fictitious Don Vicente",
+          package_quantity_milli: 500_000,
+          price_cents: 1_600,
+          observed_at: hours_ago(2)
+        )
 
-      refute_received {:fake_scraper_fetch, _}
-      assert result["prices"] == []
-      assert [%{"reason" => "no_matching_brand"}] = result["missing"]
-      assert result["warnings"] == []
+      result =
+        run_tool(
+          h,
+          "lookup_prices",
+          %{"ingredients" => [pasta.name], "brand" => "Fictitious Don Vicente"},
+          responses: %{String.downcase(pasta.name) => {:ok, [live]}}
+        )
+
+      assert_received {:fake_scraper_fetch, _}
+      assert [%{"brand" => "Fictitious Don Vicente", "price_cents" => 1_600}] = result["prices"]
+      assert result["missing"] == []
     end
 
     test "a brand missing from stale prices is looked up live", %{household: h} do
@@ -352,7 +381,7 @@ defmodule MealPlannerApi.PlanningAgent.LivePricesTest do
       assert [%{"brand" => "Fictitious Don Vicente", "price_cents" => 1_600}] = result["prices"]
     end
 
-    test "a brand nobody sells is reported missing, never priced",
+    test "a brand nobody sells is reported missing with the brand, never priced",
          %{household: h, pasta: pasta} do
       result =
         run_tool(h, "lookup_prices", %{"ingredients" => [pasta.name], "brand" => "Nonexistent"})
@@ -363,44 +392,84 @@ defmodule MealPlannerApi.PlanningAgent.LivePricesTest do
                %{
                  "ingredient" => pasta.name,
                  "brand" => "Nonexistent",
-                 "reason" => "no_matching_brand"
+                 "reason" => "no_matching_offer"
                }
              ]
 
       assert result["outcome"] == "partial"
     end
 
-    test "a Product query matches product names and brands across ingredients",
-         %{household: h} do
-      result = run_tool(h, "lookup_prices", %{"product" => "SPAGHETTI"})
+    test "a Product query narrows the named Ingredient by Product name",
+         %{household: h, pasta: pasta} do
+      result =
+        run_tool(h, "lookup_prices", %{"ingredients" => [pasta.name], "product" => "SPAGHETTI"})
 
       assert [%{"product" => "Fictitious spaghetti", "price_cents" => 1_400}] = result["prices"]
-
-      assert [%{"product" => "Fictitious penne"}] =
-               run_tool(h, "lookup_prices", %{"product" => "matarazzo"})["prices"]
+      assert result["missing"] == []
     end
 
-    test "a Product query combined with a brand narrows the match", %{household: h} do
+    test "names, brand and Product combine with AND, never adding other Ingredients",
+         %{household: h, pasta: pasta} do
+      rice = ingredient!("Fictitious rice")
+
+      product!(rice,
+        name: "Fictitious penne-shaped rice",
+        brand: "Fictitious Matarazzo",
+        observed_at: hours_ago(1)
+      )
+
       result =
         run_tool(h, "lookup_prices", %{
-          "product" => "fictitious",
-          "brand" => "Fictitious Matarazzo"
+          "ingredients" => [pasta.name],
+          "brand" => "Fictitious Matarazzo",
+          "product" => "penne"
         })
 
-      assert [%{"product" => "Fictitious penne"}] = result["prices"]
+      assert [%{"ingredient" => ingredient, "product" => "Fictitious penne"}] = result["prices"]
+      assert ingredient == pasta.name
+
+      # The brand matches one Product and the text another: neither passes.
+      result =
+        run_tool(h, "lookup_prices", %{
+          "ingredients" => [pasta.name],
+          "brand" => "Fictitious Luchetti",
+          "product" => "penne"
+        })
+
+      assert result["prices"] == []
     end
 
-    test "a Product query that matches nothing is reported missing", %{household: h} do
-      result = run_tool(h, "lookup_prices", %{"product" => "Nonexistent product"})
+    test "a combined miss names the Ingredient and every filter asked",
+         %{household: h, pasta: pasta} do
+      result =
+        run_tool(h, "lookup_prices", %{
+          "ingredients" => [pasta.name, "Unknown thing"],
+          "brand" => "Fictitious Luchetti",
+          "product" => "penne"
+        })
 
       assert result["prices"] == []
 
       assert result["missing"] == [
-               %{"product" => "Nonexistent product", "reason" => "no_matching_product"}
+               %{
+                 "ingredient" => pasta.name,
+                 "brand" => "Fictitious Luchetti",
+                 "product" => "penne",
+                 "reason" => "no_matching_offer"
+               },
+               %{
+                 "ingredient" => "Unknown thing",
+                 "brand" => "Fictitious Luchetti",
+                 "product" => "penne",
+                 "reason" => "unknown_ingredient"
+               }
              ]
+    end
 
-      # Wildcards are matched literally.
-      assert run_tool(h, "lookup_prices", %{"product" => "%"})["prices"] == []
+    test "Product text is matched literally", %{household: h, pasta: pasta} do
+      assert run_tool(h, "lookup_prices", %{"ingredients" => [pasta.name], "product" => "%"})[
+               "prices"
+             ] == []
     end
   end
 
