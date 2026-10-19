@@ -49,8 +49,10 @@ defmodule MealPlannerApi.PlanningAgent.Battery do
       tests may pass a 2-arity function from the task and the run number to
       `{module, opts}`, to script each task
     * `:optimizer` — `{module, opts}` of the optimizer (required)
-    * `:runs_per_task` — default 5, as agreed in #87
-    * `:tasks` — default `MealPlannerApi.PlanningAgent.Battery.Tasks.all/0`
+    * `:runs_per_task` — default 5, as agreed in #87; anything but a
+      positive integer returns `{:error, :invalid_runs_per_task}`
+    * `:tasks` — default `MealPlannerApi.PlanningAgent.Battery.Tasks.all/0`;
+      an empty list returns `{:error, :no_tasks}`
     * `:session_opts` — extra `MealPlannerApi.PlanningAgent.Session.start/2`
       options, such as `:deadline_ms`
     * `:on_run` — 1-arity function told every run result as it finishes
@@ -61,7 +63,8 @@ defmodule MealPlannerApi.PlanningAgent.Battery do
     runs = Keyword.get(opts, :runs_per_task, @runs_per_task)
     model = Keyword.fetch!(opts, :model)
 
-    with {:ok, config} <- Config.validate(config),
+    with :ok <- valid_plan(tasks, runs),
+         {:ok, config} <- Config.validate(config),
          :ok <- sandboxed(),
          :ok <- catalog_empty(),
          :ok <- preflight(model_for(model, hd(tasks), 1), config.spend_ceiling_micros) do
@@ -76,7 +79,7 @@ defmodule MealPlannerApi.PlanningAgent.Battery do
       }
 
       on_run = Keyword.get(opts, :on_run, fn _result -> :ok end)
-      plan = for task <- tasks, run <- 1..runs, do: {task, run}
+      plan = for task <- tasks, run <- 1..runs//1, do: {task, run}
 
       results =
         Enum.reduce_while(plan, [], fn {task, run}, results ->
@@ -125,6 +128,12 @@ defmodule MealPlannerApi.PlanningAgent.Battery do
   defp model_for({_module, _opts} = model, _task, _run), do: model
 
   defp spent(meter), do: meter |> Agent.get(& &1) |> Map.values() |> Enum.sum()
+
+  defp valid_plan(_tasks, runs) when not is_integer(runs) or runs < 1,
+    do: {:error, :invalid_runs_per_task}
+
+  defp valid_plan([], _runs), do: {:error, :no_tasks}
+  defp valid_plan(_tasks, _runs), do: :ok
 
   defp sandboxed do
     if Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox,

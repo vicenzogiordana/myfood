@@ -231,6 +231,28 @@ defmodule MealPlannerApi.PlanningAgent.BatteryTest do
       assert {:error, {:model_unconfigured, :spend_caps_unconfigured}} =
                Battery.run(config(), model: {OpenAIResponses, []}, optimizer: @optimizer)
     end
+
+    test "with fewer than one run per task, before any model call" do
+      assert {:error, :invalid_runs_per_task} =
+               Battery.run(config(),
+                 model: {Scripted, script: @plan, notify: self()},
+                 optimizer: @optimizer,
+                 runs_per_task: 0
+               )
+
+      refute_received {:scripted_model_request, _}
+    end
+
+    test "with no tasks, before any model call" do
+      assert {:error, :no_tasks} =
+               Battery.run(config(),
+                 model: {Scripted, script: @plan, notify: self()},
+                 optimizer: @optimizer,
+                 tasks: []
+               )
+
+      refute_received {:scripted_model_request, _}
+    end
   end
 
   # ---------------------------------------------------------------------------
