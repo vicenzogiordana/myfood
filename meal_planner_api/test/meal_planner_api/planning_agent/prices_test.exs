@@ -1,9 +1,12 @@
 defmodule MealPlannerApi.PlanningAgent.PricesTest do
   @moduledoc """
   `MealPlannerApi.PlanningAgent.Prices` bounds (issue #101 review round):
-  a lookup never refreshes more Ingredients than the lookup cap, and
-  recording scraped data that the database rejects returns an error instead
-  of raising inside the read tool.
+  a lookup never refreshes more Ingredients than the lookup cap and flags
+  what the caps cut, brand and Product filters only narrow the named
+  Ingredients (applied before the caps, and named together in a miss), a
+  brand query judges freshness on every offer of the Ingredient, and
+  recording scraped data that the database rejects returns an error
+  instead of raising inside the read tool.
   """
 
   use ExUnit.Case, async: false
@@ -23,8 +26,22 @@ defmodule MealPlannerApi.PlanningAgent.PricesTest do
 
   defp hours_ago(hours), do: DateTime.add(@now, -hours * 3600, :second)
 
+  defp counting_refresh(answer \\ {:ok, []}) do
+    test_pid = self()
+
+    fn name ->
+      send(test_pid, {:refreshed, name})
+      answer
+    end
+  end
+
+  defp refreshed_names do
+    {:messages, messages} = Process.info(self(), :messages)
+    for {:refreshed, name} <- messages, do: name
+  end
+
   describe "lookup/2 with more Ingredients than the cap" do
-    test "refreshes at most the lookup cap of stale Ingredients" do
+    test "refreshes at most the lookup cap and flags the names left out" do
       prefix = "Fictitious capped #{System.unique_integer([:positive])}"
 
       names =
@@ -34,21 +51,172 @@ defmodule MealPlannerApi.PlanningAgent.PricesTest do
           ingredient.name
         end
 
-      test_pid = self()
+      {looked_up, left_out} = Enum.split(names, Prices.max_ingredients())
 
-      refresh = fn name ->
-        send(test_pid, {:refreshed, name})
-        {:error, :scraper_unavailable}
+      result =
+        Prices.lookup(names,
+          now: @now,
+          refresh: counting_refresh({:error, :scraper_unavailable})
+        )
+
+      assert Enum.sort(refreshed_names()) == Enum.sort(looked_up)
+      assert length(result.prices) <= Prices.max_offers()
+      assert result.truncated
+      assert result.missing == []
+
+      failed = for %{reason: :refresh_failed, ingredient: name} <- result.warnings, do: name
+      assert Enum.sort(failed) == Enum.sort(looked_up)
+
+      cut = for %{reason: :ingredients_truncated, ingredient: name} <- result.warnings, do: name
+      assert Enum.sort(cut) == Enum.sort(left_out)
+    end
+
+    test "is not truncated when the names fit the cap" do
+      ingredient = ingredient!("Fictitious fitting")
+      product!(ingredient, observed_at: hours_ago(2))
+
+      result = Prices.lookup([ingredient.name], now: @now)
+
+      refute result.truncated
+      assert result.warnings == []
+    end
+  end
+
+  describe "lookup/2 with a Product query" do
+    test "narrows the named Ingredients by Product name instead of adding others" do
+      text = "Fictitious Acme #{System.unique_integer([:positive])}"
+      milk = ingredient!("Fictitious milk #{System.unique_integer([:positive])}")
+      rice = ingredient!("Fictitious rice #{System.unique_integer([:positive])}")
+      product!(milk, name: "#{text} milk", observed_at: hours_ago(30))
+      product!(milk, name: "Other milk", observed_at: hours_ago(30))
+      product!(rice, name: "#{text} rice", observed_at: hours_ago(30))
+
+      result = Prices.lookup([milk.name], product: text, now: @now, refresh: counting_refresh())
+
+      assert refreshed_names() == [milk.name]
+      assert [%{ingredient: ingredient, product: product}] = result.prices
+      assert ingredient == milk.name
+      assert product == "#{text} milk"
+    end
+
+    test "matches the Product name, not its brand" do
+      brand = "Fictitious Brandname #{System.unique_integer([:positive])}"
+      milk = ingredient!("Fictitious milk #{System.unique_integer([:positive])}")
+      product!(milk, name: "Whole milk", brand: brand, observed_at: hours_ago(2))
+
+      result = Prices.lookup([milk.name], product: brand, now: @now)
+
+      assert result.prices == []
+
+      assert [%{ingredient: name, product: ^brand, reason: :no_matching_offer}] = result.missing
+      assert name == milk.name
+    end
+  end
+
+  describe "lookup/2 with a brand query" do
+    test "an Ingredient without a stored Product of the brand is refreshed live" do
+      ingredient = ingredient!("Fictitious brand fresh #{System.unique_integer([:positive])}")
+      product!(ingredient, brand: "Fictitious Brand A", observed_at: hours_ago(2))
+
+      result =
+        Prices.lookup([ingredient.name],
+          brand: "Fictitious Brand B",
+          now: @now,
+          refresh: counting_refresh()
+        )
+
+      assert refreshed_names() == [ingredient.name]
+      assert result.prices == []
+
+      assert [%{ingredient: name, brand: "Fictitious Brand B", reason: :no_matching_offer}] =
+               result.missing
+
+      assert name == ingredient.name
+    end
+
+    test "fresh offers of the brand are not refreshed live" do
+      ingredient = ingredient!("Fictitious brand stored #{System.unique_integer([:positive])}")
+      product!(ingredient, brand: "Fictitious Brand A", observed_at: hours_ago(2))
+      product!(ingredient, brand: "Fictitious Brand B", observed_at: hours_ago(2))
+
+      result =
+        Prices.lookup([ingredient.name],
+          brand: "fictitious brand b",
+          now: @now,
+          refresh: counting_refresh()
+        )
+
+      assert refreshed_names() == []
+      assert [%{brand: "Fictitious Brand B"}] = result.prices
+    end
+
+    test "stale offers of another brand are still refreshed live" do
+      ingredient = ingredient!("Fictitious brand stale #{System.unique_integer([:positive])}")
+      product!(ingredient, brand: "Fictitious Brand A", observed_at: hours_ago(30))
+      product!(ingredient, brand: "Fictitious Brand B", observed_at: hours_ago(2))
+
+      Prices.lookup([ingredient.name],
+        brand: "Fictitious Brand B",
+        now: @now,
+        refresh: counting_refresh()
+      )
+
+      assert refreshed_names() == [ingredient.name]
+    end
+
+    test "is applied before the offer cap, so a brand's offer is never cut" do
+      ingredient = ingredient!("Fictitious crowded #{System.unique_integer([:positive])}")
+
+      for p <- 1..(Prices.max_offers() + 5) do
+        product!(ingredient,
+          name: "Cheap #{p}",
+          brand: "Fictitious Cheap",
+          price_cents: 100 + p,
+          observed_at: @now
+        )
       end
 
-      result = Prices.lookup(names, now: @now, refresh: refresh)
+      product!(ingredient,
+        name: "Dear",
+        brand: "Fictitious Dear",
+        price_cents: 99_999,
+        observed_at: @now
+      )
 
-      {:messages, messages} = Process.info(self(), :messages)
-      refreshed = Enum.count(messages, &match?({:refreshed, _}, &1))
+      result = Prices.lookup([ingredient.name], brand: "Fictitious Dear", now: @now)
 
-      assert refreshed == Prices.max_ingredients()
-      assert length(result.prices) <= Prices.max_offers()
-      assert length(result.warnings) == Prices.max_ingredients()
+      assert [%{product: "Dear", price_cents: 99_999}] = result.prices
+      refute result.truncated
+      assert result.warnings == []
+    end
+
+    test "a combined miss names the brand and the Product, never only one" do
+      brand = "Fictitious Acme #{System.unique_integer([:positive])}"
+      milk = ingredient!("Fictitious milk #{System.unique_integer([:positive])}")
+      product!(milk, name: "Whole", brand: brand, observed_at: hours_ago(2))
+      product!(milk, name: "Skimmed", brand: "Fictitious Other", observed_at: hours_ago(2))
+
+      result =
+        Prices.lookup([milk.name],
+          brand: brand,
+          product: "skimmed",
+          now: @now,
+          refresh: counting_refresh()
+        )
+
+      assert result.prices == []
+
+      assert [
+               %{
+                 ingredient: name,
+                 brand: ^brand,
+                 product: "skimmed",
+                 reason: :no_matching_offer
+               } = miss
+             ] = result.missing
+
+      assert name == milk.name
+      assert map_size(miss) == 4
     end
   end
 
@@ -125,6 +293,7 @@ defmodule MealPlannerApi.PlanningAgent.PricesTest do
 
       assert length(result.prices) == Prices.max_offers()
       assert result.missing == []
+      assert result.truncated
 
       for name <- names do
         kept =

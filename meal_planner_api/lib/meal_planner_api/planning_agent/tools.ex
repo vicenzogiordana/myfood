@@ -73,6 +73,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   @type control :: :continue | :end_turn
 
   @optimizer_candidates_per_slot 50
+  # Matches `Prices.max_ingredients/0`: the lookup flags any names past it.
   @max_price_lookups 50
   @wide_bounds %{"min" => 0, "max" => 1_000_000}
 
@@ -219,7 +220,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "presentation, supermarket, currency, observation date and age. Missing or stale " <>
             "prices are refreshed live; when that fails the old price keeps its real age and a " <>
             "warning is returned. Ingredients without a price are listed as missing; never " <>
-            "assume a price for them, and tell the household when a price is stale.",
+            "assume a price for them, and tell the household when a price is stale. The " <>
+            "ingredients are required; brand and product only narrow their offers, together, " <>
+            "and a missing entry names every filter asked. When `truncated` is true, some " <>
+            "ingredients or offers were left out; the warnings say which.",
         parameters: %{
           "type" => "object",
           "properties" => %{
@@ -229,6 +233,17 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
               "minItems" => 1,
               "maxItems" => @max_price_lookups,
               "description" => "Ingredient names, as returned by search_recipes"
+            },
+            "brand" => %{
+              "type" => "string",
+              "description" =>
+                "Only the named ingredients' Products of this brand, e.g. to answer how " <>
+                  "much a brand costs; looked up live when no stored Product has it"
+            },
+            "product" => %{
+              "type" => "string",
+              "description" =>
+                "Only the named ingredients' Products whose name contains this text"
             }
           },
           "required" => ["ingredients"],
@@ -483,24 +498,42 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   defp run("lookup_prices", args, ctx) do
     emit(ctx, %{"type" => "progress", "step" => "looking_up_prices"})
 
-    case args |> Map.get("ingredients") |> List.wrap() |> Enum.filter(&is_binary/1) do
+    names =
+      args
+      |> Map.get("ingredients")
+      |> List.wrap()
+      |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+
+    case names do
       [] ->
-        {%{"error" => "ingredients_required"}, ctx.workspace, :continue}
+        # Brand and Product only narrow named Ingredients; there is no
+        # catalog-wide price search.
+        {%{
+           "error" => "ingredients_required",
+           "reason" => "Pass the ingredient names; brand and product only narrow their offers."
+         }, ctx.workspace, :continue}
 
       names ->
-        %{prices: prices, missing: missing, warnings: warnings, refresh_memo: memo} =
-          names
-          |> Enum.take(@max_price_lookups)
-          |> Prices.lookup(
+        %{
+          prices: prices,
+          missing: missing,
+          warnings: warnings,
+          truncated: truncated,
+          refresh_memo: memo
+        } =
+          Prices.lookup(names,
             now: now(ctx),
             refresh: &scrape(ctx, &1),
-            refresh_memo: Map.get(ctx.workspace, :price_refreshes, %{})
+            refresh_memo: Map.get(ctx.workspace, :price_refreshes, %{}),
+            brand: trimmed_arg(args, "brand"),
+            product: trimmed_arg(args, "product")
           )
 
         result = %{
           "prices" => Enum.map(prices, &Prices.offer_data/1),
           "missing" => Enum.map(missing, &Prices.missing_data/1),
-          "warnings" => Enum.map(warnings, &Prices.warning_data/1)
+          "warnings" => Enum.map(warnings, &Prices.warning_data/1),
+          "truncated" => truncated
         }
 
         # Missing prices are named, never zero, and stale or unrefreshed
@@ -866,6 +899,13 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     case Map.get(args, key) do
       value when is_binary(value) and value != "" -> value
       _ -> nil
+    end
+  end
+
+  defp trimmed_arg(args, key) do
+    case string_arg(args, key) do
+      nil -> nil
+      value -> if String.trim(value) == "", do: nil, else: value
     end
   end
 

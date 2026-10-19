@@ -26,8 +26,8 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
 
   @fresh_seconds 24 * 3600
 
-  # One lookup reads and refreshes at most this many Ingredients and returns
-  # at most this many offers: every refresh is a live scraper call.
+  # One lookup reads and refreshes at most this many named Ingredients and
+  # returns at most this many offers: every refresh is a live scraper call.
   @max_ingredients 50
   @max_offers 200
 
@@ -75,8 +75,8 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   """
   @type refresh_memo :: %{Ecto.UUID.t() => %{at: DateTime.t(), failure: term() | nil}}
   @type warning :: %{
-          ingredient: String.t(),
-          reason: :refresh_failed | :still_stale | :offers_truncated,
+          ingredient: String.t() | nil,
+          reason: :refresh_failed | :still_stale | :offers_truncated | :ingredients_truncated,
           detail: term()
         }
 
@@ -119,17 +119,36 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   end
 
   @doc """
-  Looks prices up, reading the database first and refreshing missing or
-  stale Ingredients live.
+  Looks prices up for the Ingredients named in `names`, reading the
+  database first and refreshing missing or stale Ingredients live.
 
-  `names` are Ingredient names (case-insensitive exact match); at most
-  `max_ingredients/0` of them are read and refreshed.
+  `names` are Ingredient names (case-insensitive exact match); a lookup
+  without names finds nothing. Two optional filters narrow the offers of
+  the named Ingredients, never adding other Ingredients, and combine with
+  AND:
 
-  Options: `:now` (default: the current time), `:refresh`, a
+    * `:brand` — only Products of this brand (case-insensitive exact match)
+    * `:product` — only Products whose name contains this text
+      (case-insensitive, matched literally)
+
+  The filters apply before any cap. At most `max_ingredients/0` names are
+  looked up, the first ones given; each name left out gets an
+  `:ingredients_truncated` warning and is not reported as missing. At most
+  `max_offers/0` offers are returned, taken round-robin from each
+  Ingredient's cheapest matching ones, so every Ingredient with offers
+  keeps some; an Ingredient that lost offers to the cap gets an
+  `:offers_truncated` warning. `truncated` is true when either cap cut
+  the result.
+
+  Other options: `:now` (default: the current time), `:refresh`, a
   function from an Ingredient name to the scraped items (see
   `MealPlannerApi.PlanningAgent.PriceScraper`; without it no refresh
   succeeds), and `:refresh_memo`, the memo a previous lookup returned.
-  Names that match no Ingredient are never looked up live.
+  Names that match no Ingredient are never looked up live. An Ingredient is
+  refreshed when it has no offer, when any of its offers is stale (the
+  scrape is keyed by Ingredient name, so freshness is judged on all its
+  offers, before the filters) or when a brand is asked and none of its
+  offers is of that brand.
 
   An Ingredient in the memo refreshed less than 15 minutes ago is not
   refreshed again, whatever that refresh brought; its failure, or its
@@ -140,63 +159,86 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   the same failure as a warning and stay out of the memo, as does every
   `:deadline_exceeded`, so the next lookup tries them again.
 
-  At most `max_offers/0` offers are returned, taken round-robin from each
-  Ingredient's cheapest ones, so every Ingredient with offers keeps some; an
-  Ingredient that lost offers to the cap gets an `:offers_truncated`
-  warning.
-
-  Returns the offers, what is still without a price in `missing`
-  with its reason, `warnings` for failed refreshes and prices still stale,
-  and the updated `refresh_memo`.
+  Returns the matching offers, what is still without a matching price in
+  `missing`, `warnings` for failed refreshes, prices still stale and capped
+  results, `truncated`, and the updated `refresh_memo`. A `missing` entry
+  names the Ingredient as asked plus every filter asked, and its reason:
+  `:unknown_ingredient`, `:no_stored_price` (no offer at all) or
+  `:no_matching_offer` (offers, but none passing every filter).
   """
   @spec lookup([String.t()], keyword()) :: %{
           prices: [offer()],
           missing: [map()],
           warnings: [warning()],
+          truncated: boolean(),
           refresh_memo: refresh_memo()
         }
   def lookup(names, opts \\ []) do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    brand = opts |> Keyword.get(:brand) |> normalize()
+    product = opts |> Keyword.get(:product) |> normalize()
+    filters = Enum.reject([brand: brand, product: product], &is_nil(elem(&1, 1)))
 
-    wanted = names |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()
+    {wanted, left_out} =
+      names
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq_by(&String.downcase/1)
+      |> Enum.split(@max_ingredients)
+
     named = ingredients_by_name(wanted)
-
-    ingredients =
-      named
-      |> Map.values()
-      |> Enum.sort_by(& &1.name)
-      |> Enum.take(@max_ingredients)
-
+    ingredients = named |> Map.values() |> Enum.uniq_by(& &1.id) |> Enum.sort_by(& &1.name)
+    matches? = &(brand_match?(&1, brand) and product_match?(&1, product))
     memo = recent_refreshes(Keyword.get(opts, :refresh_memo, %{}), now)
 
-    {offers, warnings, memo} =
-      fresh_offers(ingredients, now, Keyword.get(opts, :refresh), memo)
+    {all, offers, warnings, memo} =
+      fresh_offers(ingredients, now, Keyword.get(opts, :refresh), brand, matches?, memo)
 
     missing =
       Enum.flat_map(wanted, fn name ->
         case Map.fetch(named, String.downcase(name)) do
-          :error -> [%{ingredient: name, reason: :unknown_ingredient}]
-          {:ok, ingredient} -> named_gap(ingredient, offers)
+          :error -> [miss(name, :unknown_ingredient, filters)]
+          {:ok, ingredient} -> gap(ingredient, all, offers, filters)
         end
       end)
 
     {prices, truncated} = capped(offers)
 
-    warnings =
-      Enum.sort_by(
-        warnings ++
-          Enum.map(truncated, &%{ingredient: &1, reason: :offers_truncated, detail: nil}),
-        &{&1.ingredient, &1.reason}
-      )
+    cut =
+      Enum.map(truncated, &%{ingredient: &1, reason: :offers_truncated, detail: nil}) ++
+        Enum.map(left_out, &%{ingredient: &1, reason: :ingredients_truncated, detail: nil})
 
-    %{prices: prices, missing: missing, warnings: warnings, refresh_memo: memo}
+    %{
+      prices: prices,
+      missing: missing,
+      warnings: Enum.sort_by(warnings ++ cut, &{&1.ingredient, &1.reason}),
+      truncated: cut != [],
+      refresh_memo: memo
+    }
+  end
+
+  @doc """
+  The brand of a stored Product of `ingredient_id` matching `brand`
+  (case-insensitive), spelled as stored, or `nil` when none has it.
+  """
+  @spec stored_brand(Ecto.UUID.t(), String.t()) :: String.t() | nil
+  def stored_brand(ingredient_id, brand) do
+    lowered = String.downcase(brand)
+
+    from(p in Product,
+      where: p.ingredient_id == ^ingredient_id and fragment("lower(?)", p.brand) == ^lowered,
+      order_by: [asc: p.brand],
+      limit: 1,
+      select: p.brand
+    )
+    |> Repo.one()
   end
 
   @doc "JSON-safe entry of a lookup's `missing` list."
   @spec missing_data(map()) :: map()
   def missing_data(missing) do
     missing
-    |> Map.take([:ingredient])
+    |> Map.take([:ingredient, :brand, :product])
     |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
     |> Map.put("reason", Atom.to_string(missing.reason))
   end
@@ -283,14 +325,17 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
 
   # ---------------------------------------------------------------------------
 
-  # Offers of `ingredients`, refreshed live where missing or stale unless
-  # the memo holds a recent refresh of them.
-  defp fresh_offers([], _now, _refresh, memo), do: {%{}, [], memo}
+  # Every offer of `ingredients` and those matching the filters, refreshed
+  # live where missing, stale or without the brand asked, unless the memo
+  # holds a recent refresh of them. The scrape is keyed by Ingredient name,
+  # so freshness is judged on every offer of the Ingredient before the
+  # filters apply.
+  defp fresh_offers([], _now, _refresh, _brand, _matches?, memo), do: {%{}, %{}, [], memo}
 
-  defp fresh_offers(ingredients, now, refresh, memo) do
+  defp fresh_offers(ingredients, now, refresh, brand, matches?, memo) do
     ids = Enum.map(ingredients, & &1.id)
     stored = offers_for(ids, now)
-    unrefreshed = Enum.filter(ingredients, &needs_refresh?(stored, &1.id))
+    unrefreshed = Enum.filter(ingredients, &needs_refresh?(stored, &1.id, brand))
     {memoized, to_refresh} = Enum.split_with(unrefreshed, &Map.has_key?(memo, &1.id))
     {failed, skipped} = refresh_all(to_refresh, refresh, now)
 
@@ -311,10 +356,8 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
         end
       end)
 
-    offers =
-      if to_refresh == [] or refresh == nil,
-        do: stored,
-        else: offers_for(ids, now)
+    all = if to_refresh == [] or refresh == nil, do: stored, else: offers_for(ids, now)
+    offers = matching(all, matches?)
 
     warnings =
       Enum.flat_map(unrefreshed, fn ingredient ->
@@ -328,7 +371,7 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
               }
             ]
 
-          Map.has_key?(offers, ingredient.id) and needs_refresh?(offers, ingredient.id) ->
+          stale?(offers, ingredient.id) ->
             [%{ingredient: ingredient.name, reason: :still_stale, detail: nil}]
 
           true ->
@@ -336,7 +379,7 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
         end
       end)
 
-    {offers, Enum.sort_by(warnings, & &1.ingredient), memo}
+    {all, offers, Enum.sort_by(warnings, & &1.ingredient), memo}
   end
 
   # The offers returned, at most `@max_offers` taken round-robin from each
@@ -378,25 +421,59 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
 
   defp recent_refreshes(_memo, _now), do: %{}
 
-  # An Ingredient without any offer is missing; stale offers are still
-  # returned, with their age.
-  defp named_gap(ingredient, offers) do
-    if Map.has_key?(offers, ingredient.id),
-      do: [],
-      else: [%{ingredient: ingredient.name, reason: :no_stored_price}]
+  defp matching(offers_by_ingredient, matches?) do
+    offers_by_ingredient
+    |> Enum.map(fn {id, offers} -> {id, Enum.filter(offers, matches?)} end)
+    |> Enum.reject(fn {_id, offers} -> offers == [] end)
+    |> Map.new()
   end
+
+  defp brand_match?(_offer, nil), do: true
+  defp brand_match?(%{brand: nil}, _brand), do: false
+  defp brand_match?(offer, brand), do: String.downcase(offer.brand) == String.downcase(brand)
+
+  defp product_match?(_offer, nil), do: true
+
+  defp product_match?(offer, product),
+    do: String.contains?(String.downcase(offer.product), String.downcase(product))
+
+  # A named Ingredient without a matching offer is missing: with no offer at
+  # all, or with offers none of which passes every filter. Stale offers are
+  # still returned, with their age.
+  defp gap(ingredient, all, offers, filters) do
+    cond do
+      Map.has_key?(offers, ingredient.id) -> []
+      Map.has_key?(all, ingredient.id) -> [miss(ingredient.name, :no_matching_offer, filters)]
+      true -> [miss(ingredient.name, :no_stored_price, filters)]
+    end
+  end
+
+  defp miss(name, reason, filters),
+    do: filters |> Map.new() |> Map.merge(%{ingredient: name, reason: reason})
+
+  defp normalize(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize(_value), do: nil
 
   defp with_age(offer, now) do
     age = max(DateTime.diff(now, offer.observed_at, :second), 0)
     Map.merge(offer, %{age_seconds: age, fresh?: age < @fresh_seconds})
   end
 
-  defp needs_refresh?(offers, ingredient_id) do
+  defp needs_refresh?(offers, ingredient_id, brand) do
     case Map.get(offers, ingredient_id, []) do
       [] -> true
-      offers -> not Enum.all?(offers, & &1.fresh?)
+      offers -> stale?(offers) or not Enum.any?(offers, &brand_match?(&1, brand))
     end
   end
+
+  defp stale?(offers, ingredient_id), do: stale?(Map.get(offers, ingredient_id, []))
+  defp stale?(offers), do: offers != [] and not Enum.all?(offers, & &1.fresh?)
 
   # Returns the failed refreshes (ingredient id => failure reason) and the
   # ids of the Ingredients never scraped. Without a refresh function every

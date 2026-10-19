@@ -124,6 +124,25 @@ defmodule MealPlannerApi.PlanningAgent.PurchaseToolsTest do
     test "requires a list of ingredient names", %{household: h} do
       assert %{"error" => "ingredients_required"} = run_tool(h, "lookup_prices", %{})
     end
+
+    for {label, args} <- [
+          {"a blank product", %{"product" => "  "}},
+          {"no ingredients and a blank product", %{"ingredients" => [], "product" => "\n"}},
+          {"only blank names", %{"ingredients" => ["  ", ""]}}
+        ] do
+      test "requires ingredients given #{label}", %{household: h} do
+        assert %{"error" => "ingredients_required"} =
+                 run_tool(h, "lookup_prices", unquote(Macro.escape(args)))
+      end
+    end
+
+    test "declares the ingredient names as required" do
+      %{parameters: parameters, description: description} =
+        Enum.find(MealPlannerApi.PlanningAgent.Tools.definitions(), &(&1.name == "lookup_prices"))
+
+      assert parameters["required"] == ["ingredients"]
+      assert description =~ "ingredients are required"
+    end
   end
 
   describe "get_pantry" do
