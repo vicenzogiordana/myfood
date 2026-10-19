@@ -98,6 +98,47 @@ defmodule MealPlannerApi.PlanningAgent.Battery.ReportTest do
     assert report["summary"]["verdict"] == "incomplete"
   end
 
+  test "not-run results are listed but never counted, graded or measured" do
+    results =
+      runs(
+        all(3, :correct, %{spend_micros: 40, latency_ms: 200}) ++
+          [{:not_run, %{spend_micros: 20, latency_ms: 1, metrics: %{escalation: false}}}]
+      )
+
+    report = Report.build(config(), results, planned_runs: 10)
+    summary = report["summary"]
+
+    assert summary["runs"] == 3
+    assert summary["not_run"] == 7
+    assert summary["incorrect"] == 0
+    assert summary["score"] == 0.3
+    # The cut run's spend was really spent.
+    assert summary["spend_micros"] == 140
+    assert summary["verdict"] == "incomplete"
+
+    gate = &Enum.find(report["gates"], fn gate -> gate["name"] == &1 end)
+    assert gate.("max_cost_micros_per_completed_task")["measured"] == 40.0
+    assert gate.("max_latency_ms_p50")["measured"] == 200
+    assert gate.("min_escalation_quality")["measured"] == 1.0
+
+    assert [_, _, _, %{"outcome" => "not_run"}] = report["runs"]
+
+    assert Report.render(report, :markdown) =~
+             "| 10 | 3 | 3 | 9 | 0 | 0 | 0 | 0 | 7 | 0.3 | 140 |"
+  end
+
+  test "a battery that did not run in full is incomplete even with a hard violation" do
+    report =
+      build(runs(all(69, :correct) ++ [{:hard_violation, %{violations: [:restriction]}}]))
+
+    assert report["summary"]["verdict"] == "incomplete"
+
+    assert report["summary"]["verdict_reasons"] == [
+             "5 planned runs did not run (spend ceiling reached)",
+             "1 run presented a hard-rule violation as valid"
+           ]
+  end
+
   test "pending reviews that could still reach the minimum leave the verdict pending" do
     report = build(runs(all(60, :correct) ++ all(15, :pending_review)))
 

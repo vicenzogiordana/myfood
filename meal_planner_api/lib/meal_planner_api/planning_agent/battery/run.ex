@@ -39,8 +39,14 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Run do
 
   @doc """
   Runs `task` once as run number `run`. `ctx` holds `:model` (`{module,
-  opts}` for this run), `:optimizer`, `:judges`, `:meter` and
-  `:session_opts`.
+  opts}` for this run), `:optimizer`, `:judges`, `:meter`,
+  `:session_opts` and `:ceiling_capped` (whether the run's spend cap is the
+  battery's remaining ceiling).
+
+  A run whose model call the ceiling refused (`:ceiling_capped` and an
+  `agent_unavailable` event with reason `spend_cap_reached`) never reached
+  the model in full: it is recorded with the outcome `:not_run`, never
+  graded.
   """
   @spec execute(Task.t(), pos_integer(), map()) :: map()
   def execute(%Task{} = task, run, ctx) do
@@ -56,9 +62,23 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Run do
       run: run,
       latency_ms: evidence.latency_ms,
       spend_micros: spend,
-      grade: Grader.grade(task, evidence, ctx.judges),
+      grade: grade(task, evidence, ctx),
       evidence: summary(evidence)
     }
+  end
+
+  defp grade(task, evidence, ctx) do
+    if Map.get(ctx, :ceiling_capped, false) and "spend_cap_reached" in evidence.unavailable do
+      %{
+        outcome: :not_run,
+        violations: [],
+        reasons: ["the spend ceiling refused a model call"],
+        harness_failure?: false,
+        metrics: nil
+      }
+    else
+      Grader.grade(task, evidence, ctx.judges)
+    end
   end
 
   @doc """

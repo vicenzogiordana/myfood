@@ -343,10 +343,94 @@ defmodule MealPlannerApi.PlanningAgent.BatteryTest do
     assert_received {:spending_model_init, 100}
     assert_received {:spending_model_init, 100}
 
-    assert report["summary"]["runs"] == 1
-    assert report["summary"]["not_run"] == 1
+    # The ceiling refused R1's third call, so R1 is not run either, and the
+    # battery stops there.
+    assert report["summary"]["runs"] == 0
+    assert report["summary"]["not_run"] == 2
     assert report["summary"]["spend_micros"] == 100
     assert report["summary"]["verdict"] == "incomplete"
+    assert [%{"task_id" => "R1", "outcome" => "not_run"}] = report["runs"]
+  end
+
+  defp spending_model(spend_cap) do
+    fn task, _run ->
+      {MealPlannerApi.PlanningAgent.BatterySpendingModel,
+       inner: {Scripted, script: good_script(task.id)},
+       micros_per_call: 50,
+       spend_cap_micros: spend_cap}
+    end
+  end
+
+  test "a ceiling that runs out mid-battery leaves the rest not run, never graded" do
+    # The 2026-10-19 shape: after 2 runs of 3 calls (300 micro-USD) the
+    # 30 micro-USD left are positive but below one call, so the next run's
+    # first model call is refused before it reaches the model.
+    report =
+      run!(
+        model: spending_model(1_000_000),
+        tasks: Enum.take(Tasks.all(), 3),
+        runs_per_task: 2,
+        config: config(%{"spend_ceiling_micros" => 330})
+      )
+
+    summary = report["summary"]
+    assert summary["planned_runs"] == 6
+    assert summary["runs"] == 2
+    assert summary["correct"] == 2
+    assert summary["incorrect"] == 0
+    assert summary["not_run"] == 4
+    assert summary["spend_micros"] == 300
+    assert summary["verdict"] == "incomplete"
+    assert "4 planned runs did not run (spend ceiling reached)" in summary["verdict_reasons"]
+
+    assert [
+             %{"task_id" => "R1", "run" => 1, "outcome" => "correct"},
+             %{"task_id" => "R1", "run" => 2, "outcome" => "correct"},
+             %{"task_id" => "R2", "run" => 1, "outcome" => "not_run", "spend_micros" => 0}
+           ] = report["runs"]
+
+    # Gates come only from the runs that ran: the routine tasks never
+    # escalate, so that gate has no evidence.
+    gate = &Enum.find(report["gates"], fn gate -> gate["name"] == &1 end)
+    assert gate.("min_escalation_quality")["measured"] == nil
+    assert gate.("max_cost_micros_per_completed_task")["measured"] == 150.0
+
+    markdown = Battery.Report.render(report, :markdown)
+    assert markdown =~ "| 6 | 2 | 2 | 6 | 0 | 0 | 0 | 0 | 4 | 0.3333 | 300 |"
+  end
+
+  test "a run the ceiling cuts mid-run is not run, and its spend still counts" do
+    # 100 micro-USD are left for R2: two calls go through, the third is
+    # refused by the ceiling, not by the run's own cap.
+    report =
+      run!(
+        model: spending_model(1_000_000),
+        tasks: Enum.take(Tasks.all(), 3),
+        runs_per_task: 1,
+        config: config(%{"spend_ceiling_micros" => 250})
+      )
+
+    assert report["summary"]["runs"] == 1
+    assert report["summary"]["not_run"] == 2
+    assert report["summary"]["spend_micros"] == 250
+    assert report["summary"]["verdict"] == "incomplete"
+
+    assert [%{"outcome" => "correct"}, %{"task_id" => "R2", "outcome" => "not_run"}] =
+             report["runs"]
+  end
+
+  test "a run that reaches its own per-session cap is still graded" do
+    # The ceiling never binds: each run's own cap stops its third call.
+    report =
+      run!(
+        model: spending_model(100),
+        tasks: Enum.take(Tasks.all(), 2),
+        runs_per_task: 1
+      )
+
+    assert report["summary"]["runs"] == 2
+    assert report["summary"]["not_run"] == 0
+    assert Enum.all?(report["runs"], &(&1["outcome"] != "not_run"))
   end
 
   @tag :capture_log

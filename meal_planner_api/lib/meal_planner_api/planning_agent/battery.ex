@@ -31,8 +31,15 @@ defmodule MealPlannerApi.PlanningAgent.Battery do
 
   The battery's spend ceiling bounds all runs together. Before each run the
   model adapter's own per-session spend cap (`:spend_cap_micros`) is lowered
-  to what is left of the ceiling, so no run can spend past it; once nothing
-  is left the remaining runs are not run and the report is `incomplete`.
+  to what is left of the ceiling, so no run can spend past it.
+
+  When a run's cap is the remaining ceiling (lower than the adapter's own)
+  and a model call of the run is refused for it (`spend_cap_reached`: what
+  is left is zero or below one call's reservation), the run is recorded as
+  not run, never graded, and the battery stops: what is left cannot pay for
+  any later run either. Every planned run after it is not run too, and the
+  report is `incomplete`. A run that reaches the adapter's own per-session
+  cap, with the ceiling not binding, is the agent's doing and is graded.
   """
 
   alias MealPlannerApi.PlanningAgent.Battery.{Config, Kitchen, Report, Run, Tasks}
@@ -86,10 +93,24 @@ defmodule MealPlannerApi.PlanningAgent.Battery do
           remaining = config.spend_ceiling_micros - spent(meter)
 
           if remaining > 0 do
-            run_model = cap_spend(model_for(model, task, run), remaining)
-            result = Run.execute(task, run, Map.put(ctx, :model, run_model))
+            run_model = model_for(model, task, run)
+
+            result =
+              Run.execute(
+                task,
+                run,
+                Map.merge(ctx, %{
+                  model: cap_spend(run_model, remaining),
+                  ceiling_capped: ceiling_binds?(run_model, remaining)
+                })
+              )
+
             on_run.(result)
-            {:cont, [result | results]}
+
+            # A run the ceiling refused leaves too little for any later run.
+            if result.grade.outcome == :not_run,
+              do: {:halt, [result | results]},
+              else: {:cont, [result | results]}
           else
             {:halt, results}
           end
@@ -114,14 +135,24 @@ defmodule MealPlannerApi.PlanningAgent.Battery do
   """
   @spec cap_spend({module(), keyword()}, pos_integer()) :: {module(), keyword()}
   def cap_spend({module, opts}, remaining) do
-    configured =
-      Keyword.get_lazy(opts, :spend_cap_micros, fn ->
-        :meal_planner_api |> Application.get_env(module, []) |> Keyword.get(:spend_cap_micros)
-      end)
+    configured = configured_cap(module, opts)
 
     if is_integer(configured) and configured > 0,
       do: {module, Keyword.put(opts, :spend_cap_micros, min(configured, remaining))},
       else: {module, opts}
+  end
+
+  # Whether the run's per-session cap is the remaining ceiling rather than
+  # the adapter's own: only then is a spend-cap refusal the battery's doing.
+  defp ceiling_binds?({module, opts}, remaining) do
+    configured = configured_cap(module, opts)
+    is_integer(configured) and configured > remaining
+  end
+
+  defp configured_cap(module, opts) do
+    Keyword.get_lazy(opts, :spend_cap_micros, fn ->
+      :meal_planner_api |> Application.get_env(module, []) |> Keyword.get(:spend_cap_micros)
+    end)
   end
 
   defp model_for(model, task, run) when is_function(model, 2), do: model.(task, run)
