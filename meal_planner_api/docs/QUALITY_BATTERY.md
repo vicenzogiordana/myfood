@@ -97,8 +97,12 @@ value and keep the file out of git:
 - The paid adapter's per-session caps and token prices are separate,
   existing human decisions (`OpenAIResponses` or `ClaudeMessages`). Before each run the battery
   lowers the adapter's per-session spend cap to what is left of the ceiling.
-  Once the ceiling is spent, the remaining runs are skipped and the report
-  is `incomplete`.
+  Once what is left is zero, or below one call's reservation, the run whose
+  model call the ceiling refused is reported as `not_run` (never graded),
+  the battery stops, every remaining run counts as not run and the report
+  is `incomplete`. Gates are computed only from the runs that ran. A run
+  that reaches the adapter's own per-session cap, with the ceiling not
+  binding, is graded as usual.
 
 ## Running it
 

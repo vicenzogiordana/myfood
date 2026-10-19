@@ -4,12 +4,14 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Report do
 
   ## Verdict
 
+    * `incomplete` — some planned runs never ran (the spend ceiling was
+      reached); a battery that did not run in full never passes. This wins
+      over every other verdict; its reasons still name any hard-rule
+      violation
     * `fail` — any run presented a hard-rule violation as valid, whatever
       the score; or fewer than 90% of the planned runs are correct, counting
       pooled over every task; or a configured gate failed or could not be
       measured
-    * `incomplete` — some planned runs never ran (the spend ceiling was
-      reached); a battery that did not run in full never passes
     * `pending_human_review` — the minimum can only be reached with runs
       left for human review (a criterion configured as human-judged)
     * `pass` — none of the above
@@ -31,7 +33,16 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Report do
       cause over those judged so far
     * `min_recovery_correctness` — recovery checks that held over all
 
-  A gate without evidence is reported as not measured and does not pass.
+  Gates are computed only from the runs that ran. A gate without evidence
+  is reported as not measured and does not pass.
+
+  ## Not run
+
+  A result with the outcome `:not_run` (a run the spend ceiling refused,
+  see `MealPlannerApi.PlanningAgent.Battery`) is listed with its evidence
+  but is not a run that ran: it counts under Not run with every planned run
+  never started, never in the score or a gate. Its spend, really spent,
+  still counts in the total spend.
 
   A run whose failure the harness caused is listed under `harness_failures`:
   per spec #93 such a failure reopens the architecture decision.
@@ -49,6 +60,9 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Report do
   @spec build(Config.t(), [map()], keyword()) :: map()
   def build(%Config{} = config, results, opts) do
     planned = Keyword.fetch!(opts, :planned_runs)
+    # Runs the spend ceiling cut are listed but neither counted nor graded.
+    listed = results
+    {skipped, results} = Enum.split_with(results, &not_run?/1)
     outcomes = Enum.frequencies_by(results, & &1.grade.outcome)
     count = &Map.get(outcomes, &1, 0)
     correct = count.(:correct)
@@ -77,7 +91,7 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Report do
         "not_run" => not_run,
         "score" => ratio(correct, planned),
         "min_correct" => min_correct,
-        "spend_micros" => results |> Enum.map(& &1.spend_micros) |> Enum.sum(),
+        "spend_micros" => (results ++ skipped) |> Enum.map(& &1.spend_micros) |> Enum.sum(),
         "verdict" => verdict,
         "verdict_reasons" => reasons,
         "harness_note" => @harness_note
@@ -87,9 +101,11 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Report do
         for %{grade: %{harness_failure?: true}} = result <- results do
           %{"task_id" => result.task_id, "run" => result.run, "reasons" => result.grade.reasons}
         end,
-      "runs" => Enum.map(results, &run_data/1)
+      "runs" => Enum.map(listed, &run_data/1)
     }
   end
+
+  defp not_run?(result), do: result.grade.outcome == :not_run
 
   defp verdict(hard, not_run, correct, pending, min_correct, gates) do
     failed_gates =
@@ -100,13 +116,16 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Report do
       end
 
     short = "#{correct} correct runs, #{min_correct} required"
+    hard_reason = "#{hard} run#{plural(hard)} presented a hard-rule violation as valid"
 
     cond do
-      hard > 0 ->
-        {"fail", ["#{hard} run#{plural(hard)} presented a hard-rule violation as valid"]}
-
       not_run > 0 ->
-        {"incomplete", ["#{not_run} planned runs did not run (spend ceiling reached)"]}
+        {"incomplete",
+         ["#{not_run} planned runs did not run (spend ceiling reached)"] ++
+           if(hard > 0, do: [hard_reason], else: [])}
+
+      hard > 0 ->
+        {"fail", [hard_reason]}
 
       correct + pending < min_correct ->
         {"fail", [short | failed_gates]}
