@@ -16,6 +16,21 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
 
   @stub __MODULE__
 
+  defmodule SlowProvider do
+    @moduledoc false
+    @behaviour Plug
+
+    @impl true
+    def init(opts), do: opts
+
+    @impl true
+    def call(conn, opts) do
+      send(opts[:test], {:slow_provider_called, System.monotonic_time(:millisecond)})
+      Process.sleep(opts[:delay_ms])
+      Plug.Conn.send_resp(conn, 200, "{}")
+    end
+  end
+
   @tools [
     %{
       name: "search_recipes",
@@ -800,6 +815,46 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
       {:ok, state} = ClaudeMessages.init(opts())
 
       assert {:error, :provider_timeout, _state} = ClaudeMessages.respond(state, @request)
+    end
+
+    test "the default HTTP deadline ends before the default model attempt deadline" do
+      {:ok, state} = ClaudeMessages.init(opts())
+
+      assert state.config.receive_timeout_ms < CallBounds.policies().model.timeout_ms
+    end
+
+    test "a slow provider fails as a provider timeout within the attempt deadline, not a kill" do
+      # A real HTTP server (a Req.Test plug runs in-process and ignores the
+      # receive timeout) that answers after the attempt deadline.
+      server =
+        start_supervised!(
+          {Bandit, plug: {SlowProvider, test: self(), delay_ms: 2_500}, port: 0, ip: :loopback}
+        )
+
+      {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
+
+      {:ok, state} =
+        ClaudeMessages.init(opts(base_url: "http://127.0.0.1:#{port}/v1", req_options: []))
+
+      bounds = CallBounds.new(policies: %{model: %{timeout_ms: 1_000, retries: 1, backoff_ms: 0}})
+
+      assert {:error, :provider_timeout, state} =
+               CallBounds.run(bounds, :model, state, fn model_state, call ->
+                 # As the planning loop does, reserved states reach the bounds.
+                 request =
+                   Map.merge(@request, %{timeout_ms: call.timeout_ms, checkpoint: call.report})
+
+                 ClaudeMessages.respond(model_state, request)
+               end)
+
+      # One POST per attempt (the timeout is transient: one retry).
+      assert_receive {:slow_provider_called, _}, 1_000
+      assert_receive {:slow_provider_called, _}, 1_000
+      refute_receive {:slow_provider_called, _}, 100
+
+      # Both attempts settled: nothing left reserved, each worst case spent.
+      assert %{reserved_micros: 0, spent_micros: spent} = ClaudeMessages.spend(state)
+      assert spent >= 2 * 12_000
     end
 
     test "a 200 response without usage keeps the reservation as spent" do

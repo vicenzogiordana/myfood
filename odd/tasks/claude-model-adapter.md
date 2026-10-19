@@ -92,5 +92,18 @@ Out of scope: streaming, per-message effort, mid-conversation tool changes, real
   highest of input, cache-write and cache-read prices. `assistant_turns` is not pruned
   (CD-3); its `planning_agent_recoveries` row is deleted on confirm, cancel, expiry and
   lost lock (existing tests in `session_recovery_test.exs`).
+- Review round 2 (Jorge, medium, verified at 4f8d193): the default `receive_timeout_ms`
+  (120 s) exceeded the default `:model` attempt deadline of `CallBounds` (60 s), so the
+  HTTP timeout never fired and slow turns were brutal-killed with an open reservation.
+  Fix: default lowered to 55 s, and when a request carries `:timeout_ms` the receive
+  timeout is capped below it (margin `min(1 s, timeout/5)`), so the call fails as a
+  settled `:provider_timeout`. RED: 2 failing tests (default above deadline; a real
+  Bandit server answering after the deadline returned `{:error, :timeout, _}`). GREEN:
+  adapter suite 49/49 (3 repeated runs), `mix precommit` 1446 passed, 25 skipped (one
+  earlier run hit the pre-existing timing flake `session_bounds_test.exs:123`, 59 < 60 ms,
+  passing 3/3 in isolation on the base). Residual: the planning loop does not pass
+  `call.timeout_ms` to `respond/2` yet (Loop out of scope), so in production only the
+  55 s default applies; a model needing longer turns must raise `receive_timeout_ms` and
+  the `:model` call policy together (provider-selection slice).
 - Mirror: Engram topic `odd/claude-model-adapter/tasks`.
 - Next step: merge PR 1, then open the PR for `feat/issue-141-provider-selection`.

@@ -95,9 +95,21 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
         fallback_input_price_micros_per_mtok: nil,
         fallback_output_price_micros_per_mtok: nil,
         max_tokens: 16_000,                          # thinking plus reply
-        receive_timeout_ms: 120_000
+        receive_timeout_ms: 55_000
 
   Options passed to `init/1` override the application config.
+
+  ## Deadlines
+
+  The HTTP receive timeout must end before the attempt deadline of
+  `MealPlannerApi.PlanningAgent.CallBounds` (60 s for `:model` by default),
+  so a slow answer fails as a settled `:provider_timeout` instead of the
+  attempt being killed with its reservation still open. Its default
+  (55 s) stays below the default `:model` deadline; a request may also
+  carry `:timeout_ms` (the attempt's effective deadline), and the receive
+  timeout is then capped just below it. A slow model whose turns need
+  more than 55 s needs a larger `receive_timeout_ms` and a larger `:model`
+  call policy (`timeout_ms`) together.
   """
 
   @behaviour MealPlannerApi.PlanningAgent.Model
@@ -118,7 +130,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
     fallbacks: true,
     max_fallback_attempts: 1,
     max_tokens: 16_000,
-    receive_timeout_ms: 120_000,
+    receive_timeout_ms: 55_000,
     concurrency_limiter: ConcurrencyLimiter,
     req_options: []
   ]
@@ -180,7 +192,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
         state = %{state | ledger: ledger}
         PaidCall.checkpoint(request, state)
 
-        case post(state.config, body) do
+        case post(state.config, body, receive_timeout(state.config, request)) do
           {:ok, response} ->
             {usage, actual} =
               case usage(state.config, response) do
@@ -317,14 +329,22 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
     %{state | assistant_turns: Map.put(state.assistant_turns, index, turn)}
   end
 
-  defp post(config, body) do
+  # Capped just below the attempt deadline, when the request carries it, so
+  # the HTTP call ends first and its reservation is settled.
+  defp receive_timeout(config, %{timeout_ms: timeout_ms})
+       when is_integer(timeout_ms) and timeout_ms > 0,
+       do: min(config.receive_timeout_ms, max(timeout_ms - min(1_000, div(timeout_ms, 5)), 1))
+
+  defp receive_timeout(config, _request), do: config.receive_timeout_ms
+
+  defp post(config, body, receive_timeout) do
     beta = if config.fallbacks, do: [{"anthropic-beta", @fallback_beta}], else: []
 
     [
       url: config.base_url <> "/messages",
       json: body,
       headers: [{"x-api-key", config.api_key}, {"anthropic-version", @api_version} | beta],
-      receive_timeout: config.receive_timeout_ms
+      receive_timeout: receive_timeout
     ]
     |> Keyword.merge(config.req_options)
     |> PaidCall.post()
