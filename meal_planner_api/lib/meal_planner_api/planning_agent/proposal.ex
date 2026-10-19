@@ -23,13 +23,17 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
   `:recipe_id`, `:name`, `:origin` and `:draft`) in the session context
   `ctx`. Every meal shows its Recipe Origin, and a Recipe Draft is marked as
   one so the Member sees it is AI-created and not yet saved. Prices are
-  aged at the context's `:clock` (default: the current time). Returns the
-  Proposal event and the Purchase it carries.
+  aged at the context's `:clock` (default: the current time), and the
+  Purchase follows the context's chosen brands (`brand_choices/1`). Returns
+  the Proposal event and the Purchase it carries.
   """
   @spec build([map()], map()) :: {t(), Purchase.t()}
   def build(meals, ctx) do
     purchase =
-      Purchase.for_meals(meals, ctx.account_id, RecipeDraft.in_context(ctx), now: now(ctx))
+      Purchase.for_meals(meals, ctx.account_id, RecipeDraft.in_context(ctx),
+        now: now(ctx),
+        brands: brand_choices(ctx)
+      )
 
     deviations = budget_deviations(purchase, ctx.household.budget_cents)
 
@@ -56,6 +60,30 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
 
     {proposal, purchase}
   end
+
+  @doc """
+  The chosen brand per ingredient id in the session context `ctx`: a Session
+  Brand (`:session_brands`, else the Workspace's) beats the Household's Brand
+  Preference.
+  """
+  @spec brand_choices(map()) :: %{Ecto.UUID.t() => Purchase.brand_choice()}
+  def brand_choices(ctx) do
+    household =
+      ctx.household
+      |> Map.get(:brand_preferences, [])
+      |> Map.new(&{&1.ingredient_id, %{brand: &1.brand, source: :household}})
+
+    session =
+      ctx
+      |> session_brands()
+      |> Map.new(fn {id, %{brand: brand}} -> {id, %{brand: brand, source: :session}} end)
+
+    Map.merge(household, session)
+  end
+
+  defp session_brands(%{session_brands: brands}) when is_map(brands), do: brands
+  defp session_brands(%{workspace: workspace}), do: Map.get(workspace, :session_brands, %{})
+  defp session_brands(_ctx), do: %{}
 
   @doc "The meals of a Proposal, as validator input."
   @spec meals(t()) :: [%{date: Date.t(), slot: String.t(), recipe_id: String.t()}]

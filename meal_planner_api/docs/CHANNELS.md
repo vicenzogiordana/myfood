@@ -246,6 +246,7 @@ Every event is pushed as `agent_event` with `type` and `session_id`:
 | `recipe_draft` | `{recipe_id, name, origin, draft: true, servings, slots, ingredients: [{ingredient, quantity_milli, unit}], steps, nutrition, cost}` | The agent built a Recipe Draft from catalog Ingredients. `origin` is `ai_created` (disclose as AI-made, possibly imperfect) or `user_created` (a dictated recipe). See "Recipe Drafts" below |
 | `recipe_saved` | `{recipe_id, name, origin}` | The Member saved a dictated recipe as a Household Recipe |
 | `optimizer_failed` | `{reason}` | The optimizer failed (including `optimizer_busy` / `optimizer_unconfigured` from the global subprocess cap); no fallback plan is produced |
+| `session_brand_changed` | `{ingredient, brand, source, previous_brand, previous_source}` — `source` is `session`, `household` or `null` | The agent set or cleared a Session Brand (this Planning Session only; household settings are unchanged). `brand` is the brand now bought for the ingredient |
 | `consent_required` | `{}` | Consent must be given before the agent can call the AI provider |
 | `limit_reached` | `{limit, requires_authorization: true}` — `iterations`, `no_progress` or `time` | Execution stopped: 10 iterations per Planning Session (new messages do not reset them), 3 consecutive attempts without new evidence, or 5 minutes per request. Nothing runs until the Member sends `authorize_continuation` |
 | `agent_unavailable` | `{reason}` | The AI provider cannot be used now: `provider_unavailable` / `provider_timeout` after up to 5 retries, `provider_busy` (global provider concurrency cap) after up to 5 retries, or at once for `provider_unauthorized`, `provider_rejected_request`, `provider_conflict`, `spend_cap_reached`, `token_cap_reached` |
@@ -261,7 +262,7 @@ computed by code from the Proposal's meals net of the Projected Pantry
 (Pantry minus stock committed to not-yet-cooked Planned Meals, inside or
 outside the range). Needs are aggregated once per ingredient and unit, then
 rounded up to whole packages of the stored Product with the lowest package
-total.
+total, unless a brand was chosen for the ingredient (see "Brands" below).
 
 ```json
 {
@@ -270,7 +271,11 @@ total.
                "packages": 1, "total_cents": 800, "product": "…", "brand": "…",
                "presentation": {"quantity_milli": 500000, "unit": "g"},
                "supermarket": "…", "price_cents": 800, "currency": "ARS",
-               "observed_at": "2026-10-13T09:30:00.000000Z"}],
+               "observed_at": "2026-10-13T09:30:00.000000Z",
+               "brand_choice": {"brand": "…", "source": "household", "honoured": true},
+               "cheaper_alternative": {"product": "…", "brand": "…", "packages": 1,
+                                       "total_cents": 600, "difference_cents": 200}}],
+    "brand_substitutions": [],
     "missing_prices": [{"ingredient": "…", "quantity_milli": 2000, "unit": "g",
                         "reason": "no_stored_price"}],
     "total_cents": 800, "currency": "ARS", "complete": false
@@ -291,6 +296,29 @@ total.
   becomes a lower bound (`complete: false`, `uncertain: true`); then
   `within_budget` is `null` unless the lower bound already overspends.
 - `budget_cents` is `null` when the Household has no budget set.
+
+#### Brands
+
+A chosen brand for an ingredient is the Session Brand (set from the chat with
+the agent's `set_session_brand` tool, this Planning Session only, kept in its
+Workspace) or else the Household's Brand Preference (set in household
+settings: `GET /api/accounts/:account_id/settings/brand-preferences`, `PUT`
+and `DELETE /api/accounts/:account_id/settings/brand-preferences/:ingredient_id`
+with `{"brand": "…"}`; this is also the target of a "keep this brand"
+shortcut). A Session Brand overrides the Brand Preference; with no chosen
+brand the cheapest Product is bought.
+
+- A chosen brand is bought whenever a Product of it exists in the needed
+  unit and currency, even when another brand is cheaper; `brand_choice`
+  says so (`honoured: true`) and `cheaper_alternative` names the cheaper
+  Product and the difference.
+- When it cannot be bought, the cheapest Product is bought instead and the
+  line appears in `brand_substitutions` (`ingredient`, `chosen_brand`,
+  `source`, `bought_brand`, `bought_product`, `reason: brand_unavailable`).
+  A chosen brand is never swapped silently.
+- When the Purchase breaks the budget, the agent is given the cheaper brand
+  alternatives with their price difference (`brand_alternatives`) to offer
+  the Member; code never applies them.
 
 #### Recipe Drafts
 

@@ -35,7 +35,16 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       shown Proposal always carries its Purchase (`MealPlannerApi.PlanningAgent.Purchase`),
       the consumed-ingredient cost and the budget comparison; a Purchase
       over the budget is a budget Deviation (`requires_approval`)
+    * `set_session_brand` — sets or clears the Session Brand of an
+      ingredient in the Workspace (never household settings); every change
+      is shown to the Member as a `session_brand_changed` event
     * `ask_human` — one question; ends the turn
+
+  Brands steer the Purchase softly: a Session Brand, else the Household's
+  Brand Preference, is bought when it can be; when it cannot, the Proposal
+  lists the substitution, and when the Purchase breaks the budget the
+  result lists cheaper brand alternatives with their price difference for
+  the agent to offer. Code never swaps a chosen brand on its own.
 
   Read calls (recipe search, live price lookups) and solver calls run within
   `MealPlannerApi.PlanningAgent.CallBounds`: their own deadline and retry
@@ -56,6 +65,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     ProjectedPantry,
     Proposal,
     ProposalValidator,
+    Purchase,
     RecipeDraft,
     RecipeSearch,
     Workspace
@@ -257,6 +267,27 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "with its Purchase (packages to buy net of the Projected Pantry) and budget check. " <>
             "Returns the status (valid, requires_approval with Deviations) or the violations to fix.",
         parameters: %{"type" => "object", "properties" => %{}, "additionalProperties" => false}
+      },
+      %{
+        name: "set_session_brand",
+        description:
+          "Set the brand to buy for one ingredient in this Planning Session only (a Session " <>
+            "Brand), or clear it with brand null. It overrides the household's Brand " <>
+            "Preference for this session and never changes household settings. The brand " <>
+            "must be one a stored Product of the ingredient has (use lookup_prices with brand " <>
+            "first). The household sees every change. Only set it when the household asks.",
+        parameters: %{
+          "type" => "object",
+          "properties" => %{
+            "ingredient" => %{"type" => "string", "description" => "Ingredient name"},
+            "brand" => %{
+              "type" => ["string", "null"],
+              "description" => "Brand to buy; null clears the Session Brand"
+            }
+          },
+          "required" => ["ingredient", "brand"],
+          "additionalProperties" => false
+        }
       },
       %{
         name: "ask_human",
@@ -479,7 +510,12 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
           "consumed_cost_cents" => purchase.consumed.total_cents,
           "currency" => purchase.currency,
           "budget" => proposal["budget"],
-          "deviations" => deviations
+          "deviations" => deviations,
+          "brand_substitutions" => proposal["purchase"]["brand_substitutions"],
+          # A budget conflict is answered with the cheaper brand options and
+          # their price difference; the agent offers them, never applies them.
+          "brand_alternatives" =>
+            if(deviations == [], do: [], else: Purchase.brand_alternatives(purchase))
         }
 
         {result, Workspace.present(ctx.workspace, proposal, meals), :continue}
@@ -550,6 +586,51 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
+  defp run("set_session_brand", args, ctx) do
+    with {:ok, name} <- required_string(args, "ingredient", "ingredient_required"),
+         {:ok, ingredient} <- find_ingredient(name),
+         {:ok, brand} <- requested_brand(args, ingredient) do
+      before = effective_brand(ctx, ingredient.id)
+      # A Workspace restored from an older snapshot may lack the field.
+      session_brands = Map.get(ctx.workspace, :session_brands, %{})
+
+      session_brands =
+        case brand do
+          nil ->
+            Map.delete(session_brands, ingredient.id)
+
+          brand ->
+            Map.put(session_brands, ingredient.id, %{ingredient: ingredient.name, brand: brand})
+        end
+
+      workspace = Map.put(ctx.workspace, :session_brands, session_brands)
+      now = effective_brand(%{ctx | workspace: workspace}, ingredient.id)
+
+      # Checkpointed before the Member is told, so the session keeps the
+      # change even when this turn is cut by the deadline right after.
+      report_workspace(ctx, workspace)
+
+      emit(ctx, %{
+        "type" => "session_brand_changed",
+        "ingredient" => ingredient.name,
+        "brand" => brand_name(now),
+        "source" => brand_source(now),
+        "previous_brand" => brand_name(before),
+        "previous_source" => brand_source(before)
+      })
+
+      {%{
+         "status" => "ok",
+         "ingredient" => ingredient.name,
+         "brand" => brand_name(now),
+         "source" => brand_source(now),
+         "previous_brand" => brand_name(before)
+       }, workspace, :continue}
+    else
+      {:error, reason} -> {%{"error" => reason}, ctx.workspace, :continue}
+    end
+  end
+
   defp run("ask_human", args, ctx) do
     case string_arg(args, "question") do
       nil ->
@@ -563,6 +644,56 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
   defp run(_name, _arguments, ctx),
     do: {%{"error" => "unknown_tool"}, ctx.workspace, :continue}
+
+  # ---------------------------------------------------------------------------
+  # Brands
+  # ---------------------------------------------------------------------------
+
+  defp effective_brand(ctx, ingredient_id),
+    do: Map.get(Proposal.brand_choices(ctx), ingredient_id)
+
+  defp brand_name(nil), do: nil
+  defp brand_name(%{brand: brand}), do: brand
+  defp brand_source(nil), do: nil
+  defp brand_source(%{source: source}), do: Atom.to_string(source)
+
+  defp required_string(args, key, error) do
+    case trimmed_arg(args, key) do
+      nil -> {:error, error}
+      value -> {:ok, value}
+    end
+  end
+
+  defp find_ingredient(name) do
+    case Prices.ingredient_by_name(name) do
+      nil -> {:error, "unknown_ingredient"}
+      ingredient -> {:ok, ingredient}
+    end
+  end
+
+  # nil clears the Session Brand; any other brand must be one a stored
+  # Product of the ingredient has, spelled as stored.
+  defp requested_brand(args, ingredient) do
+    case Map.fetch(args, "brand") do
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, brand} when is_binary(brand) ->
+        case String.trim(brand) do
+          "" ->
+            {:error, "brand_required"}
+
+          brand ->
+            case Prices.stored_brand(ingredient.id, brand) do
+              nil -> {:error, "unknown_brand"}
+              stored -> {:ok, stored}
+            end
+        end
+
+      _ ->
+        {:error, "brand_required"}
+    end
+  end
 
   # ---------------------------------------------------------------------------
   # Optimizer
@@ -920,6 +1051,11 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
   defp emit(%{emit: emit}, event) when is_function(emit, 1), do: emit.(event)
   defp emit(_ctx, _event), do: :ok
+
+  defp report_workspace(%{report_workspace: report}, workspace) when is_function(report, 1),
+    do: report.(workspace)
+
+  defp report_workspace(_ctx, _workspace), do: :ok
 
   defp reason_string(reason, _default) when is_atom(reason), do: Atom.to_string(reason)
   defp reason_string(_reason, default), do: default

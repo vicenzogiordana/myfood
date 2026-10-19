@@ -19,6 +19,10 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
     * `price_refreshes` — recent live price refreshes by ingredient id
       (`MealPlannerApi.PlanningAgent.Prices.refresh_memo/0`), so the session
       does not scrape the same Ingredient again on every `lookup_prices`
+    * `session_brands` — Session Brands by ingredient id
+      (`%{ingredient: name, brand: brand}`), set with `set_session_brand`:
+      they override the Household's Brand Preference for this session only
+      and are discarded with it
 
   `edit/3` applies one edit or refuses it with a reason; approvals are human
   actions and can never be set here.
@@ -44,7 +48,8 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
             recipe_drafts: %{},
             deviation_approval: nil,
             absence_exceptions: [],
-            price_refreshes: %{}
+            price_refreshes: %{},
+            session_brands: %{}
 
   @type key :: {Date.t(), String.t()}
   @type t :: %__MODULE__{
@@ -58,7 +63,8 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
           recipe_drafts: %{Ecto.UUID.t() => term()},
           deviation_approval: map() | nil,
           absence_exceptions: [map()],
-          price_refreshes: MealPlannerApi.PlanningAgent.Prices.refresh_memo()
+          price_refreshes: MealPlannerApi.PlanningAgent.Prices.refresh_memo(),
+          session_brands: %{Ecto.UUID.t() => %{ingredient: String.t(), brand: String.t()}}
         }
 
   @type ctx :: %{

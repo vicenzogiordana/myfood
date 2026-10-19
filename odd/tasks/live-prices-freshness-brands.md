@@ -70,8 +70,8 @@ review rounds) is split into three more slices:
 
 3. Household Brand Preferences settings (#135). Disclosed to the agent
    with neutral wording; they do not change the Purchase yet.
-4. Brand and Product price queries (this slice).
-5. Purchase steered by Session Brands and Brand Preferences.
+4. Brand and Product price queries (#136).
+5. Purchase steered by Session Brands and Brand Preferences (this slice).
 
 ## Acceptance criteria
 
@@ -79,9 +79,9 @@ review rounds) is split into three more slices:
 - [x] Missing or stale prices trigger a live lookup; failures keep the old
   price with its real age and a warning
 - [x] Brand and Product queries return matching Products with prices
-- [ ] Session Brands live only in the Workspace; Brand Preferences come from
+- [x] Session Brands live only in the Workspace; Brand Preferences come from
   household settings
-- [ ] The agent never substitutes a chosen brand without telling the Member
+- [x] The agent never substitutes a chosen brand without telling the Member
 - [x] Tests use a fake scraper; the scraper prerequisite is tracked and
   referenced (fake scraper in test support, contract doc, HTTP adapter)
 
@@ -158,8 +158,34 @@ review rounds) is split into three more slices:
   Ingredient) is kept for the next slice. Commits: `ad50c77` and the
   contract rework commit on
   `feat/issue-101-part-5-brand-product-price-queries`.
-- [ ] S5 Purchase steered by Session Brands and Brand Preferences (split
-  slice 3/3).
+- [x] S5 Purchase steered by Session Brands and Brand Preferences (split
+  slice 3/3, route: inline, one bounded worker landing code already
+  written and reviewed in #126, applied by hand onto main because main's
+  Session, Workspace and Proposal changed after #126 was cut).
+  `Purchase.for_meals/4` takes a `:brands` option (chosen brand per
+  Ingredient id): with no brand the cheapest Product is bought; a chosen
+  brand is bought whenever a usable Product of it exists, even when another
+  brand is cheaper, and the line carries `brand_choice` and
+  `cheaper_alternative` with the difference; a chosen brand that cannot be
+  bought falls back to the cheapest Product and is listed in
+  `brand_substitutions`, never swapped silently. `Proposal.brand_choices/1`
+  merges the Household's Brand Preferences with the Session Brands (a
+  Session Brand wins) and `Proposal.build/2` passes them, so confirmation
+  rebuilds the Proposal with the same brands (the Session passes its
+  Session Brands in the confirm context). `set_session_brand` sets or
+  clears a Session Brand in the Workspace (`session_brands` field; never
+  household settings), accepts only a brand a stored Product of the
+  Ingredient has (`Prices.ingredient_by_name/1`, `Prices.stored_brand/2`),
+  checkpoints the Workspace through the tool context's `report_workspace`
+  before emitting `session_brand_changed`, and so survives a turn cut by
+  the deadline. `present_proposal` returns `brand_substitutions` and, only
+  when the Purchase breaks the budget, `brand_alternatives` with their
+  price difference for the agent to offer. The never-swap rule and the
+  `set_session_brand` rule are in the agent instructions ("Brands:") and in
+  `docs/CHANNELS.md` ("Brands"). Builds on main's settled `lookup_prices`
+  contract from #136 unchanged. Commit: the `feat(planning-agent): steer
+  the Purchase with Session Brands and Brand Preferences` commit on
+  `feat/issue-101-part-6-session-brands-purchase-steering`.
 
 ## Checks
 
@@ -352,6 +378,26 @@ review rounds) is split into three more slices:
   search over every stored Product, its `ingredients_truncated` warning
   with a `nil` Ingredient, its `no_matching_product` miss and their tests.
 
+- S5 glue for main: the Session already checkpoints the Workspace after
+  every tool call (`on_workspace`); `set_session_brand` also checkpoints
+  through `report_workspace` in the tool context before the Member sees the
+  change, so a deadline cut between the event and the tool's return cannot
+  lose it. `session_brands` is read with a default so a Workspace restored
+  from an older snapshot still works. Purchase keeps main's Recipe Draft
+  needs (`drafts` argument).
+- S5 evidence: `BrandsTest` "Purchase with brands" (cheapest without a
+  brand, Brand Preference honoured over a cheaper brand with the
+  alternative named, Session Brand overriding the preference visibly and
+  leaving household settings untouched, Session Brand discarded with its
+  Planning Session, clearing falls back to the preference visibly,
+  unbuyable chosen brand listed in `brand_substitutions`, budget conflict
+  answered with `brand_alternatives`, none within budget) and
+  "set_session_brand" (unknown ingredient, unknown brand and blank brand
+  rejected; a Session Brand survives a turn cut by the deadline): 12
+  passed. `MYFOOD_TEST_DATABASE=meal_planner_api_test101 mix test` 1327
+  passed, 25 skipped; `mix precommit` (compile with warnings as errors, format, full
+  suite) 1327 passed, 25 skipped.
+
 ## Next step
 
-S5: Purchase steered by Session Brands and Brand Preferences.
+Review of the S5 PR; with it merged, #101 is complete.
