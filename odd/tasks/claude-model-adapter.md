@@ -115,5 +115,18 @@ Out of scope: streaming, per-message effort, mid-conversation tool changes, real
   1000 ms, default 55 s receive timeout, no hand-built request) returned
   `reserved_micros: 41915`. GREEN: adapter suite 50/50; `mix test` and
   `mix precommit` both 1447 passed, 25 skipped.
+- Review round 4 (Jorge, low, verified at 14af808): when the global deadline bounded a
+  `:model` attempt, the adapter's receive-timeout margin returned `:provider_timeout`
+  before the attempt deadline, so `CallBounds` treated it as transient (an extra paid
+  call could start with ~400 ms) and the turn ended `{:failed, :provider_timeout}`
+  instead of `{:limit_reached, "time"}`. Fix: `CallBounds.attempt` maps a
+  `:provider_timeout` from a globally bounded attempt to `:deadline_exceeded` when the
+  time left is within that margin (`min(1 s, timeout/5)`); a quick provider timeout with
+  time left is still retried. Retry policy, margin, adapters unchanged. Route: inline
+  (1 lib file, 2 tests). RED: a `CallBounds` test (`:provider_timeout` after 80 % of a
+  500 ms global window) returned `:provider_timeout`; a `Loop.run` test (real Bandit slow
+  server, 2 s global deadline, default 60 s policy) ended `{:failed, :provider_timeout}`.
+  GREEN: one POST, reservation settled, outcome `{:limit_reached, "time"}`; `mix test` and
+  `mix precommit` both 1450 passed, 25 skipped.
 - Mirror: Engram topic `odd/claude-model-adapter/tasks`.
 - Next step: merge PR 1, then open the PR for `feat/issue-141-provider-selection`.

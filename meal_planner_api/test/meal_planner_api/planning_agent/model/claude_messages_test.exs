@@ -894,6 +894,47 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
       assert spent > 0
     end
 
+    test "a slow provider cut by the global deadline ends the turn on time, not as a failure" do
+      # The global deadline (2 s) is shorter than the default model attempt
+      # deadline (60 s), so it bounds the attempt; the adapter ends its HTTP
+      # call just before it, leaving too little time for another paid call.
+      server =
+        start_supervised!(
+          {Bandit, plug: {SlowProvider, test: self(), delay_ms: 3_000}, port: 0, ip: :loopback}
+        )
+
+      {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
+
+      {:ok, state} =
+        ClaudeMessages.init(opts(base_url: "http://127.0.0.1:#{port}/v1", req_options: []))
+
+      bounds =
+        CallBounds.new(
+          policies: %{model: %{backoff_ms: 1}},
+          deadline_at: System.monotonic_time(:millisecond) + 2_000
+        )
+
+      result =
+        Loop.run(%{
+          model: ClaudeMessages,
+          model_state: state,
+          instructions: @request.instructions,
+          messages: [%{role: :user, content: "Plan something light"}],
+          tool_context: %{workspace: %{}},
+          allowance: Allowance.new(5),
+          emit: fn _event -> :ok end,
+          bounds: bounds
+        })
+
+      assert result.outcome == {:limit_reached, "time"}
+
+      # One paid call reserved and settled; no extra attempt was started.
+      assert_receive {:slow_provider_called, _}, 1_000
+      refute_receive {:slow_provider_called, _}, 500
+      assert %{reserved_micros: 0, spent_micros: spent} = ClaudeMessages.spend(result.model_state)
+      assert spent >= 12_000
+    end
+
     test "a 200 response without usage keeps the reservation as spent" do
       stub_response(Map.delete(text_response("hi"), "usage"))
       {:ok, state} = ClaudeMessages.init(opts())
