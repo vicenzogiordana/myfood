@@ -65,12 +65,16 @@ if config_env() != :test do
       |> Kernel.in(["true", "1", "yes", "on"])
 end
 
-# Planning agent OpenAI adapter and aggregate limits. Every cap, price and
+# Planning agent model adapter and aggregate limits. Every cap, price and
 # limit stays nil unless set, and paid execution is refused while any of them
 # is missing. The spend cap (micro-USD) and token cap apply per Planning
 # Session; the concurrency caps are global and the start rate limit applies
 # per Household (issue #118). A malformed value (not a whole integer) reads
 # as unset instead of crashing boot, so the refusal applies.
+#
+# PLANNING_AGENT_MODEL_PROVIDER selects the adapter (issue #141): `claude`
+# for ClaudeMessages, anything else (or unset) for OpenAIResponses. Both
+# share the caps; each reads its own key and prices.
 if config_env() != :test do
   optional_integer = fn name ->
     with value when is_binary(value) <- System.get_env(name),
@@ -89,6 +93,55 @@ if config_env() != :test do
     output_price_micros_per_mtok: optional_integer.("OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK"),
     max_concurrent_calls: optional_integer.("PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS")
 
+  optional_string = fn name ->
+    with value when is_binary(value) <- System.get_env(name),
+         value when value != "" <- String.trim(value) do
+      value
+    else
+      _ -> nil
+    end
+  end
+
+  config :meal_planner_api,
+         MealPlannerApi.PlanningAgent.Model.ClaudeMessages,
+         [
+           api_key: System.get_env("ANTHROPIC_API_KEY"),
+           spend_cap_micros: optional_integer.("PLANNING_AGENT_SPEND_CAP_MICROS"),
+           token_cap: optional_integer.("PLANNING_AGENT_TOKEN_CAP"),
+           max_concurrent_calls:
+             optional_integer.("PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS"),
+           input_price_micros_per_mtok:
+             optional_integer.("ANTHROPIC_INPUT_PRICE_MICROS_PER_MTOK"),
+           output_price_micros_per_mtok:
+             optional_integer.("ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK"),
+           cache_write_price_micros_per_mtok:
+             optional_integer.("ANTHROPIC_CACHE_WRITE_PRICE_MICROS_PER_MTOK"),
+           cache_read_price_micros_per_mtok:
+             optional_integer.("ANTHROPIC_CACHE_READ_PRICE_MICROS_PER_MTOK"),
+           fallback_input_price_micros_per_mtok:
+             optional_integer.("ANTHROPIC_FALLBACK_INPUT_PRICE_MICROS_PER_MTOK"),
+           fallback_output_price_micros_per_mtok:
+             optional_integer.("ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK")
+         ] ++
+           Enum.reject(
+             [
+               model: optional_string.("PLANNING_AGENT_CLAUDE_MODEL"),
+               effort: optional_string.("PLANNING_AGENT_CLAUDE_EFFORT")
+             ],
+             &is_nil(elem(&1, 1))
+           )
+
+  model_adapter =
+    case optional_string.("PLANNING_AGENT_MODEL_PROVIDER") do
+      provider when is_binary(provider) ->
+        if String.downcase(provider) == "claude",
+          do: MealPlannerApi.PlanningAgent.Model.ClaudeMessages,
+          else: MealPlannerApi.PlanningAgent.Model.OpenAIResponses
+
+      nil ->
+        MealPlannerApi.PlanningAgent.Model.OpenAIResponses
+    end
+
   config :meal_planner_api, MealPlannerApi.PlanningAgent.Optimizer.Port,
     max_concurrent_runs: optional_integer.("PLANNING_AGENT_MAX_CONCURRENT_OPTIMIZER_RUNS")
 
@@ -102,7 +155,9 @@ if config_env() != :test do
         nil
     end
 
-  config :meal_planner_api, :planning_agent, session_start_limit: session_start_limit
+  config :meal_planner_api, :planning_agent,
+    session_start_limit: session_start_limit,
+    model: {model_adapter, []}
 end
 
 # Planning agent live prices. Production reads the price scraper URL from

@@ -7,7 +7,7 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
 
   use ExUnit.Case, async: false
 
-  alias MealPlannerApi.PlanningAgent.Model.OpenAIResponses
+  alias MealPlannerApi.PlanningAgent.Model.{ClaudeMessages, OpenAIResponses}
   alias MealPlannerApi.PlanningAgent.Optimizer.Port, as: PortOptimizer
 
   @runtime Path.expand("../../../config/runtime.exs", __DIR__)
@@ -18,7 +18,14 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
                 PLANNING_AGENT_MAX_CONCURRENT_OPTIMIZER_RUNS
                 PLANNING_AGENT_SESSION_STARTS_PER_WINDOW
                 PLANNING_AGENT_SESSION_START_WINDOW_SECONDS
-                OPENAI_API_KEY AI_CLIENT)
+                OPENAI_API_KEY AI_CLIENT PLANNING_AGENT_MODEL_PROVIDER
+                ANTHROPIC_API_KEY ANTHROPIC_INPUT_PRICE_MICROS_PER_MTOK
+                ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK
+                ANTHROPIC_CACHE_WRITE_PRICE_MICROS_PER_MTOK
+                ANTHROPIC_CACHE_READ_PRICE_MICROS_PER_MTOK
+                ANTHROPIC_FALLBACK_INPUT_PRICE_MICROS_PER_MTOK
+                ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK
+                PLANNING_AGENT_CLAUDE_MODEL PLANNING_AGENT_CLAUDE_EFFORT)
 
   @valid %{
     "OPENAI_API_KEY" => "fictitious-key",
@@ -101,6 +108,76 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
 
     assert {:error, :spend_caps_unconfigured} =
              OpenAIResponses.init(Keyword.fetch!(config, OpenAIResponses))
+  end
+
+  @claude %{
+    "PLANNING_AGENT_MODEL_PROVIDER" => " Claude ",
+    "ANTHROPIC_API_KEY" => "fictitious-anthropic-key",
+    "ANTHROPIC_INPUT_PRICE_MICROS_PER_MTOK" => "4000000",
+    "ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK" => "20000000",
+    "ANTHROPIC_FALLBACK_INPUT_PRICE_MICROS_PER_MTOK" => "5000000",
+    "ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK" => "25000000"
+  }
+
+  test "the OpenAI adapter is the provider unless Claude is selected" do
+    for provider <- [nil, "openai", "something else"] do
+      env =
+        if provider, do: Map.put(@valid, "PLANNING_AGENT_MODEL_PROVIDER", provider), else: @valid
+
+      config = read_runtime(env)
+      assert Keyword.fetch!(config, :planning_agent)[:model] == {OpenAIResponses, []}
+    end
+  end
+
+  test "PLANNING_AGENT_MODEL_PROVIDER=claude selects the Claude adapter with its variables" do
+    config = read_runtime(Map.merge(@valid, @claude))
+
+    assert Keyword.fetch!(config, :planning_agent)[:model] == {ClaudeMessages, []}
+
+    adapter = Keyword.fetch!(config, ClaudeMessages)
+    assert adapter[:api_key] == "fictitious-anthropic-key"
+    assert adapter[:spend_cap_micros] == 2_000_000
+    assert adapter[:token_cap] == 500_000
+    assert adapter[:max_concurrent_calls] == 8
+    assert adapter[:input_price_micros_per_mtok] == 4_000_000
+    assert adapter[:output_price_micros_per_mtok] == 20_000_000
+    assert adapter[:fallback_input_price_micros_per_mtok] == 5_000_000
+    assert adapter[:fallback_output_price_micros_per_mtok] == 25_000_000
+    # Unset model and effort keep the adapter defaults.
+    refute Keyword.has_key?(adapter, :model)
+    refute Keyword.has_key?(adapter, :effort)
+
+    assert {:ok, state} = ClaudeMessages.init(adapter)
+    assert state.config.model == "claude-opus-5-5"
+    assert state.config.effort == "medium"
+  end
+
+  test "the Claude model, effort and cache prices are read from the environment" do
+    config =
+      read_runtime(
+        Map.merge(@valid, @claude)
+        |> Map.put("PLANNING_AGENT_CLAUDE_MODEL", "claude-sonnet-5-5")
+        |> Map.put("PLANNING_AGENT_CLAUDE_EFFORT", "low")
+        |> Map.put("ANTHROPIC_CACHE_WRITE_PRICE_MICROS_PER_MTOK", "5000000")
+        |> Map.put("ANTHROPIC_CACHE_READ_PRICE_MICROS_PER_MTOK", "200000")
+      )
+
+    adapter = Keyword.fetch!(config, ClaudeMessages)
+    assert adapter[:model] == "claude-sonnet-5-5"
+    assert adapter[:effort] == "low"
+    assert adapter[:cache_write_price_micros_per_mtok] == 5_000_000
+    assert adapter[:cache_read_price_micros_per_mtok] == 200_000
+  end
+
+  test "a malformed Claude price leaves paid execution refused" do
+    config =
+      read_runtime(
+        Map.merge(@valid, @claude)
+        |> Map.put("ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK", "25e6")
+      )
+
+    assert {:error, :pricing_unconfigured} =
+             ClaudeMessages.init(Keyword.fetch!(config, ClaudeMessages))
   end
 
   test "a malformed or partial start rate limit reads as unset" do

@@ -342,9 +342,16 @@ and its nutrition and cost are computed by code:
 - `cost` is the consumed-ingredient cost at stored prices; missing prices are
   named and left out of the total (`complete: false`), never zero.
 
-Paid execution requires `OPENAI_API_KEY`, `PLANNING_AGENT_SPEND_CAP_MICROS`,
-`PLANNING_AGENT_TOKEN_CAP`, `PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS`,
-`OPENAI_INPUT_PRICE_MICROS_PER_MTOK` and `OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK`, plus
+Paid execution requires `PLANNING_AGENT_SPEND_CAP_MICROS`,
+`PLANNING_AGENT_TOKEN_CAP`, `PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS` and the
+selected provider's key and prices. `PLANNING_AGENT_MODEL_PROVIDER=claude` selects
+Claude (`ANTHROPIC_API_KEY`, `ANTHROPIC_INPUT_PRICE_MICROS_PER_MTOK`,
+`ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK`, `ANTHROPIC_FALLBACK_INPUT_PRICE_MICROS_PER_MTOK`,
+`ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK`; optionally
+`ANTHROPIC_CACHE_WRITE_PRICE_MICROS_PER_MTOK`, `ANTHROPIC_CACHE_READ_PRICE_MICROS_PER_MTOK`,
+`PLANNING_AGENT_CLAUDE_MODEL` and `PLANNING_AGENT_CLAUDE_EFFORT`); otherwise OpenAI
+(`OPENAI_API_KEY`, `OPENAI_INPUT_PRICE_MICROS_PER_MTOK` and
+`OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK`). It also requires
 the start rate limit (`PLANNING_AGENT_SESSION_STARTS_PER_WINDOW`,
 `PLANNING_AGENT_SESSION_START_WINDOW_SECONDS`); without them `start_session` replies
 `spend_caps_unconfigured` (or `pricing_unconfigured` / `provider_unconfigured`). A
@@ -352,16 +359,20 @@ value that is not a whole integer reads as unset: it never crashes boot, it refu
 the same way.
 
 Global concurrency caps (issue #118) bound every Planning Session together.
-`PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS` caps OpenAI calls in flight: a call
+`PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS` caps provider calls in flight: a call
 over it is refused before any spend is reserved and retried like a transient
 failure, then reported as `agent_unavailable` with `provider_busy`.
 `PLANNING_AGENT_MAX_CONCURRENT_OPTIMIZER_RUNS` caps optimizer subprocesses: a run
 over it starts no subprocess and is reported as `optimizer_failed` with
 `optimizer_busy` (`optimizer_unconfigured` when the cap is unset).
-The spend and token caps bound every OpenAI call of one Planning Session; they
+The spend and token caps bound every provider call of one Planning Session; they
 are not reset between messages and never extended by `authorize_continuation`,
 so once they are used up the session replies `agent_unavailable` with
 `spend_cap_reached` or `token_cap_reached` and a new Planning Session is needed.
+With Claude, a declined request (after the server-side refusal fallback) is
+reported as `agent_unavailable` with `provider_refused`, a reply cut off at the
+output limit with `provider_output_truncated`, and a full context window with
+`provider_context_exceeded`; none of them is retried.
 
 Per-call bounds: each model attempt 60 s (up to 5 transient retries), each
 solve 120 s (no retry; a timeout is inconclusive), each recipe search 30 s (up

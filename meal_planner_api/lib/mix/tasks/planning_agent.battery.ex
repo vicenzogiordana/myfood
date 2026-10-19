@@ -28,9 +28,16 @@ defmodule Mix.Tasks.PlanningAgent.Battery do
   ## Provider and optimizer environment
 
   The test environment never configures the paid adapter, so the command
-  reads the same variables as `config/runtime.exs`: `OPENAI_API_KEY`,
-  `PLANNING_AGENT_SPEND_CAP_MICROS`, `PLANNING_AGENT_TOKEN_CAP`,
-  `OPENAI_INPUT_PRICE_MICROS_PER_MTOK`, `OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK`
+  reads the same variables as `config/runtime.exs`.
+  `PLANNING_AGENT_MODEL_PROVIDER=claude` selects the Claude adapter
+  (`ANTHROPIC_API_KEY`, `ANTHROPIC_INPUT_PRICE_MICROS_PER_MTOK`,
+  `ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK`, the fallback prices
+  `ANTHROPIC_FALLBACK_INPUT_PRICE_MICROS_PER_MTOK` and
+  `ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK`, optionally the cache
+  prices, `PLANNING_AGENT_CLAUDE_MODEL` and `PLANNING_AGENT_CLAUDE_EFFORT`);
+  otherwise the OpenAI adapter (`OPENAI_API_KEY`,
+  `OPENAI_INPUT_PRICE_MICROS_PER_MTOK`, `OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK`).
+  Both read `PLANNING_AGENT_SPEND_CAP_MICROS`, `PLANNING_AGENT_TOKEN_CAP`
   and `PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS`; the optimizer reads
   `PLANNING_AGENT_MAX_CONCURRENT_OPTIMIZER_RUNS`, `OPTIMIZER_PYTHON` and
   `OPTIMIZER_SCRIPT_PATH`. Missing caps make the adapter refuse to start.
@@ -44,19 +51,43 @@ defmodule Mix.Tasks.PlanningAgent.Battery do
 
   alias MealPlannerApi.PlanningAgent.Battery
   alias MealPlannerApi.PlanningAgent.Battery.Report
-  alias MealPlannerApi.PlanningAgent.Model.OpenAIResponses
+  alias MealPlannerApi.PlanningAgent.Model.{ClaudeMessages, OpenAIResponses}
   alias MealPlannerApi.PlanningAgent.Optimizer.Port
 
   @shortdoc "Runs the planning agent quality battery (paid provider calls)"
 
-  @provider_env [
-    {:api_key, "OPENAI_API_KEY", :string},
+  @caps_env [
     {:spend_cap_micros, "PLANNING_AGENT_SPEND_CAP_MICROS", :integer},
     {:token_cap, "PLANNING_AGENT_TOKEN_CAP", :integer},
-    {:input_price_micros_per_mtok, "OPENAI_INPUT_PRICE_MICROS_PER_MTOK", :integer},
-    {:output_price_micros_per_mtok, "OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK", :integer},
     {:max_concurrent_calls, "PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS", :integer}
   ]
+
+  @openai_env [
+                {:api_key, "OPENAI_API_KEY", :string},
+                {:input_price_micros_per_mtok, "OPENAI_INPUT_PRICE_MICROS_PER_MTOK", :integer},
+                {:output_price_micros_per_mtok, "OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK", :integer}
+              ] ++ @caps_env
+
+  @claude_env [
+                {:api_key, "ANTHROPIC_API_KEY", :string}
+              ] ++
+                @caps_env ++
+                [
+                  {:input_price_micros_per_mtok, "ANTHROPIC_INPUT_PRICE_MICROS_PER_MTOK",
+                   :integer},
+                  {:output_price_micros_per_mtok, "ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK",
+                   :integer},
+                  {:cache_write_price_micros_per_mtok,
+                   "ANTHROPIC_CACHE_WRITE_PRICE_MICROS_PER_MTOK", :integer},
+                  {:cache_read_price_micros_per_mtok,
+                   "ANTHROPIC_CACHE_READ_PRICE_MICROS_PER_MTOK", :integer},
+                  {:fallback_input_price_micros_per_mtok,
+                   "ANTHROPIC_FALLBACK_INPUT_PRICE_MICROS_PER_MTOK", :integer},
+                  {:fallback_output_price_micros_per_mtok,
+                   "ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK", :integer},
+                  {:model, "PLANNING_AGENT_CLAUDE_MODEL", :string},
+                  {:effort, "PLANNING_AGENT_CLAUDE_EFFORT", :string}
+                ]
 
   @optimizer_env [
     {:max_concurrent_runs, "PLANNING_AGENT_MAX_CONCURRENT_OPTIMIZER_RUNS", :integer},
@@ -88,7 +119,7 @@ defmodule Mix.Tasks.PlanningAgent.Battery do
 
     battery_opts =
       [
-        model: Keyword.get(overrides, :model, {OpenAIResponses, provider_opts(env)}),
+        model: Keyword.get_lazy(overrides, :model, fn -> provider_model(env) end),
         optimizer: Keyword.get(overrides, :optimizer, {Port, env_opts(@optimizer_env, env)}),
         on_run: &print_run/1
       ] ++ Keyword.take(overrides, [:tasks, :runs_per_task])
@@ -109,9 +140,27 @@ defmodule Mix.Tasks.PlanningAgent.Battery do
     end
   end
 
-  @doc "The paid adapter's options found in `env` (variables of `config/runtime.exs`)."
+  @doc """
+  The paid adapter selected by `PLANNING_AGENT_MODEL_PROVIDER` in `env`
+  (`claude`, or OpenAI otherwise, as in `config/runtime.exs`) with its
+  options found in `env`.
+  """
+  @spec provider_model(%{String.t() => String.t()}) :: {module(), keyword()}
+  def provider_model(env) do
+    case parse(:string, Map.get(env, "PLANNING_AGENT_MODEL_PROVIDER")) do
+      provider when is_binary(provider) ->
+        if String.downcase(provider) == "claude",
+          do: {ClaudeMessages, env_opts(@claude_env, env)},
+          else: {OpenAIResponses, env_opts(@openai_env, env)}
+
+      nil ->
+        {OpenAIResponses, env_opts(@openai_env, env)}
+    end
+  end
+
+  @doc "The selected paid adapter's options found in `env`."
   @spec provider_opts(%{String.t() => String.t()}) :: keyword()
-  def provider_opts(env), do: env_opts(@provider_env, env)
+  def provider_opts(env), do: env |> provider_model() |> elem(1)
 
   defp env_opts(spec, env) do
     Enum.flat_map(spec, fn {key, name, kind} ->
