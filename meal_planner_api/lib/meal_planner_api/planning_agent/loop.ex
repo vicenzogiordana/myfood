@@ -91,7 +91,9 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
           checkpoint.(reported)
         end
 
-        turn.model.respond(model_state, %{request | checkpoint: report})
+        # The attempt deadline lets the adapter end its HTTP call first.
+        request = Map.put(%{request | checkpoint: report}, :timeout_ms, call.timeout_ms)
+        turn.model.respond(model_state, request)
       end)
 
     {_status, _result, model_state} = response

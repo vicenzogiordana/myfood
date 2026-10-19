@@ -9,8 +9,10 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
 
   use ExUnit.Case, async: true
 
+  alias MealPlannerApi.PlanningAgent.Allowance
   alias MealPlannerApi.PlanningAgent.CallBounds
   alias MealPlannerApi.PlanningAgent.ConcurrencyLimiter
+  alias MealPlannerApi.PlanningAgent.Loop
   alias MealPlannerApi.PlanningAgent.Model.ClaudeMessages
   alias MealPlannerApi.PlanningAgent.SpendLedger
 
@@ -855,6 +857,41 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
       # Both attempts settled: nothing left reserved, each worst case spent.
       assert %{reserved_micros: 0, spent_micros: spent} = ClaudeMessages.spend(state)
       assert spent >= 2 * 12_000
+    end
+
+    test "the planning loop hands the attempt deadline to the adapter, so a slow call settles" do
+      # Default receive timeout (55 s) and a lowered model attempt deadline:
+      # only the deadline the loop delivers can end the HTTP call first.
+      server =
+        start_supervised!(
+          {Bandit, plug: {SlowProvider, test: self(), delay_ms: 2_500}, port: 0, ip: :loopback}
+        )
+
+      {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
+
+      {:ok, state} =
+        ClaudeMessages.init(opts(base_url: "http://127.0.0.1:#{port}/v1", req_options: []))
+
+      bounds = CallBounds.new(policies: %{model: %{timeout_ms: 1_000, retries: 0, backoff_ms: 0}})
+
+      result =
+        Loop.run(%{
+          model: ClaudeMessages,
+          model_state: state,
+          instructions: @request.instructions,
+          messages: [%{role: :user, content: "Plan something light"}],
+          tool_context: %{workspace: %{}},
+          allowance: Allowance.new(5),
+          emit: fn _event -> :ok end,
+          bounds: bounds
+        })
+
+      assert result.outcome == {:failed, :provider_timeout}
+      assert_receive {:slow_provider_called, _}, 1_000
+
+      # Settled by the adapter, not killed mid-POST with its reservation open.
+      assert %{reserved_micros: 0, spent_micros: spent} = ClaudeMessages.spend(result.model_state)
+      assert spent > 0
     end
 
     test "a 200 response without usage keeps the reservation as spent" do

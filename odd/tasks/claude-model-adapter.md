@@ -105,5 +105,15 @@ Out of scope: streaming, per-message effort, mid-conversation tool changes, real
   `call.timeout_ms` to `respond/2` yet (Loop out of scope), so in production only the
   55 s default applies; a model needing longer turns must raise `receive_timeout_ms` and
   the `:model` call policy together (provider-selection slice).
+- Review round 3 (Jorge, medium, CD-1 + TR-1, verified at 8c9b470): that residual made
+  the round-2 cap dead code. `Loop.call_model` never put `call.timeout_ms` in the
+  request, so with less than 55 s of global time left, or with a lowered `:model` policy,
+  the attempt was still brutal-killed mid-POST with its reservation open. Fix: the loop
+  now passes `call.timeout_ms` to `respond/2`, and `Model.request` gains
+  `optional(:timeout_ms)` (adapters ignore unknown keys). Route: inline (2 small files
+  plus one test). RED: a `Loop.run` test (real Bandit slow server, `:model` policy
+  1000 ms, default 55 s receive timeout, no hand-built request) returned
+  `reserved_micros: 41915`. GREEN: adapter suite 50/50; `mix test` and
+  `mix precommit` both 1447 passed, 25 skipped.
 - Mirror: Engram topic `odd/claude-model-adapter/tasks`.
 - Next step: merge PR 1, then open the PR for `feat/issue-141-provider-selection`.
