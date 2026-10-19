@@ -48,10 +48,10 @@ fixes it; the reservation is a genuine worst case and is kept.
 
 - [x] T1 Reproduce with a failing test and fix `MeteredModel` to meter the latest state
       (route: inline, one source file + one new test file; RED observed: 795294 vs 93386).
-      Commit: see T1 commit on `feat/issue-144-claude-spend-settle`.
+      Commit: 0a463c6.
 - [x] T2 Realistic Claude response test asserting exact settled micro-USD in
       `claude_messages_test.exs` (characterization: passed on first run, confirming the
-      adapter settles correctly). Same commit as T1.
+      adapter settles correctly). Commit: 0a463c6.
 
 ## Acceptance criteria
 
