@@ -95,7 +95,7 @@ value and keep the file out of git:
   `MealPlannerApi.PlanningAgent.Battery.Report`). A gate without evidence is
   reported as not measured and does not pass.
 - The paid adapter's per-session caps and token prices are separate,
-  existing human decisions (`OpenAIResponses`). Before each run the battery
+  existing human decisions (`OpenAIResponses` or `ClaudeMessages`). Before each run the battery
   lowers the adapter's per-session spend cap to what is left of the ceiling.
   Once the ceiling is spent, the remaining runs are skipped and the report
   is `incomplete`.
@@ -107,11 +107,22 @@ The battery makes paid provider calls. It needs:
 - `MIX_ENV=test` and a migrated, empty database of its own. The battery
   refuses other environments, and it refuses a database that already holds
   recipes.
-- The provider variables of `config/runtime.exs` (`OPENAI_API_KEY`,
-  `PLANNING_AGENT_SPEND_CAP_MICROS`, `PLANNING_AGENT_TOKEN_CAP`,
-  `OPENAI_INPUT_PRICE_MICROS_PER_MTOK`,
-  `OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK`,
-  `PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS`).
+- The provider variables of `config/runtime.exs`. Both providers need
+  `PLANNING_AGENT_SPEND_CAP_MICROS`, `PLANNING_AGENT_TOKEN_CAP` and
+  `PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS`.
+  `PLANNING_AGENT_MODEL_PROVIDER` picks the adapter: `claude`, or OpenAI when
+  unset or anything else.
+  - OpenAI: `OPENAI_API_KEY`, `OPENAI_INPUT_PRICE_MICROS_PER_MTOK`,
+    `OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK`.
+  - Claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_INPUT_PRICE_MICROS_PER_MTOK`,
+    `ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK`, and the refusal-fallback prices
+    `ANTHROPIC_FALLBACK_INPUT_PRICE_MICROS_PER_MTOK` and
+    `ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK` (the highest price
+    among the possible fallback models). Optional:
+    `ANTHROPIC_CACHE_WRITE_PRICE_MICROS_PER_MTOK` (default 1.25x input),
+    `ANTHROPIC_CACHE_READ_PRICE_MICROS_PER_MTOK` (default 1x input),
+    `PLANNING_AGENT_CLAUDE_MODEL` (default `claude-opus-5-5`) and
+    `PLANNING_AGENT_CLAUDE_EFFORT` (default `medium`).
 - The OR-Tools optimizer: `PLANNING_AGENT_MAX_CONCURRENT_OPTIMIZER_RUNS`,
   plus `OPTIMIZER_PYTHON` pointing at a Python with the version pinned in
   `requirements.txt`.

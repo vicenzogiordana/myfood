@@ -57,7 +57,7 @@ Out of scope: streaming, per-message effort, mid-conversation tool changes, real
 - [x] T1 Shared paid-call helpers extracted from the OpenAI adapter (route: inline, one module + mechanical edit). Commit a57995b; OpenAI adapter tests 33/33 green before and after (refactor, no RED).
 - [x] T2 `Model.ClaudeMessages` adapter with contract tests (route: inline; single writer, this worker). Commit 0993683; RED 0/41 (module missing), GREEN 41/41.
 - [x] T2b Settled fallback pricing contract after review (route: inline; one module and its test file). Served-by signal is the iteration `type`, never the `model` string; cache-read price joins the worst case (CD-2); recovery row deletion on Session end confirmed (CD-3, no Session change). RED 6 failing, GREEN 47/47; `mix precommit` 1444 passed, 25 skipped. Commit d4f38a8.
-- [ ] T3 Provider selection in `config/runtime.exs` and the battery command, docs (route: inline). Implemented as commit 22d1095 on the stacked branch `feat/issue-141-provider-selection` (RED 7 failing, GREEN 22/22); split out of this PR because the adapter and its tests alone are ~1,240 authored lines, over the ~800-line PR budget.
+- [x] T3 Provider selection in `config/runtime.exs` and the battery command, docs (route: inline). First written as commit 22d1095 on the stacked branch `feat/issue-141-provider-selection` (RED 7 failing, GREEN 22/22); landed as slice 2/2 on `feat/issue-141-part-2-provider-selection` from main after PR #142 merged. It applied cleanly on top of the reviewed adapter (no new adapter options; unset cache prices still default from the input price). `mix test` 1455 passed, 25 skipped.
 
 ## Acceptance criteria
 
@@ -66,7 +66,7 @@ Out of scope: streaming, per-message effort, mid-conversation tool changes, real
 - [x] Assistant content blocks (including thinking) are resent unchanged and survive recover.
 - [x] Init refuses without caps or prices; spend reserved before and settled after each call, including cache tokens.
 - [x] Refusal and max_tokens stop reasons yield typed errors.
-- [ ] (stacked branch) Provider selectable by env in runtime config and battery; QUALITY_BATTERY.md and CHANNELS.md list the Claude variables.
+- [x] Provider selectable by env in runtime config and battery; QUALITY_BATTERY.md and CHANNELS.md list the Claude variables.
 
 ## Checks
 
@@ -75,8 +75,9 @@ Out of scope: streaming, per-message effort, mid-conversation tool changes, real
 
 ## Progress
 
-- Delivery strategy: chained. PR 1 = T1 + T2 (adapter slice); T3 on the stacked
-  branch `feat/issue-141-provider-selection`, to open after PR 1 merges.
+- Delivery strategy: chained. PR 1 (#142) = T1 + T2 + review rework (adapter slice,
+  merged); PR 2 = T3 on `feat/issue-141-part-2-provider-selection` (slice 2/2 of the
+  split of `feat/issue-141-provider-selection`).
 - Checks on the adapter slice: `mix precommit` 1438 passed, 25 skipped. One earlier
   full run on the T3 branch had 3 failures alongside Postgrex disconnect logs; two
   reruns passed 1443/1443 (flaky, not reproduced).
@@ -129,4 +130,4 @@ Out of scope: streaming, per-message effort, mid-conversation tool changes, real
   GREEN: one POST, reservation settled, outcome `{:limit_reached, "time"}`; `mix test` and
   `mix precommit` both 1450 passed, 25 skipped.
 - Mirror: Engram topic `odd/claude-model-adapter/tasks`.
-- Next step: merge PR 1, then open the PR for `feat/issue-141-provider-selection`.
+- Next step: review and merge PR 2 (provider selection), which closes #141.

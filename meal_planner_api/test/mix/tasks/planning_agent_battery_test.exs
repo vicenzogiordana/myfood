@@ -8,7 +8,7 @@ defmodule Mix.Tasks.PlanningAgent.BatteryTest do
   use ExUnit.Case, async: false
 
   alias MealPlannerApi.PlanningAgent.{BatteryFixtures, BatteryOptimizer}
-  alias MealPlannerApi.PlanningAgent.Model.Scripted
+  alias MealPlannerApi.PlanningAgent.Model.{ClaudeMessages, OpenAIResponses, Scripted}
   alias Mix.Tasks.PlanningAgent.Battery
 
   @moduletag :tmp_dir
@@ -58,6 +58,35 @@ defmodule Mix.Tasks.PlanningAgent.BatteryTest do
              spend_cap_micros: 1_000,
              token_cap: 2_000
            ]
+  end
+
+  test "builds the Claude adapter when the provider environment selects it" do
+    env = %{
+      "PLANNING_AGENT_MODEL_PROVIDER" => "claude",
+      "ANTHROPIC_API_KEY" => "fictitious-key",
+      "PLANNING_AGENT_SPEND_CAP_MICROS" => "1000",
+      "PLANNING_AGENT_TOKEN_CAP" => "2000",
+      "ANTHROPIC_INPUT_PRICE_MICROS_PER_MTOK" => "4000000",
+      "ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK" => "x",
+      "ANTHROPIC_FALLBACK_INPUT_PRICE_MICROS_PER_MTOK" => "5000000",
+      "PLANNING_AGENT_CLAUDE_EFFORT" => "high",
+      "OPENAI_API_KEY" => "ignored"
+    }
+
+    assert Battery.provider_model(env) ==
+             {ClaudeMessages,
+              [
+                api_key: "fictitious-key",
+                spend_cap_micros: 1_000,
+                token_cap: 2_000,
+                input_price_micros_per_mtok: 4_000_000,
+                fallback_input_price_micros_per_mtok: 5_000_000,
+                effort: "high"
+              ]}
+
+    assert {OpenAIResponses, [api_key: "ignored"]} =
+             Battery.provider_model(Map.delete(env, "PLANNING_AGENT_MODEL_PROVIDER"))
+             |> then(fn {module, opts} -> {module, Keyword.take(opts, [:api_key])} end)
   end
 
   test "refuses an unwritable --out before any paid run starts", %{tmp_dir: dir} do
