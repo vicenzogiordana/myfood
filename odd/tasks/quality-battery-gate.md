@@ -39,24 +39,24 @@ The work was split into three chained PRs to main (strategy
 `stacked-to-main`), one per task:
 
 1. Slice 1/3 — T1: configuration, grader, report (merged, #138).
-2. Slice 2/3 — T2: the 15 fixtures and the runner (this PR).
-3. Slice 3/3 — T3: the `mix planning_agent.battery` command and its docs.
+2. Slice 2/3 — T2: the 15 fixtures and the runner (merged, #139).
+3. Slice 3/3 — T3: the `mix planning_agent.battery` command and its docs (this PR).
 
 ## Tasks
 
 - [x] T1 Battery configuration and grading: config validation refusing without spend ceiling / deferred criteria; grader (hard rules, abstention, relevance, variety, recovery, harness failures); report aggregation and verdict (68/75 pooled gate); JSON and Markdown rendering (route: inline, pure modules + tests)
 - [x] T2 The 15 fixtures and the runner: declarative tasks, kitchen builder, sandbox per run, session driver, prepared scraper/search, spend meter, spend ceiling stop (route: inline, single writer) — slice 2/3
-- [ ] T3 One command: `mix planning_agent.battery`, docs (route: inline) — slice 3/3
+- [x] T3 One command: `mix planning_agent.battery`, docs (route: inline) — slice 3/3
 
 Route evidence: this worker is a bounded single writer (no sub-delegation
 by instruction), so every task is inline in this worker.
 
 ## Acceptance criteria (issue #109)
 
-- All 15 tasks exist as reproducible fixtures (this slice)
-- One command runs 15 x 5 runs and produces a pass/fail report with per-run evidence (runner and `Battery.run/2` in this slice; command in slice 3)
-- Any hard-rule violation presented as valid fails the battery regardless of score (grader and report, slice 1; exercised end to end in this slice)
-- The run refuses to start without a configured spend ceiling (configuration, slice 1; enforced by the runner in this slice)
+- All 15 tasks exist as reproducible fixtures (slice 2)
+- One command runs 15 x 5 runs and produces a pass/fail report with per-run evidence (runner and `Battery.run/2` in slice 2; the command in this slice)
+- Any hard-rule violation presented as valid fails the battery regardless of score (grader and report, slice 1; exercised end to end in slice 2)
+- The run refuses to start without a configured spend ceiling (configuration, slice 1; enforced by the runner in slice 2; the command refuses with the reason)
 - The report is attached to #109 when executed (human step, pending)
 
 ## Checks
@@ -92,13 +92,41 @@ by instruction), so every task is inline in this worker.
   uses `1..runs//1`. RED: the two new "refuses to start" cases in
   `battery_test.exs` failed (10/12); GREEN: 12/12, full suite 1389 passed,
   25 skipped; `mix precommit` clean.
+- T3 originally commit d145689 on `feat/issue-109-quality-battery`, landed
+  here as slice 3/3 with the command, its test and the docs unchanged at
+  that branch's head (`Battery.run/2` keeps the slice 2 options check).
+  `mix planning_agent.battery --config FILE [--out FILE]` (`MIX_ENV=test`
+  only, empty migrated database, exits 1 unless the verdict is pass) and
+  `meal_planner_api/docs/QUALITY_BATTERY.md`. RED:
+  `test/mix/tasks/planning_agent_battery_test.exs` 0/5 (task undefined);
+  GREEN: 5 passed with the scripted model, no paid call.
+- Review round 1 (Jorge, PR #140), one medium finding: the report path was
+  only used by `File.write!/2` after every paid run finished, so a bad
+  `--out` raised `File.Error` and lost the paid results and the verdict.
+  Fix (route: inline, one file plus its test): `run/2` checks that the
+  `--out` directory exists, is a directory and is writable before
+  `app.start` and `Battery.run/2`, and refuses with `Mix.Error`
+  ("cannot write the report to ..."). RED: the new "refuses an unwritable
+  --out before any paid run starts" case failed with `File.Error` (5/6);
+  GREEN: 6/6, no run line printed; full suite 1395 passed, 25 skipped;
+  `mix precommit` clean.
+- Review round 2 (Jorge, PR #140), one low finding: the `--out` pre-flight
+  only checked the parent directory, so an `--out` that is an existing
+  directory (or a read-only existing file) still passed and `File.write!/2`
+  raised after the paid runs. Fix (route: inline, one file plus its test):
+  `ensure_writable_out!/1` first stats the target and refuses a directory
+  ("it is a directory") or a non-writable existing file ("it is not
+  writable") before checking the parent. No write fallback was added. RED:
+  the two new cases ("existing directory", "existing read-only file")
+  failed with `File.Error` (6/8); GREEN: 8/8 with zero model calls recorded;
+  full suite 1397 passed, 25 skipped; `mix precommit` clean.
 
 ## Pending
 
-- T3 (slice 3/3).
 - A human runs the battery against the real provider with a filled-in
   configuration and attaches the report to #109 (acceptance criterion 5).
 
 ## Next step
 
-Land slice 3/3 (`mix planning_agent.battery` and docs).
+A human runs the battery against the real provider and attaches the report
+to #109.
