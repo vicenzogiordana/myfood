@@ -217,6 +217,13 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
     }
   end
 
+  @doc "The Ingredient named `name` (case-insensitive exact match), or `nil`."
+  @spec ingredient_by_name(String.t()) :: %{id: Ecto.UUID.t(), name: String.t()} | nil
+  def ingredient_by_name(name) do
+    name = String.trim(name)
+    Map.get(ingredients_by_name([name]), String.downcase(name))
+  end
+
   @doc """
   The brand of a stored Product of `ingredient_id` matching `brand`
   (case-insensitive), spelled as stored, or `nil` when none has it.

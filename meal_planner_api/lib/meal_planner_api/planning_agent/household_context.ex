@@ -16,7 +16,8 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
 
   Disliked ingredients are Preferences: disclosed to the model, never enforced.
   Brand Preferences come from household settings and are disclosed to the
-  model the same way (see `MealPlannerApi.BrandPreferences`).
+  model the same way (see `MealPlannerApi.BrandPreferences`); they steer the
+  Purchase softly and are never swapped silently.
   """
 
   import Ecto.Query
@@ -164,7 +165,11 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
 
     Household preferences (not enforced by code):
     - Disliked ingredients (Preferences, avoid and disclose when used): #{list(context.disliked_ingredients)}
-    - Brand Preferences from household settings (the brand the household prefers for an ingredient): #{brands(Map.get(context, :brand_preferences, []))}
+    - Brand Preferences from household settings (the Purchase buys them when it can and says when it cannot): #{brands(Map.get(context, :brand_preferences, []))}
+
+    Brands:
+    - A brand the household chose (Brand Preference or Session Brand) is never swapped without telling them. When present_proposal lists brand_substitutions, say so; when it lists brand_alternatives for a broken budget, offer each alternative with its price difference and let the household decide.
+    - Set a Session Brand with set_session_brand only when the household asks; it lasts for this session only. Lasting brand choices are made in household settings, never from the chat.
 
     Grocery budget (checked by code): #{budget_line(context.budget_cents)}
     - present_proposal compares it against the Purchase total, the packages to buy net of the Projected Pantry. Report its result; never compute it yourself.

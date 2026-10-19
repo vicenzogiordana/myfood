@@ -40,7 +40,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   Subscribers receive `{:planning_agent_event, session_id, event}` where
   `event["type"]` is one of `progress`, `assistant_message`, `question`,
-  `proposal`, `recipe_draft`, `recipe_saved`, `optimizer_failed`, `consent_required`, `limit_reached`,
+  `proposal`, `recipe_draft`, `recipe_saved`, `optimizer_failed`, `session_brand_changed`,
+  `consent_required`, `limit_reached`,
   `agent_unavailable`, `turn_completed`, `run_finished`, `stopped`, `session_cancelled`,
   `session_ended`, `proposal_confirmed`, `proposal_invalidated`,
   `confirmation_unresolved`, `deviations_approved`, `absence_exception_approved`,
@@ -1197,7 +1198,9 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       household: household,
       clock: state.clock,
       recipe_drafts: state.workspace.recipe_drafts,
-      absence_exceptions: state.workspace.absence_exceptions
+      absence_exceptions: state.workspace.absence_exceptions,
+      # The Session Brands the shown Proposal was built with.
+      session_brands: Map.get(state.workspace, :session_brands, %{})
     }
 
     with {:valid, meals} <- ProposalValidator.validate(Proposal.meals(shown), ctx),
@@ -1455,6 +1458,11 @@ defmodule MealPlannerApi.PlanningAgent.Session do
           |> Map.put(:emit, emit_fun)
           |> Map.put(:bounds, bounds)
           |> Map.update!(:optimizer, &with_os_process_hook(&1, on_os_process))
+          # A tool checkpoints a Workspace change before showing it to the
+          # Member (a Session Brand), so a deadline cut cannot lose it.
+          |> Map.put(:report_workspace, fn workspace ->
+            send(session, {:workspace, ref, workspace})
+          end)
 
         result =
           %{turn | tool_context: tool_context, model_state: unseal(turn.model_state)}
@@ -1785,6 +1793,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     "recipe_draft" =>
       ~w(recipe_id name origin draft servings slots ingredients steps nutrition cost),
     "optimizer_failed" => ~w(reason),
+    "session_brand_changed" => ~w(ingredient brand source previous_brand previous_source),
     "consent_required" => [],
     "limit_reached" => ~w(limit requires_authorization),
     "agent_unavailable" => ~w(reason),
