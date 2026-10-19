@@ -29,10 +29,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
   it). A call over it is refused with `:provider_busy` before any spend is
   reserved; that reason is transient, so the call bounds retry it.
 
-  Provider failures are typed: `:provider_unauthorized` (401/403),
-  `:provider_rejected_request` (other 4xx), `:provider_conflict` (409),
-  `:provider_timeout` (transport timeout) and `:provider_unavailable`
-  (408, 429, 5xx, other transport errors). Only the last two are transient.
+  Provider failures are typed as in `MealPlannerApi.PlanningAgent.Model.PaidCall`.
 
   ## Configuration
 
@@ -54,6 +51,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
   @behaviour MealPlannerApi.PlanningAgent.Model
 
   alias MealPlannerApi.PlanningAgent.{ConcurrencyLimiter, SpendLedger}
+  alias MealPlannerApi.PlanningAgent.Model.PaidCall
 
   @defaults [
     model: "gpt-6.1-sol",
@@ -73,9 +71,9 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
       |> Map.new()
 
     with {:ok, ledger} <- SpendLedger.new(config[:spend_cap_micros], config[:token_cap]),
-         :ok <- validate_concurrency(config),
+         :ok <- PaidCall.validate_concurrency(config),
          :ok <- validate_pricing(config),
-         :ok <- validate_api_key(config) do
+         :ok <- PaidCall.validate_api_key(config) do
       {:ok, %{config: config, ledger: ledger}}
     end
   end
@@ -87,18 +85,13 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
   never part of it.
   """
   @impl true
-  def recoverable(%{ledger: ledger}) do
-    %{
-      spent_micros: ledger.spent_micros + ledger.reserved_micros,
-      spent_tokens: ledger.spent_tokens + ledger.reserved_tokens
-    }
-  end
+  def recoverable(%{ledger: ledger}), do: PaidCall.recoverable_spend(ledger)
 
   @doc "A recovered Planning Session's state: fresh configuration, kept spend."
   @impl true
-  def recover(opts, %{spent_micros: micros, spent_tokens: tokens}) do
+  def recover(opts, %{spent_micros: _, spent_tokens: _} = saved) do
     with {:ok, state} <- init(opts) do
-      {:ok, %{state | ledger: %{state.ledger | spent_micros: micros, spent_tokens: tokens}}}
+      {:ok, %{state | ledger: PaidCall.restore_spend(state.ledger, saved)}}
     end
   end
 
@@ -107,15 +100,8 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
   def spend(%{ledger: ledger}), do: SpendLedger.summary(ledger)
 
   @impl true
-  def respond(state, request) do
-    %{concurrency_limiter: limiter, max_concurrent_calls: cap} = state.config
-
-    case ConcurrencyLimiter.run(limiter, :provider_calls, cap, fn -> paid_call(state, request) end) do
-      {:ok, result} -> result
-      {:error, :at_capacity} -> {:error, :provider_busy, state}
-      {:error, :unconfigured} -> {:error, :spend_caps_unconfigured, state}
-    end
-  end
+  def respond(state, request),
+    do: PaidCall.limited(state.config, state, fn -> paid_call(state, request) end)
 
   defp paid_call(state, request) do
     body = body(state.config, request)
@@ -126,7 +112,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
         state = %{state | ledger: ledger}
         # The owner keeps the reserved state, so a turn killed mid-call still
         # counts the reservation.
-        checkpoint(request, state)
+        PaidCall.checkpoint(request, state)
 
         case post(state.config, body) do
           {:ok, response} ->
@@ -205,34 +191,11 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
       url: config.base_url <> "/responses",
       json: body,
       auth: {:bearer, config.api_key},
-      receive_timeout: config.receive_timeout_ms,
-      retry: false
+      receive_timeout: config.receive_timeout_ms
     ]
     |> Keyword.merge(config.req_options)
-    |> Req.post()
-    |> case do
-      {:ok, %Req.Response{status: 200, body: %{} = response}} ->
-        {:ok, response}
-
-      {:ok, %Req.Response{status: status}} ->
-        {:error, status_reason(status)}
-
-      {:error, %Req.TransportError{reason: :timeout}} ->
-        {:error, :provider_timeout}
-
-      {:error, _exception} ->
-        {:error, :provider_unavailable}
-    end
+    |> PaidCall.post()
   end
-
-  # Only `:provider_unavailable` and `:provider_timeout` are transient (see
-  # `MealPlannerApi.PlanningAgent.CallBounds`). Permission, invalid request
-  # and conflict answers are never retried automatically.
-  defp status_reason(status) when status in [401, 403], do: :provider_unauthorized
-  defp status_reason(409), do: :provider_conflict
-  defp status_reason(status) when status in [408, 429], do: :provider_unavailable
-  defp status_reason(status) when status in 400..499, do: :provider_rejected_request
-  defp status_reason(_status), do: :provider_unavailable
 
   # ---------------------------------------------------------------------------
   # Response
@@ -279,11 +242,6 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
 
   defp usage(_response), do: :unknown
 
-  defp checkpoint(%{checkpoint: checkpoint}, state) when is_function(checkpoint, 1),
-    do: checkpoint.(state)
-
-  defp checkpoint(_request, _state), do: :ok
-
   # ---------------------------------------------------------------------------
   # Spend
   # ---------------------------------------------------------------------------
@@ -297,35 +255,17 @@ defmodule MealPlannerApi.PlanningAgent.Model.OpenAIResponses do
 
   defp cost(config, %{input_tokens: input, output_tokens: output}) do
     micros =
-      ceil_div(input * config.input_price_micros_per_mtok, 1_000_000) +
-        ceil_div(output * config.output_price_micros_per_mtok, 1_000_000)
+      PaidCall.micros(input, config.input_price_micros_per_mtok) +
+        PaidCall.micros(output, config.output_price_micros_per_mtok)
 
     %{micros: micros, tokens: input + output}
   end
 
-  defp ceil_div(numerator, denominator), do: div(numerator + denominator - 1, denominator)
-
   defp validate_pricing(config) do
-    if non_neg_integer?(config[:input_price_micros_per_mtok]) and
-         non_neg_integer?(config[:output_price_micros_per_mtok]) and
+    if PaidCall.non_neg_integer?(config[:input_price_micros_per_mtok]) and
+         PaidCall.non_neg_integer?(config[:output_price_micros_per_mtok]) and
          is_integer(config[:max_output_tokens]) and config[:max_output_tokens] > 0,
        do: :ok,
        else: {:error, :pricing_unconfigured}
   end
-
-  defp validate_concurrency(config) do
-    case config[:max_concurrent_calls] do
-      cap when is_integer(cap) and cap > 0 -> :ok
-      _ -> {:error, :spend_caps_unconfigured}
-    end
-  end
-
-  defp validate_api_key(config) do
-    case config[:api_key] do
-      key when is_binary(key) and key != "" -> :ok
-      _ -> {:error, :provider_unconfigured}
-    end
-  end
-
-  defp non_neg_integer?(value), do: is_integer(value) and value >= 0
 end

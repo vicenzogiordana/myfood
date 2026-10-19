@@ -117,17 +117,34 @@ defmodule MealPlannerApi.PlanningAgent.CallBounds do
           {:error, :timeout, state} when timeout_ms == remaining ->
             {:error, :deadline_exceeded, state}
 
-          {:error, reason, state} = error ->
-            delay = backoff(policy, number)
+          {:error, :provider_timeout, state} = error when timeout_ms == remaining ->
+            if deadline_used?(bounds, timeout_ms),
+              do: {:error, :deadline_exceeded, state},
+              else: retry_or_fail(bounds, kind, policy, fun, number, error)
 
-            if retry?(bounds, kind, policy, reason, number, delay) do
-              bounds.on_retry.(kind, number + 1, reason)
-              Process.sleep(delay)
-              attempt(bounds, kind, policy, state, fun, number + 1)
-            else
-              error
-            end
+          {:error, _reason, _state} = error ->
+            retry_or_fail(bounds, kind, policy, fun, number, error)
         end
+    end
+  end
+
+  # A paid model adapter ends its HTTP call within the last fifth (at most
+  # 1 s) of the attempt deadline, so the call settles before the attempt is
+  # killed. When the global deadline bounded that attempt, its provider
+  # timeout is the global deadline arriving: the time left is that margin,
+  # too short for another paid call.
+  defp deadline_used?(bounds, timeout_ms),
+    do: remaining(bounds) <= min(1_000, div(timeout_ms, 5))
+
+  defp retry_or_fail(bounds, kind, policy, fun, number, {:error, reason, state} = error) do
+    delay = backoff(policy, number)
+
+    if retry?(bounds, kind, policy, reason, number, delay) do
+      bounds.on_retry.(kind, number + 1, reason)
+      Process.sleep(delay)
+      attempt(bounds, kind, policy, state, fun, number + 1)
+    else
+      error
     end
   end
 

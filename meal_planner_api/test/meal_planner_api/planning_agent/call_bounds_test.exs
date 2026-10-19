@@ -82,6 +82,42 @@ defmodule MealPlannerApi.PlanningAgent.CallBoundsTest do
     assert attempts() == 0
   end
 
+  test "a provider timeout that used up the global deadline is the deadline, not a retry" do
+    # The model adapter ends its HTTP call just before the attempt deadline
+    # (the last fifth, at most 1 s), so the time left is too short to retry.
+    bounds =
+      CallBounds.new(
+        policies: %{model: %{backoff_ms: 1}},
+        deadline_at: System.monotonic_time(:millisecond) + 500
+      )
+
+    test = self()
+
+    slow_timeout = fn state, call ->
+      send(test, :attempt)
+      Process.sleep(call.timeout_ms - div(call.timeout_ms, 5))
+      {:error, :provider_timeout, state}
+    end
+
+    assert {:error, :deadline_exceeded, :state} =
+             CallBounds.run(bounds, :model, :state, slow_timeout)
+
+    assert attempts() == 1
+  end
+
+  test "a quick provider timeout under a global deadline is still retried" do
+    bounds =
+      CallBounds.new(
+        policies: %{model: %{retries: 1, backoff_ms: 1}},
+        deadline_at: System.monotonic_time(:millisecond) + 5_000
+      )
+
+    assert {:error, :provider_timeout, _} =
+             CallBounds.run(bounds, :model, nil, failing(:provider_timeout))
+
+    assert attempts() == 2
+  end
+
   test "each attempt is told its effective deadline" do
     bounds =
       CallBounds.new(

@@ -12,12 +12,18 @@ defmodule MealPlannerApi.PlanningAgent.Model do
         instructions: String.t(),   # built by code only, never from tool output
         messages: [message()],
         tools: [tool()],
-        checkpoint: (state -> any())  # optional
+        checkpoint: (state -> any()),  # optional
+        timeout_ms: pos_integer()      # optional
       }
 
   A paid adapter calls `checkpoint` with its updated state after reserving
   spend and before the paid call, so the session keeps the reservation even
   when it kills the turn mid-call.
+
+  `timeout_ms` is the deadline of the current attempt (set by the planning
+  loop from `MealPlannerApi.PlanningAgent.CallBounds`). An adapter may end
+  its HTTP call before it, so the call settles instead of being killed;
+  adapters that do not use it ignore it.
 
   ## Messages
 
@@ -42,7 +48,8 @@ defmodule MealPlannerApi.PlanningAgent.Model do
           required(:instructions) => String.t(),
           required(:messages) => [message()],
           required(:tools) => [tool()],
-          optional(:checkpoint) => (term() -> any())
+          optional(:checkpoint) => (term() -> any()),
+          optional(:timeout_ms) => pos_integer()
         }
   @type usage :: %{input_tokens: non_neg_integer(), output_tokens: non_neg_integer()}
   # `usage` is nil when the provider did not report it: missing, not zero.
