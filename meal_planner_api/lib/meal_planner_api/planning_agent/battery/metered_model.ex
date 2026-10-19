@@ -4,10 +4,16 @@ defmodule MealPlannerApi.PlanningAgent.Battery.MeteredModel do
   each run against the battery's spend ceiling. It changes nothing the
   agent sees: every call is the inner adapter's.
 
-  After every call the inner adapter's spend so far (`spend/1`, spent plus
-  still reserved micro-USD, so unknown outcomes count as spent) is recorded
-  in the `:meter` Agent under the `:run` key. An adapter without `spend/1`
-  (the offline scripted model) spends nothing.
+  After every call, and at every checkpoint of a paid call, the inner
+  adapter's spend so far (`spend/1`, spent plus still reserved micro-USD)
+  replaces the value in the `:meter` Agent under the `:run` key. The latest
+  state wins, never the peak: a call that settled from its reported usage
+  is metered at what it settled to (issue #144: metering the peak kept the
+  worst-case reservation of an in-flight call, about 28 times the real
+  billing), while a call whose outcome is unknown (killed after its
+  checkpoint) leaves its open reservation in the latest state, and a failed
+  call keeps its worst case spent. An adapter without `spend/1` (the
+  offline scripted model) spends nothing.
 
   Options: `:inner` (`{module, opts}`), `:meter` (an Agent holding a map)
   and `:run` (the key of this run).
@@ -79,7 +85,7 @@ defmodule MealPlannerApi.PlanningAgent.Battery.MeteredModel do
 
   defp meter(%{meter: meter, run: run, module: module, inner: inner} = state) do
     micros = spent_micros(module, inner)
-    Agent.update(meter, &Map.update(&1, run, micros, fn old -> max(old, micros) end))
+    Agent.update(meter, &Map.put(&1, run, micros))
     state
   end
 end

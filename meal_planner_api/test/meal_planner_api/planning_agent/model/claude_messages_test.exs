@@ -502,6 +502,71 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
                ClaudeMessages.spend(state)
     end
 
+    test "a realistic response settles exactly from its usage, never from the reservation" do
+      # Shaped like a real Claude Opus 5.5 answer (issue #144): cache fields,
+      # their per-TTL breakdown and one `message` iteration.
+      counts = %{
+        "input_tokens" => 2_134,
+        "cache_creation_input_tokens" => 9_872,
+        "cache_read_input_tokens" => 31_408,
+        "output_tokens" => 412
+      }
+
+      stub_response(
+        message(
+          [
+            @thinking,
+            %{
+              "type" => "tool_use",
+              "id" => "toolu_01A",
+              "name" => "search_recipes",
+              "input" => %{}
+            }
+          ],
+          "tool_use",
+          Map.merge(counts, %{
+            "cache_creation" => %{
+              "ephemeral_5m_input_tokens" => 9_872,
+              "ephemeral_1h_input_tokens" => 0
+            },
+            "server_tool_use" => nil,
+            "service_tier" => "standard",
+            "iterations" => [Map.put(counts, "type", "message")]
+          })
+        )
+        |> Map.put("stop_sequence", nil)
+      )
+
+      # The 2026-10-19 battery prices: cache write unset (1.25x input).
+      {:ok, state} =
+        ClaudeMessages.init(
+          opts(
+            input_price_micros_per_mtok: 4_000_000,
+            output_price_micros_per_mtok: 20_000_000,
+            cache_write_price_micros_per_mtok: nil,
+            cache_read_price_micros_per_mtok: 200_000,
+            fallback_input_price_micros_per_mtok: 5_000_000,
+            fallback_output_price_micros_per_mtok: 25_000_000,
+            max_tokens: 16_000
+          )
+        )
+
+      test = self()
+      checkpoint = fn model_state -> send(test, {:checkpoint, model_state}) end
+
+      assert {:ok, %{tool_calls: [_], usage: usage}, state} =
+               ClaudeMessages.respond(state, Map.put(@request, :checkpoint, checkpoint))
+
+      assert usage == %{input_tokens: 43_414, output_tokens: 412}
+      assert_received {:checkpoint, reserved}
+      assert ClaudeMessages.spend(reserved).reserved_micros > 720_000
+
+      # 2_134 at 4 + 9_872 at 5 + 31_408 at 0.2 (rounded up) + 412 at 20
+      # USD/MTok = 8_536 + 49_360 + 6_282 + 8_240 micro-USD.
+      assert %{spent_micros: 72_418, spent_tokens: 43_826, reserved_micros: 0} =
+               ClaudeMessages.spend(state)
+    end
+
     test "a fallback-served turn settles every attempt, the fallback model at its own prices" do
       stub_response(
         message(
