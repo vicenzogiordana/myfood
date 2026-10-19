@@ -84,6 +84,14 @@ by instruction), so every task is inline in this worker.
 - Decisions: the battery runs only where the Repo uses the SQL sandbox
   (`MIX_ENV=test`), every run is rolled back; per-run spend cap lowered to
   what is left of the ceiling; a gate without evidence does not pass.
+- Review round 1 (Jorge, PR #139), one low finding: `Battery.run/2` did not
+  validate `:runs_per_task` or `:tasks` (`1..0` descended into a bogus run 0
+  and inflated `planned_runs`; `tasks: []` raised in `hd/1`). Fix (commit
+  5d322bb): an options check before the `with` returns
+  `{:error, :invalid_runs_per_task}` or `{:error, :no_tasks}`, and the plan
+  uses `1..runs//1`. RED: the two new "refuses to start" cases in
+  `battery_test.exs` failed (10/12); GREEN: 12/12, full suite 1389 passed,
+  25 skipped; `mix precommit` clean.
 
 ## Pending
 
