@@ -56,7 +56,7 @@ Out of scope: streaming, per-message effort, mid-conversation tool changes, real
 
 - [x] T1 Shared paid-call helpers extracted from the OpenAI adapter (route: inline, one module + mechanical edit). Commit a57995b; OpenAI adapter tests 33/33 green before and after (refactor, no RED).
 - [x] T2 `Model.ClaudeMessages` adapter with contract tests (route: inline; single writer, this worker). Commit 0993683; RED 0/41 (module missing), GREEN 41/41.
-- [x] T2b Settled fallback pricing contract after review (route: inline; one module and its test file). Served-by signal is the iteration `type`, never the `model` string; cache-read price joins the worst case (CD-2); recovery row deletion on Session end confirmed (CD-3, no Session change). RED 6 failing, GREEN 47/47. Commit: see Progress.
+- [x] T2b Settled fallback pricing contract after review (route: inline; one module and its test file). Served-by signal is the iteration `type`, never the `model` string; cache-read price joins the worst case (CD-2); recovery row deletion on Session end confirmed (CD-3, no Session change). RED 6 failing, GREEN 47/47; `mix precommit` 1444 passed, 25 skipped. Commit d4f38a8.
 - [ ] T3 Provider selection in `config/runtime.exs` and the battery command, docs (route: inline). Implemented as commit 22d1095 on the stacked branch `feat/issue-141-provider-selection` (RED 7 failing, GREEN 22/22); split out of this PR because the adapter and its tests alone are ~1,240 authored lines, over the ~800-line PR budget.
 
 ## Acceptance criteria
