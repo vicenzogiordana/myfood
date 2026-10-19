@@ -535,6 +535,104 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
       assert %{spent_micros: 2_100, spent_tokens: 1_000} = ClaudeMessages.spend(state)
     end
 
+    test "a dated variant of the configured model is priced as the requested model" do
+      stub_response(
+        text_response("ok", %{"input_tokens" => 100, "output_tokens" => 10})
+        |> Map.put("model", "claude-opus-5-5-20260901")
+      )
+
+      {:ok, state} = ClaudeMessages.init(opts())
+      assert {:ok, _, state} = ClaudeMessages.respond(state, @request)
+
+      # 100 at 1 + 10 at 4 USD/Mtok = 140 micro-USD (fallback prices: 280).
+      assert %{spent_micros: 140, spent_tokens: 110} = ClaudeMessages.spend(state)
+    end
+
+    test "without usage.iterations the top-level usage settles at the requested model's prices" do
+      # Whatever model string the response names, no fallback_message
+      # iteration means no fallback ran.
+      stub_response(
+        text_response("ok", %{"input_tokens" => 100, "output_tokens" => 10})
+        |> Map.put("model", "claude-fallback-fictitious")
+      )
+
+      {:ok, state} = ClaudeMessages.init(opts())
+      assert {:ok, %{usage: usage}, state} = ClaudeMessages.respond(state, @request)
+
+      assert usage == %{input_tokens: 100, output_tokens: 10}
+      assert %{spent_micros: 140, spent_tokens: 110} = ClaudeMessages.spend(state)
+    end
+
+    test "an iteration without a model string is priced by its type" do
+      stub_response(
+        text_response("ok", %{
+          "input_tokens" => 100,
+          "output_tokens" => 10,
+          "iterations" => [%{"type" => "message", "input_tokens" => 100, "output_tokens" => 10}]
+        })
+      )
+
+      {:ok, state} = ClaudeMessages.init(opts())
+      assert {:ok, _, state} = ClaudeMessages.respond(state, @request)
+
+      assert %{spent_micros: 140, spent_tokens: 110} = ClaudeMessages.spend(state)
+    end
+
+    test "a refusal followed by a fallback_message iteration prices each at its own rate" do
+      # The served-by signal is the iteration type: the declined attempt names
+      # a dated variant and the fallback names no model at all.
+      stub_response(
+        text_response("Served by the fallback.", %{
+          "input_tokens" => 400,
+          "output_tokens" => 100,
+          "iterations" => [
+            %{
+              "type" => "message",
+              "model" => "claude-opus-5-5-20260901",
+              "input_tokens" => 500,
+              "output_tokens" => 20
+            },
+            %{"type" => "fallback_message", "input_tokens" => 400, "output_tokens" => 100}
+          ]
+        })
+        |> Map.put("model", "claude-opus-5-5")
+      )
+
+      {:ok, state} = ClaudeMessages.init(opts())
+      assert {:ok, %{usage: usage}, state} = ClaudeMessages.respond(state, @request)
+
+      assert usage == %{input_tokens: 900, output_tokens: 120}
+
+      # Declined: 500 at 1 + 20 at 4 = 580. Fallback: 400 at 2 + 100 at 8 =
+      # 1_600. Total 2_180 micro-USD.
+      assert %{spent_micros: 2_180, spent_tokens: 1_020} = ClaudeMessages.spend(state)
+    end
+
+    test "a fallback_message iteration while fallbacks are off keeps the worst case as spent" do
+      stub_response(
+        text_response("ok", %{
+          "input_tokens" => 1,
+          "output_tokens" => 1,
+          "iterations" => [
+            %{"type" => "fallback_message", "input_tokens" => 1, "output_tokens" => 1}
+          ]
+        })
+      )
+
+      {:ok, state} =
+        ClaudeMessages.init(
+          opts(
+            fallbacks: false,
+            fallback_input_price_micros_per_mtok: nil,
+            fallback_output_price_micros_per_mtok: nil
+          )
+        )
+
+      assert {:ok, %{usage: nil}, state} = ClaudeMessages.respond(state, @request)
+      assert %{reserved_micros: 0, spent_micros: spent} = ClaudeMessages.spend(state)
+      assert spent >= 4_000
+    end
+
     test "a refusal is a typed error, settled to its usage and never kept in the history" do
       stub_responses([
         message([], "refusal", %{"input_tokens" => 100, "output_tokens" => 0})
@@ -629,6 +727,30 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
 
       {:ok, state} = ClaudeMessages.init(opts(spend_cap_micros: 11_999, fallbacks: false))
       assert {:ok, _, _} = ClaudeMessages.respond(state, @request)
+    end
+
+    test "the worst case counts every request byte at the highest input-side price" do
+      test = self()
+
+      Req.Test.stub(@stub, fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(test, {:request_bytes, byte_size(raw)})
+        Req.Test.json(conn, text_response("ok"))
+      end)
+
+      # Cache reads priced above input and cache writes (10 USD/Mtok).
+      {:ok, state} =
+        ClaudeMessages.init(opts(fallbacks: false, cache_read_price_micros_per_mtok: 10_000_000))
+
+      checkpoint = fn model_state -> send(test, {:checkpoint, model_state}) end
+
+      assert {:ok, _, _} =
+               ClaudeMessages.respond(state, Map.put(@request, :checkpoint, checkpoint))
+
+      assert_received {:checkpoint, reserved}
+      assert_received {:request_bytes, bytes}
+      # Every byte at 10 USD/Mtok plus 1_000 output tokens at 4 USD/Mtok.
+      assert ClaudeMessages.spend(reserved).reserved_micros == bytes * 10 + 4_000
     end
 
     test "the cumulative token cap stops further calls" do

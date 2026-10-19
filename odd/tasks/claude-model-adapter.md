@@ -34,8 +34,11 @@ environment in the runtime config and in `mix planning_agent.battery`.
 - Stop reasons: `refusal` → `:provider_refused`, `max_tokens` →
   `:provider_output_truncated`, `model_context_window_exceeded` →
   `:provider_context_exceeded`, others not finished → `:invalid_provider_response`.
-- Server-side fallback `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`),
-  fallback attempts priced at the configured fallback prices.
+- Server-side fallback `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`).
+  A fallback attempt is identified by a `usage.iterations` entry of `type:
+  "fallback_message"` and priced at the configured fallback prices; every other
+  iteration, and the top-level `usage` when `iterations` is absent, at the primary
+  prices. The `model` string is never read for pricing.
 - `PLANNING_AGENT_MODEL_PROVIDER=openai|claude` in `config/runtime.exs` and in the battery
   command; docs list the Claude variables.
 
@@ -53,6 +56,7 @@ Out of scope: streaming, per-message effort, mid-conversation tool changes, real
 
 - [x] T1 Shared paid-call helpers extracted from the OpenAI adapter (route: inline, one module + mechanical edit). Commit a57995b; OpenAI adapter tests 33/33 green before and after (refactor, no RED).
 - [x] T2 `Model.ClaudeMessages` adapter with contract tests (route: inline; single writer, this worker). Commit 0993683; RED 0/41 (module missing), GREEN 41/41.
+- [x] T2b Settled fallback pricing contract after review (route: inline; one module and its test file). Served-by signal is the iteration `type`, never the `model` string; cache-read price joins the worst case (CD-2); recovery row deletion on Session end confirmed (CD-3, no Session change). RED 6 failing, GREEN 47/47. Commit: see Progress.
 - [ ] T3 Provider selection in `config/runtime.exs` and the battery command, docs (route: inline). Implemented as commit 22d1095 on the stacked branch `feat/issue-141-provider-selection` (RED 7 failing, GREEN 22/22); split out of this PR because the adapter and its tests alone are ~1,240 authored lines, over the ~800-line PR budget.
 
 ## Acceptance criteria
@@ -81,5 +85,12 @@ Out of scope: streaming, per-message effort, mid-conversation tool changes, real
   `max_fallback_attempts` (default 1) fallback attempts; cache prices default to
   1.25x / 1x input. No `thinking.block_binding` is sent: its acceptance by fallback
   models is undocumented, so instructions and tools must stay byte-stable.
+- Review rework (Jorge, verified API contract): fallback detection moved from comparing
+  the response `model` to `config.model` (wrong for dated variants, aliases and absent
+  names) to the `fallback_message` iteration type. A `fallback_message` while fallbacks
+  are off has no price and keeps the worst case spent. The worst case now uses the
+  highest of input, cache-write and cache-read prices. `assistant_turns` is not pruned
+  (CD-3); its `planning_agent_recoveries` row is deleted on confirm, cancel, expiry and
+  lost lock (existing tests in `session_recovery_test.exs`).
 - Mirror: Engram topic `odd/claude-model-adapter/tasks`.
 - Next step: merge PR 1, then open the PR for `feat/issue-141-provider-selection`.

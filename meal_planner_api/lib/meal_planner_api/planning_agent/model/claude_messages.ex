@@ -31,6 +31,12 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
   instructions and tools must stay byte-identical for replayed thinking to
   stay valid.
 
+  `assistant_turns` is never pruned within a Planning Session; it is bounded
+  by the Session's own limits. Its persisted copy (the
+  `planning_agent_recoveries` row) is deleted whenever the Session ends:
+  confirmed, cancelled, expired or lock lost (`PlanningRepo` and the
+  Planning Session sweeper).
+
   ## Stop reasons
 
   `refusal` becomes `:provider_refused`, `max_tokens`
@@ -51,14 +57,20 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
   (`:pricing_unconfigured`) or API key (`:provider_unconfigured`). Before
   each call the worst case is reserved and reported through the request's
   `:checkpoint`: every request byte counted as one input token at the
-  higher of the input and cache-write prices, plus `max_tokens` output, for
-  the requested model and for each of `max_fallback_attempts` fallback
-  attempts at the fallback prices. Afterwards it is settled from `usage`:
-  input, cache write, cache read and output tokens, summed over every
-  attempt of `usage.iterations` (a declined attempt at the requested
-  model's prices, any other model at the fallback prices). Missing or
-  invalid usage keeps the worst case spent. A fallback chain longer than
-  `max_fallback_attempts` is still settled from its reported usage.
+  highest of the input, cache-write and cache-read prices, plus
+  `max_tokens` output, for the requested model and for each of
+  `max_fallback_attempts` fallback attempts at the fallback prices.
+  Afterwards it is settled from `usage`: input, cache write, cache read and
+  output tokens, summed over every attempt of `usage.iterations`. The
+  iteration `type` says which model ran it: a `fallback_message` iteration
+  is priced at the fallback prices, any other iteration at the requested
+  model's prices. The `model` string of the response or of an iteration is
+  never read, so a missing, dated or aliased model name cannot change the
+  price. Without `usage.iterations` the top-level `usage` is settled at the
+  requested model's prices. Missing or invalid usage, or a
+  `fallback_message` iteration while fallbacks are off, keeps the worst case
+  spent. A fallback chain longer than `max_fallback_attempts` is still
+  settled from its reported usage.
 
   Fallback prices are mandatory while fallbacks are on: set them to the
   highest price among the possible fallback models. Cache prices default
@@ -351,19 +363,24 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
   defp parse(_response), do: {:error, :invalid_provider_response}
 
   # The top-level usage covers only the attempt that produced the message;
-  # with a fallback, usage.iterations records every attempt.
+  # with a fallback, usage.iterations records every attempt. Which model ran
+  # an attempt is read from the iteration type (`fallback_message` is a
+  # fallback attempt), never from the `model` string, which may be absent,
+  # dated or an alias.
   defp usage(config, %{"usage" => %{"iterations" => [_ | _] = iterations}}) do
     iterations
-    |> Enum.map(&attempt(config, &1, &1["model"]))
+    |> Enum.map(&attempt(&1, prices(config, &1)))
     |> sum()
   end
 
-  defp usage(config, %{"usage" => %{} = usage} = response),
-    do: sum([attempt(config, usage, response["model"])])
+  defp usage(config, %{"usage" => %{} = usage}),
+    do: sum([attempt(usage, primary_prices(config))])
 
   defp usage(_config, _response), do: :unknown
 
-  defp attempt(config, usage, model) do
+  defp attempt(_usage, :unknown), do: :unknown
+
+  defp attempt(usage, prices) do
     # Cache counts are absent when nothing was cached; the others are required.
     counts = [
       usage["input_tokens"],
@@ -374,7 +391,6 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
 
     if Enum.all?(counts, &PaidCall.non_neg_integer?/1) do
       [input, write, read, output] = counts
-      prices = prices(config, model)
 
       micros =
         PaidCall.micros(input, prices.input) + PaidCall.micros(write, prices.cache_write) +
@@ -400,10 +416,13 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
     end
   end
 
-  # An attempt by any model other than the requested one is a fallback.
-  defp prices(%{model: model} = config, model), do: primary_prices(config)
-  defp prices(%{fallbacks: true} = config, _model), do: fallback_prices(config)
-  defp prices(config, _model), do: primary_prices(config)
+  # A fallback attempt the request never enabled has no configured price:
+  # its settlement is unknown, so the worst case stays spent.
+  defp prices(%{fallbacks: true} = config, %{"type" => "fallback_message"}),
+    do: fallback_prices(config)
+
+  defp prices(_config, %{"type" => "fallback_message"}), do: :unknown
+  defp prices(config, _iteration), do: primary_prices(config)
 
   defp primary_prices(config) do
     %{
@@ -445,7 +464,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
   defp attempt_worst_case(prices, input, output) do
     %{
       micros:
-        PaidCall.micros(input, max(prices.input, prices.cache_write)) +
+        PaidCall.micros(input, Enum.max([prices.input, prices.cache_write, prices.cache_read])) +
           PaidCall.micros(output, prices.output),
       tokens: input + output
     }
