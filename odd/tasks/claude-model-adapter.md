@@ -51,18 +51,18 @@ Out of scope: streaming, per-message effort, mid-conversation tool changes, real
 
 ## Tasks
 
-- [ ] T1 Shared paid-call helpers extracted from the OpenAI adapter (route: inline, one module + mechanical edit).
-- [ ] T2 `Model.ClaudeMessages` adapter with contract tests (route: inline; single writer, this worker).
-- [ ] T3 Provider selection in `config/runtime.exs` and the battery command, docs (route: inline).
+- [x] T1 Shared paid-call helpers extracted from the OpenAI adapter (route: inline, one module + mechanical edit). Commit a57995b; OpenAI adapter tests 33/33 green before and after (refactor, no RED).
+- [x] T2 `Model.ClaudeMessages` adapter with contract tests (route: inline; single writer, this worker). Commit 0993683; RED 0/41 (module missing), GREEN 41/41.
+- [ ] T3 Provider selection in `config/runtime.exs` and the battery command, docs (route: inline). Implemented as commit 22d1095 on the stacked branch `feat/issue-141-provider-selection` (RED 7 failing, GREEN 22/22); split out of this PR because the adapter and its tests alone are ~1,240 authored lines, over the ~800-line PR budget.
 
 ## Acceptance criteria
 
-- [ ] Adapter implements the Model behaviour and passes the same contract tests as the OpenAI adapter (Req stub).
-- [ ] Tool calls round-trip as `tool_use` / `tool_result` blocks, results in one user message.
-- [ ] Assistant content blocks (including thinking) are resent unchanged and survive recover.
-- [ ] Init refuses without caps or prices; spend reserved before and settled after each call, including cache tokens.
-- [ ] Refusal and max_tokens stop reasons yield typed errors.
-- [ ] Provider selectable by env in runtime config and battery; QUALITY_BATTERY.md and CHANNELS.md list the Claude variables.
+- [x] Adapter implements the Model behaviour and passes the same contract tests as the OpenAI adapter (Req stub).
+- [x] Tool calls round-trip as `tool_use` / `tool_result` blocks, results in one user message.
+- [x] Assistant content blocks (including thinking) are resent unchanged and survive recover.
+- [x] Init refuses without caps or prices; spend reserved before and settled after each call, including cache tokens.
+- [x] Refusal and max_tokens stop reasons yield typed errors.
+- [ ] (stacked branch) Provider selectable by env in runtime config and battery; QUALITY_BATTERY.md and CHANNELS.md list the Claude variables.
 
 ## Checks
 
@@ -71,4 +71,15 @@ Out of scope: streaming, per-message effort, mid-conversation tool changes, real
 
 ## Progress
 
-- Delivery strategy: single PR (forecast ~800 authored lines incl. tests).
+- Delivery strategy: chained. PR 1 = T1 + T2 (adapter slice); T3 on the stacked
+  branch `feat/issue-141-provider-selection`, to open after PR 1 merges.
+- Checks on the adapter slice: `mix precommit` 1438 passed, 25 skipped. One earlier
+  full run on the T3 branch had 3 failures alongside Postgrex disconnect logs; two
+  reruns passed 1443/1443 (flaky, not reproduced).
+- Decisions: fallback prices are mandatory while fallbacks are on (the fallback model
+  can cost more than the requested one); the worst case reserves the call plus
+  `max_fallback_attempts` (default 1) fallback attempts; cache prices default to
+  1.25x / 1x input. No `thinking.block_binding` is sent: its acceptance by fallback
+  models is undocumented, so instructions and tools must stay byte-stable.
+- Mirror: Engram topic `odd/claude-model-adapter/tasks`.
+- Next step: merge PR 1, then open the PR for `feat/issue-141-provider-selection`.
