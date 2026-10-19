@@ -100,6 +100,16 @@ by instruction), so every task is inline in this worker.
   `meal_planner_api/docs/QUALITY_BATTERY.md`. RED:
   `test/mix/tasks/planning_agent_battery_test.exs` 0/5 (task undefined);
   GREEN: 5 passed with the scripted model, no paid call.
+- Review round 1 (Jorge, PR #140), one medium finding: the report path was
+  only used by `File.write!/2` after every paid run finished, so a bad
+  `--out` raised `File.Error` and lost the paid results and the verdict.
+  Fix (route: inline, one file plus its test): `run/2` checks that the
+  `--out` directory exists, is a directory and is writable before
+  `app.start` and `Battery.run/2`, and refuses with `Mix.Error`
+  ("cannot write the report to ..."). RED: the new "refuses an unwritable
+  --out before any paid run starts" case failed with `File.Error` (5/6);
+  GREEN: 6/6, no run line printed; full suite 1395 passed, 25 skipped;
+  `mix precommit` clean.
 
 ## Pending
 

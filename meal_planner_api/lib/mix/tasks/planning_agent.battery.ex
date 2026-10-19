@@ -22,7 +22,8 @@ defmodule Mix.Tasks.PlanningAgent.Battery do
     * `--config PATH` — the JSON configuration (required)
     * `--out PATH` — where to write the report (default:
       `planning-agent-battery-<timestamp>.json` or `.md`, by
-      `evidence_format`)
+      `evidence_format`); its directory must exist and be writable, which
+      is checked before any paid run starts
 
   ## Provider and optimizer environment
 
@@ -79,6 +80,7 @@ defmodule Mix.Tasks.PlanningAgent.Battery do
     {opts, _rest} = OptionParser.parse!(args, strict: [config: :string, out: :string])
     config_path = opts[:config] || Mix.raise(usage())
     config = read_config!(config_path)
+    if out = opts[:out], do: ensure_writable_out!(out)
 
     Mix.Task.run("app.start")
 
@@ -146,6 +148,26 @@ defmodule Mix.Tasks.PlanningAgent.Battery do
 
       {:error, reason} ->
         Mix.raise("cannot read battery configuration #{path}: #{:file.format_error(reason)}")
+    end
+  end
+
+  # The report is written only after every paid run, so a bad --out is
+  # refused up front instead of discarding the paid results.
+  defp ensure_writable_out!(out) do
+    dir = Path.dirname(out)
+
+    case File.stat(dir) do
+      {:ok, %File.Stat{type: :directory, access: access}} when access in [:write, :read_write] ->
+        :ok
+
+      {:ok, %File.Stat{type: :directory}} ->
+        Mix.raise("cannot write the report to #{out}: #{dir} is not writable")
+
+      {:ok, _stat} ->
+        Mix.raise("cannot write the report to #{out}: #{dir} is not a directory")
+
+      {:error, reason} ->
+        Mix.raise("cannot write the report to #{out}: #{dir}: #{:file.format_error(reason)}")
     end
   end
 

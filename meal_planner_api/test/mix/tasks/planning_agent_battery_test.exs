@@ -60,6 +60,23 @@ defmodule Mix.Tasks.PlanningAgent.BatteryTest do
            ]
   end
 
+  test "refuses an unwritable --out before any paid run starts", %{tmp_dir: dir} do
+    path = write_config!(dir, BatteryFixtures.config_map())
+    out = Path.join([dir, "missing", "dir", "report.md"])
+    plan = [{:tool_calls, [{"run_optimizer", %{}}]}, {:tool_calls, [{"present_proposal", %{}}]}]
+
+    assert_raise Mix.Error, ~r/cannot write the report/, fn ->
+      Battery.run(["--config", path, "--out", out],
+        model: fn _task, _run -> {Scripted, script: plan ++ [{:text, "Here is your plan."}]} end,
+        optimizer: {BatteryOptimizer, []},
+        tasks: Enum.take(MealPlannerApi.PlanningAgent.Battery.Tasks.all(), 1),
+        runs_per_task: 1
+      )
+    end
+
+    refute_received {:mix_shell, :info, ["R1 run 1: " <> _]}
+  end
+
   test "writes the report and prints the verdict", %{tmp_dir: dir} do
     config =
       BatteryFixtures.config_map()
