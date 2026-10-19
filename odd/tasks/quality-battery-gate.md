@@ -110,6 +110,16 @@ by instruction), so every task is inline in this worker.
   --out before any paid run starts" case failed with `File.Error` (5/6);
   GREEN: 6/6, no run line printed; full suite 1395 passed, 25 skipped;
   `mix precommit` clean.
+- Review round 2 (Jorge, PR #140), one low finding: the `--out` pre-flight
+  only checked the parent directory, so an `--out` that is an existing
+  directory (or a read-only existing file) still passed and `File.write!/2`
+  raised after the paid runs. Fix (route: inline, one file plus its test):
+  `ensure_writable_out!/1` first stats the target and refuses a directory
+  ("it is a directory") or a non-writable existing file ("it is not
+  writable") before checking the parent. No write fallback was added. RED:
+  the two new cases ("existing directory", "existing read-only file")
+  failed with `File.Error` (6/8); GREEN: 8/8 with zero model calls recorded;
+  full suite 1397 passed, 25 skipped; `mix precommit` clean.
 
 ## Pending
 

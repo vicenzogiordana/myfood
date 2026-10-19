@@ -152,8 +152,23 @@ defmodule Mix.Tasks.PlanningAgent.Battery do
   end
 
   # The report is written only after every paid run, so a bad --out is
-  # refused up front instead of discarding the paid results.
+  # refused up front instead of discarding the paid results: the target
+  # itself must not be a directory or a read-only file, and its parent must
+  # be a writable directory.
   defp ensure_writable_out!(out) do
+    case File.stat(out) do
+      {:ok, %File.Stat{type: :directory}} ->
+        Mix.raise("cannot write the report to #{out}: it is a directory")
+
+      {:ok, %File.Stat{access: access}} when access not in [:write, :read_write] ->
+        Mix.raise("cannot write the report to #{out}: it is not writable")
+
+      _missing_or_writable ->
+        ensure_writable_dir!(out)
+    end
+  end
+
+  defp ensure_writable_dir!(out) do
     dir = Path.dirname(out)
 
     case File.stat(dir) do

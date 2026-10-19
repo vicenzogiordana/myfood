@@ -77,6 +77,42 @@ defmodule Mix.Tasks.PlanningAgent.BatteryTest do
     refute_received {:mix_shell, :info, ["R1 run 1: " <> _]}
   end
 
+  test "refuses an --out that is an existing directory before any model call", %{tmp_dir: dir} do
+    assert_out_refused_before_model_call(dir, dir, ~r/is a directory/)
+  end
+
+  test "refuses an --out that is an existing read-only file before any model call",
+       %{tmp_dir: dir} do
+    out = Path.join(dir, "report.md")
+    File.write!(out, "")
+    File.chmod!(out, 0o444)
+    on_exit(fn -> File.chmod(out, 0o644) end)
+
+    assert_out_refused_before_model_call(dir, out, ~r/is not writable/)
+  end
+
+  defp assert_out_refused_before_model_call(dir, out, message) do
+    path = write_config!(dir, BatteryFixtures.config_map())
+    test_pid = self()
+    plan = [{:tool_calls, [{"run_optimizer", %{}}]}, {:tool_calls, [{"present_proposal", %{}}]}]
+
+    model = fn _task, _run ->
+      send(test_pid, :model_called)
+      {Scripted, script: plan ++ [{:text, "Here is your plan."}]}
+    end
+
+    assert_raise Mix.Error, message, fn ->
+      Battery.run(["--config", path, "--out", out],
+        model: model,
+        optimizer: {BatteryOptimizer, []},
+        tasks: Enum.take(MealPlannerApi.PlanningAgent.Battery.Tasks.all(), 1),
+        runs_per_task: 1
+      )
+    end
+
+    refute_received :model_called
+  end
+
   test "writes the report and prints the verdict", %{tmp_dir: dir} do
     config =
       BatteryFixtures.config_map()
