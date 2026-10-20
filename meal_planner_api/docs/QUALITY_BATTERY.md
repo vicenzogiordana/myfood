@@ -98,7 +98,9 @@ value and keep the file out of git:
   existing human decisions (`OpenAIResponses` or `ClaudeMessages`). Before each run the battery
   lowers the adapter's per-session spend cap to what is left of the ceiling.
   Once what is left is zero, or below one call's reservation, the run whose
-  model call the ceiling refused is reported as `not_run` (never graded),
+  model call the ceiling refused (its session reports
+  `session_budget_exhausted` with limit `spend_cap`) is reported as
+  `not_run` (never graded),
   the battery stops, every remaining run counts as not run and the report
   is `incomplete`. Gates are computed only from the runs that ran. A run
   that reaches the adapter's own per-session cap, with the ceiling not
@@ -113,7 +115,11 @@ The battery makes paid provider calls. It needs:
   recipes.
 - The provider variables of `config/runtime.exs`. Both providers need
   `PLANNING_AGENT_SPEND_CAP_MICROS`, `PLANNING_AGENT_TOKEN_CAP` and
-  `PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS`.
+  `PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS`. The spend cap is the real
+  per-session limit; the token cap is a safety net (with Claude it reserves
+  the request bytes / 3 plus the output limit and ignores cache reads), so
+  set it well above the expected use, e.g. 2,000,000 for a US$3 cap. Every
+  Member message gets 15 model calls and a session at most 60.
   `PLANNING_AGENT_MODEL_PROVIDER` picks the adapter: `claude`, or OpenAI when
   unset or anything else.
   - OpenAI: `OPENAI_API_KEY`, `OPENAI_INPUT_PRICE_MICROS_PER_MTOK`,

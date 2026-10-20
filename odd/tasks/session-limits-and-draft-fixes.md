@@ -39,7 +39,7 @@ ingredient discovery).
       GREEN claude_messages_test 53/53, planning_agent suite green. Commit d9a9705.
 - [ ] T6 Exhausted cap ends the session gracefully with
       `session_budget_exhausted`; channel forwards it.
-- [ ] T7 Docs (QUALITY_BATTERY, CHANNELS, agent docs, env vars).
+- [x] T7 Docs (QUALITY_BATTERY, CHANNELS, agent docs, env vars). Passive docs: structural readback only.
 
 Route: single bounded worker, inline per task (the worker is the delegated
 writer of this pipeline).
