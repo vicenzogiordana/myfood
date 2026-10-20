@@ -201,6 +201,47 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       assert result["hint"] =~ "close_matches"
     end
 
+    # Issue #160: "the catalog has no mozzarella" while it had "Muzzarella".
+    test "close matches are ranked by similarity, spelling variants included",
+         %{household: h} = ctx do
+      {:ok, cheese} = Catalog.create_ingredient(%{name: "Muzzarella", category: :otros})
+      {:ok, flour} = Catalog.create_ingredient(%{name: "Harina de trigo", category: :otros})
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [
+            %{"ingredient" => "mozzarella", "quantity" => 200, "unit" => "g"},
+            %{"ingredient" => "harina 000", "quantity" => 500, "unit" => "g"}
+          ]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      matches = Map.new(result["close_matches"], &{&1["ingredient"], &1["matches"]})
+      assert hd(matches["mozzarella"]) == cheese.name
+      assert hd(matches["harina 000"]) == flour.name
+      assert result["missing_from_catalog"] == []
+    end
+
+    test "an unambiguous spelling variant resolves to its catalog name and is reported",
+         %{household: h} = ctx do
+      {:ok, lemon} = Catalog.create_ingredient(%{name: "Limón", category: :otros})
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [
+            %{"ingredient" => ctx.pasta.name, "quantity" => 200, "unit" => "g"},
+            %{"ingredient" => "limones", "quantity" => 50, "unit" => "g"}
+          ]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["status"] == "drafted"
+      assert Enum.map(result["ingredients"], & &1["ingredient"]) == [ctx.pasta.name, lemon.name]
+      assert result["renamed_ingredients"] == [%{"requested" => "limones", "catalog" => "Limón"}]
+    end
+
     # Issue #158: guessing other names for an Ingredient the catalog does not
     # have only burns attempts until the no-progress limit cuts the run.
     test "an Ingredient without close matches is named as missing and not to be guessed",

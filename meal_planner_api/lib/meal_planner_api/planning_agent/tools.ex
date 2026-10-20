@@ -424,6 +424,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
       {data
        |> Map.put("status", if(revised?, do: "revised", else: "drafted"))
+       |> with_renamed(Map.get(draft, :renamed, []))
        |> Map.merge(RecipeDraft.outcome(draft)), workspace, :continue}
     else
       {:error, error} -> {error, ctx.workspace, :continue}
@@ -1158,6 +1159,18 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   end
 
   defp drafts(ctx), do: RecipeDraft.in_context(ctx)
+
+  # Requested Ingredient names the catalog spells otherwise (issue #160): the
+  # agent is told which catalog name was used, to say it that way.
+  defp with_renamed(result, []), do: result
+
+  defp with_renamed(result, renamed) do
+    Map.merge(result, %{
+      "renamed_ingredients" => renamed,
+      "renamed_note" =>
+        "These Ingredients were matched to the catalog names shown; call them by those names."
+    })
+  end
 
   defp with_nutrition_outcome(%{"nutrition" => %{"complete" => true}} = recipe), do: recipe
 
