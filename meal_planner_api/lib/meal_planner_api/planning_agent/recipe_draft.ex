@@ -447,17 +447,40 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
 
       unknown ->
         names = unknown |> Enum.map(& &1.name) |> Enum.uniq()
+        matches = close_matches(names)
+        missing = for %{"ingredient" => name, "matches" => []} <- matches, do: name
 
         {:error,
          %{
            "error" => "unknown_ingredients",
            "ingredients" => names,
-           "close_matches" => close_matches(names),
-           "hint" =>
-             "Retry with catalog names from close_matches, or drop the Ingredient. " <>
-               "search_recipes finds recipes, not Ingredients."
+           "close_matches" => matches,
+           "missing_from_catalog" => missing,
+           "hint" => unknown_hint(missing)
          }}
     end
+  end
+
+  @retry_hint "Retry with catalog names from close_matches, or drop the Ingredient. " <>
+                "search_recipes finds recipes, not Ingredients."
+
+  # An Ingredient without any close match is not in the catalog (issue
+  # #158): guessing other names for it only burns attempts.
+  defp unknown_hint([]), do: @retry_hint
+
+  defp unknown_hint(missing) do
+    {subject, verb, pronoun} =
+      case missing do
+        [name] -> {name, "is", "it"}
+        names -> {Enum.join(names, ", "), "are", "them"}
+      end
+
+    "#{subject} #{verb} not in the catalog and nothing close is. " <>
+      "Do not retry #{pronoun} with other names. If the dish needs #{pronoun}, do not create the dish: " <>
+      "tell the household it cannot be made because the catalog has no #{subject}, " <>
+      "plan the rest, and leave that meal for the household to decide. " <>
+      "If the dish works without #{pronoun}, drop #{pronoun}. For any other unknown Ingredient: " <>
+      @retry_hint
   end
 
   # Close catalog matches of unknown Ingredient names (issue #154): catalog
