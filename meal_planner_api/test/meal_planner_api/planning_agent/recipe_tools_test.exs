@@ -175,6 +175,32 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       refute Map.has_key?(result, "recipe_id")
     end
 
+    test "lists close catalog matches for unknown Ingredients (issue #154)",
+         %{household: h} = ctx do
+      bun = ingredient!("Fictitious pan para hamburguesas")
+      _unrelated = ingredient!("Fictitious lemon")
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [
+            %{"ingredient" => "Fictitious tomatoes", "quantity" => 200, "unit" => "g"},
+            %{"ingredient" => "Pan de hamburguesa", "quantity" => 2, "unit" => "unit"},
+            %{"ingredient" => "Imaginary truffle", "quantity" => 10, "unit" => "g"}
+          ]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["error"] == "unknown_ingredients"
+      matches = Map.new(result["close_matches"], &{&1["ingredient"], &1["matches"]})
+
+      assert hd(matches["Fictitious tomatoes"]) == ctx.tomato.name
+      assert hd(matches["Pan de hamburguesa"]) == bun.name
+      refute "Fictitious lemon" in matches["Pan de hamburguesa"]
+      assert matches["Imaginary truffle"] == []
+      assert result["hint"] =~ "close_matches"
+    end
+
     test "labels nutrition and cost partial when data is missing, never zero",
          %{household: h} = ctx do
       product!(ctx.pasta, package: {500_000, :g}, price_cents: 1_000)
