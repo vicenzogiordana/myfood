@@ -148,7 +148,9 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       # 200 g of a 1000 cents / 500 g package = 400; 300 g of 2000 / 1 kg = 600.
       assert result["cost"] == %{
                "total_cents" => 1_000,
+               "total" => "ARS 10,00",
                "per_serving_cents" => 500,
+               "per_serving" => "ARS 5,00",
                "currency" => "ARS",
                "complete" => true,
                "missing_prices" => []

@@ -59,8 +59,19 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContextTest do
     refute targets =~ "budget"
     assert instructions =~ "Never claim that a plan meets the Nutrition Goal"
 
-    assert instructions =~ "Grocery budget (checked by code): 12345 cents (ARS) for the range"
+    assert instructions =~ "Grocery budget (checked by code): ARS 123,45 for the range"
     assert instructions =~ "compares it against the Purchase total"
+    refute instructions =~ "12345"
+  end
+
+  # Issue #160: the model read integer cents as pesos, 100x too high.
+  test "the model quotes only the code-formatted amounts, never cents" do
+    instructions = HouseholdContext.instructions(context(), @range, ["dinner"])
+
+    assert instructions =~
+             "quote only the formatted amounts (e.g. \"purchase_total\": \"ARS 49.950,00\")"
+
+    assert instructions =~ "never read, convert or compute from the *_cents integers"
   end
 
   test "a brand with line breaks cannot forge instruction lines" do

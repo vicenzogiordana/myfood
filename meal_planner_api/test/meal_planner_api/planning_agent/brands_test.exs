@@ -326,10 +326,13 @@ defmodule MealPlannerApi.PlanningAgent.BrandsTest do
                  "chosen_brand" => "Fictitious Luchetti",
                  "source" => "household",
                  "chosen_total_cents" => 1_400,
+                 "chosen_total" => "ARS 14,00",
                  "alternative_product" => "Fictitious penne",
                  "alternative_brand" => "Fictitious Matarazzo",
                  "alternative_total_cents" => 1_000,
-                 "difference_cents" => 400
+                 "alternative_total" => "ARS 10,00",
+                 "difference_cents" => 400,
+                 "difference" => "ARS 4,00"
                }
              ]
     end

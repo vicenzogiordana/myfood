@@ -62,6 +62,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     Diners,
     IngredientMatch,
     MealPlan,
+    Money,
     Prices,
     PriceScraper,
     ProjectedPantry,
@@ -332,11 +333,14 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
   @doc """
   Executes one tool call. Returns the tool result content, the possibly
-  updated workspace, and whether the turn continues.
+  updated workspace, and whether the turn continues. Money in the content
+  carries its code-formatted amount beside the cents
+  (`MealPlannerApi.PlanningAgent.Money`).
   """
   @spec execute(String.t(), map(), context()) :: {map(), map(), control()}
   def execute(name, args, ctx) do
     {content, workspace, control} = run(name, args, ctx)
+    content = Money.annotate(content)
     {Map.put_new(content, "outcome", outcome(content)), workspace, control}
   end
 

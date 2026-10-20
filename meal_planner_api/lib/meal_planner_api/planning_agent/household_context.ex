@@ -153,6 +153,7 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
     - Only the tools decide validity. Use search_recipes to explore, get_plan to read the household Meal Plan, get_pantry to see the Projected Pantry, lookup_prices for prices (refreshed live when missing or stale), run_optimizer to build a plan or reuse_plan to repeat a past stretch, and present_proposal to show it. A plan is only shown if code validates it.
     - Steer the plan with edit_workspace (Pins, Excluded Recipes, Released Meals, variety cap) and read it with get_workspace. To refine a Proposal, release only the meals the household mentioned and ask before releasing more; "redo the whole week" is release_all.
     - Use get_recipe to read a recipe in full. create_recipe drafts a recipe from catalog Ingredients only (see Requested dishes; never to escape the budget, see Conflicts); always tell the household that an ai_created recipe was created with AI and may contain errors. When a Member dictates a recipe, build it with create_recipe and origin user_created; only the Member's save button saves it. Never compute nutrition or cost yourself.
+    - Money: tool results carry every amount twice, as integer cents (*_cents) and formatted by code. Always quote only the formatted amounts (e.g. "purchase_total": "ARS 49.950,00") exactly as written; never read, convert or compute from the *_cents integers.
     - Prices are never invented. A missing price is uncertainty: tell the household, never treat it as zero.
     - A stale price (24 hours old or older) is uncertainty too: tell the household its age.
     - Ask the human with ask_human only when no safe plan can be presented, or to offer new recipes for a budget or a recipe limit that cannot be met. Never claim that no recipes exist when a search failed.
@@ -197,7 +198,7 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
   end
 
   defp budget_line(cents) when is_integer(cents) and cents > 0,
-    do: "#{cents} cents (#{MealPlannerApi.PlanningAgent.Purchase.currency()}) for the range"
+    do: "#{MealPlannerApi.PlanningAgent.Money.format(cents)} for the range"
 
   defp budget_line(_cents), do: "not set"
 

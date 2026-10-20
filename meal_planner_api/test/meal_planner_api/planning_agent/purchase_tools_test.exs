@@ -11,6 +11,7 @@ defmodule MealPlannerApi.PlanningAgent.PurchaseToolsTest do
   import MealPlannerApi.PlanningAgentFixtures
 
   alias MealPlannerApi.PlanningAgent.FakeOptimizer
+  alias MealPlannerApi.PlanningAgent.Money
   alias MealPlannerApi.PlanningAgent.Model.Scripted
   alias MealPlannerApi.PlanningAgent.Session
 
@@ -130,7 +131,9 @@ defmodule MealPlannerApi.PlanningAgent.PurchaseToolsTest do
 
       result = run_tool(h, "lookup_prices", %{"ingredients" => ["limones"]})
 
-      assert [%{"ingredient" => "Limón", "price_cents" => 700}] = result["prices"]
+      assert [%{"ingredient" => "Limón", "price_cents" => 700, "price" => "ARS 7,00"}] =
+               result["prices"]
+
       assert result["missing"] == []
     end
 
@@ -368,7 +371,33 @@ defmodule MealPlannerApi.PlanningAgent.PurchaseToolsTest do
              }
 
       assert tool_result["status"] == "requires_approval"
-      assert tool_result["deviations"] == proposal["deviations"]
+      assert tool_result["deviations"] == Money.annotate(proposal["deviations"])
+    end
+
+    # Issue #160: the model read integer cents as pesos, 100x too high.
+    test "money in the tool result carries code-formatted amounts beside the cents",
+         %{household: h, recipe: recipe} do
+      budget!(h, 4_500_000)
+      {_proposal, tool_result} = present!(h, recipe)
+
+      assert tool_result["purchase_total_cents"] == 1_800
+      assert tool_result["purchase_total"] == "ARS 18,00"
+      assert tool_result["consumed_cost"] == "ARS 8,80"
+
+      assert %{"budget_cents" => 4_500_000, "budget" => "ARS 45.000,00"} = tool_result["budget"]
+      assert tool_result["budget"]["purchase_total"] == "ARS 18,00"
+    end
+
+    test "a budget conflict carries formatted amounts", %{household: h, recipe: recipe} do
+      budget!(h, 900)
+      {_proposal, tool_result} = present!(h, recipe)
+
+      assert [%{"difference" => "ARS 9,00", "total" => "ARS 18,00"}] = tool_result["deviations"]
+
+      assert %{"over_by" => "ARS 9,00", "packages_over_budget" => [package]} =
+               tool_result["budget_conflict"]
+
+      assert package["package_price"] == "ARS 10,00"
     end
 
     test "a Purchase within the budget is valid without Deviations",
