@@ -79,4 +79,16 @@ Decision: auto-resolution only for case, accent, punctuation and plural
 variants. Trigram similarity alone is unsafe to auto-resolve ("queso crema"
 vs "Queso cremoso" scores 0.67), so merely similar names stay close matches.
 
-Next step: review gate (Jorge el Curioso), then merge.
+## Review round 1 (Jorge el Curioso)
+
+- [x] R1 A fully skipped day still got nutrition goal stage terms and a
+      spurious `below_min` Deviation (actual 0), forcing a Deviation Approval
+      for a day the user asked to skip. Fix: `_days_with_meals(planned)`; the
+      nutrition stage loop and `_deviations` iterate only days that keep a
+      planned meal. RED: `test_a_skipped_meal_counts_toward_no_goal` (now
+      expects `[]`) and new
+      `test_a_fully_skipped_day_gets_no_goal_stage_terms_or_deviations`
+      failed 2/5; GREEN optimizer 64/64. Elixir `mix test` 1362 passed,
+      24 skipped; `mix precommit` clean. Route: inline (one file pair).
+
+Next step: re-review if needed, then merge.

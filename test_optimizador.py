@@ -728,10 +728,35 @@ class SkippedMealTests(unittest.TestCase):
 
         self.assertIsNone(error)
         self.assertEqual(recipe_ids(result), ["a"])
+        self.assertEqual(result["deviations"], [])
+
+    def test_a_fully_skipped_day_gets_no_goal_stage_terms_or_deviations(self):
+        solvers = []
+
+        def create():
+            solver = REAL_CREATE_SOLVER()
+            solvers.append(solver)
+            return solver
+
+        result, error = _solve(payload({"lunch": [recipe("a", cost=600, kcal=500)],
+                                        "dinner": [recipe("b", cost=600, kcal=500)]},
+                                       days=["2026-09-07", "2026-09-08"], slots=["lunch", "dinner"],
+                                       budget=2400,
+                                       macro_bounds=bounds(calories={"min": 1200, "max": 1500}),
+                                       skipped_meals=[skip("2026-09-08", "lunch"),
+                                                      skip("2026-09-08", "dinner")]),
+                               create_solver=create)
+
+        self.assertIsNone(error)
+        self.assertEqual(recipe_ids(result), ["a", "b"])
+        # The planned day keeps its goal: 1000 kcal against a 1200 minimum.
         self.assertEqual(result["deviations"], [
-            {"goal": "calories", "priority": 2, "day": "2026-09-09", "direction": "below_min",
-             "bound": 700, "actual": 0, "amount": 700},
+            {"goal": "calories", "priority": 2, "day": "2026-09-07", "direction": "below_min",
+             "bound": 1200, "actual": 1000, "amount": 200},
         ])
+        names = [var.name() for solver in solvers for var in solver.variables()]
+        self.assertIn("under_calories_2026-09-07", names)
+        self.assertEqual([name for name in names if name.endswith("_2026-09-08")], [])
 
     def test_a_slot_skipped_on_every_day_needs_no_candidate(self):
         result, error = _solve(payload({"lunch": [recipe("a")], "dinner": []},

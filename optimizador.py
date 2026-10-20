@@ -286,6 +286,11 @@ def _planned_keys(payload):
     return [(day, slot) for day in payload["days"] for slot in payload["slots"] if (day, slot) not in skipped]
 
 
+def _days_with_meals(planned):
+    """The range days that keep at least one planned meal, in range order."""
+    return list(dict.fromkeys(day for day, _slot in planned))
+
+
 def _valid_fixed_meals(entries, days, slots, candidates_by_slot):
     if not isinstance(entries, list) or not all(_is_prior_meal(entry) for entry in entries):
         return False
@@ -451,6 +456,8 @@ def _solve(payload, create_solver=None):
     stages = [(over_budget, [over_budget])]
 
     # Stages 2 and 3 — daily calorie and daily macro distance to their range.
+    # A day whose every meal is skipped counts toward no goal.
+    days_with_meals = _days_with_meals(planned)
     if macro_bounds is not None:
         for priority in (2, 3):
             distance = []
@@ -459,7 +466,7 @@ def _solve(payload, create_solver=None):
                     continue
                 low = float(macro_bounds[goal]["min"])
                 high = float(macro_bounds[goal]["max"])
-                for day in days:
+                for day in days_with_meals:
                     under = solver.NumVar(0, infinity, f"under_{goal}_{day}")
                     over = solver.NumVar(0, infinity, f"over_{goal}_{day}")
                     amount = total(field, day)
@@ -536,7 +543,7 @@ def _solve(payload, create_solver=None):
             {"day": day, "slot": slot, "recipe_id": assignment[(day, slot)]["recipe_id"]}
             for day, slot in planned
         ],
-        "deviations": _deviations(assignment, days, budget, macro_bounds),
+        "deviations": _deviations(assignment, days_with_meals, budget, macro_bounds),
         "optimality": optimality,
     }, None
 
