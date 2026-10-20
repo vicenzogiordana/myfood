@@ -81,4 +81,18 @@ Out of scope: optimizer cost model, nutrition evaluation, UI.
 
 ## Progress and evidence
 
-(updated per task with commit ids)
+- T1-T4 landed in one work unit, commit `f30a034` (they share the new
+  `Diners` module; splitting would leave half-wired tool schemas). Route:
+  inline in the bounded worker; no delegation (worker may not spawn agents).
+- RED observed: `diners_test.exs` 10/12 failing before implementation.
+- GREEN: `MYFOOD_TEST_DATABASE=meal_planner_api_test152 mix precommit`:
+  1295 passed, 24 skipped, 0 failures.
+- `reuse_plan` test updated: reused meals are rescaled to today's diners,
+  never the past meal's portions.
+- Optimizer contract unchanged (guest restrictions use `avoided_meals`); no
+  Python change, so optimizer tests were not run.
+- Engram mirror: `odd/diner-scaling-and-guests/tasks`.
+
+## Next step
+
+Review by Jorge el Curioso on the PR, then merge.
