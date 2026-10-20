@@ -31,10 +31,12 @@ ingredient discovery).
 
 - [x] T1 Pin Recipe Drafts (`Workspace` pin checks the Workspace's Drafts). Commit 1dbf6ec; RED 4 failing, GREEN recipe_draft_confirm_test 8/8.
 - [x] T2 Revise a Draft instead of duplicating; partial Drafts are usable. RED 5 failing, GREEN recipe_tools_test 16/16 Commit 312202e..
-- [x] T3 `unknown_ingredients` returns close catalog matches. RED 1 failing, GREEN recipe_tools_test 17/17.
+- [x] T3 `unknown_ingredients` returns close catalog matches. RED 1 failing, GREEN recipe_tools_test 17/17. Commit bab1199.
 - [ ] T4 Per-message iterations (15) with a session ceiling (60); refused
       calls are not counted.
-- [ ] T5 Realistic token reservation; cache reads excluded from the token cap.
+- [x] T5 Realistic token reservation; cache reads excluded from the token cap.
+      RED 3 failing (113,132 reserved vs 29,522 expected for a ~44 KB body);
+      GREEN claude_messages_test 53/53, planning_agent suite green.
 - [ ] T6 Exhausted cap ends the session gracefully with
       `session_budget_exhausted`; channel forwards it.
 - [ ] T7 Docs (QUALITY_BATTERY, CHANNELS, agent docs, env vars).
