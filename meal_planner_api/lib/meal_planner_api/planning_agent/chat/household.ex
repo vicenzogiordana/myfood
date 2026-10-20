@@ -145,7 +145,11 @@ defmodule MealPlannerApi.PlanningAgent.Chat.Household do
       %{key: :hake, name: "Merluza", tags: [:contains_fish]},
       %{key: :egg, name: "Huevo", tags: [:egg, :animal_product]},
       %{key: :cheese, name: "Queso cremoso", tags: [:milk, :animal_product]},
-      %{key: :peanut, name: "Mani tostado", tags: [:peanut]}
+      %{key: :peanut, name: "Mani tostado", tags: [:peanut]},
+      %{key: :flour, name: "Harina de trigo", tags: [:contains_gluten]},
+      %{key: :yeast, name: "Levadura", tags: []},
+      %{key: :mozzarella, name: "Muzzarella", tags: [:milk, :animal_product]},
+      %{key: :bun, name: "Pan de hamburguesa", tags: [:contains_gluten]}
     ]
   end
 
@@ -168,7 +172,11 @@ defmodule MealPlannerApi.PlanningAgent.Chat.Household do
       product(:hake, "Filet de merluza 1 kg", "Mar Austral", {1_000_000, :g}, 900_000),
       product(:egg, "Huevos x12", "Granja Norte", {12_000, :unit}, 280_000),
       product(:cheese, "Queso cremoso 500 g", "Tambo Azul", {500_000, :g}, 450_000),
-      product(:peanut, "Mani tostado 250 g", "Campo Sur", {250_000, :g}, 210_000)
+      product(:peanut, "Mani tostado 250 g", "Campo Sur", {250_000, :g}, 210_000),
+      product(:flour, "Harina de trigo 000 1 kg", "La Molienda", {1_000_000, :g}, 110_000),
+      product(:yeast, "Levadura seca 10 g", nil, {10_000, :g}, 60_000),
+      product(:mozzarella, "Muzzarella 1 kg", "Tambo Azul", {1_000_000, :g}, 780_000),
+      product(:bun, "Pan de hamburguesa x4", "Panificados Sol", {4_000, :unit}, 210_000)
     ]
   end
 
