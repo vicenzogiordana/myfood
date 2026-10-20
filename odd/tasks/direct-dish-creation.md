@@ -38,11 +38,11 @@ next message was refused with `authorization_required`.
 
 ## Tasks
 
-- [ ] T1 Empty close matches tell the model to stop guessing (decision 2, tool side). Route: inline.
-- [ ] T2 Validation-failure notice on a limit cut (decision 3). Route: inline.
-- [ ] T3 New message after a limit starts a new run (decision 4). Route: inline.
-- [ ] T4 Instructions for decisions 1 and 2 + CHANNELS.md. Route: inline.
-- [ ] T5 Full test suite and `mix precommit`; PR.
+- [x] T1 Empty close matches tell the model to stop guessing (decision 2, tool side). Route: inline. RED→GREEN in recipe_tools_test. Commit 741e586.
+- [x] T2 Validation-failure notice on a limit cut (decision 3). Route: inline. RED→GREEN in session_bounds_test (the fixed-meal test now expects a non-blaming notice). Commit 3e44a77.
+- [x] T3 New message after a limit starts a new run (decision 4). Route: inline. RED→GREEN in session_bounds_test and planning_agent_channel_test; battery runner no longer halts on authorization_required. Commit e68e4f1.
+- [x] T4 Instructions for decisions 1 and 2 + CHANNELS.md. Route: inline. RED→GREEN in household_context_test. Commit 6baddc2.
+- [x] T5 Full test suite (1336 passed, 24 skipped) and `mix precommit` (passed); PR opened.
 
 Route evidence: bounded single worker; each task touches one module plus its test.
 
@@ -58,4 +58,5 @@ budget rule or the "only recipes with X" rule; CHANNELS.md updated; precommit pa
 
 ## Progress
 
-- Next step: T1.
+- All tasks done. Next step: Jorge el Curioso review on the PR, then merge.
+- Note: no edit_workspace action leaves a meal empty, so "leave that meal for the household" means the plan keeps an existing recipe there and the agent says so.
