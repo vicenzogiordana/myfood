@@ -20,12 +20,10 @@ config :meal_planner_api, MealPlannerApi.Auth.Guardian,
 config :meal_planner_api,
   ai_client: MealPlannerApi.AI.GeminiClient
 
-config :meal_planner_api,
-  planning_optimizer_client: MealPlannerApi.Optimization.OptimizerServer,
-  start_optimizer_server: true,
-  optimizer_python: "python3",
-  optimizer_timeout_ms: 15_000,
-  optimizer_inventory_weight: 100
+# The OR-Tools optimizer runs only as the planning agent's tool
+# (`MealPlannerApi.PlanningAgent.Optimizer.Port`); the legacy optimizer
+# server and its greedy fallback were switched off in issue #110.
+config :meal_planner_api, optimizer_python: "python3"
 
 # Planning agent (spec #93). One provider per deployment, selected in
 # config/runtime.exs (PLANNING_AGENT_MODEL_PROVIDER: OpenAI or Claude, issue

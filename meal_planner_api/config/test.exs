@@ -36,11 +36,6 @@ config :meal_planner_api, :ai_client, MealPlannerApi.AI.MockClient
 
 config :meal_planner_api, MealPlannerApi.Auth.Guardian, secret_key: "test_guardian_secret_key"
 
-# Force mock optimizer client for deterministic planning tests
-config :meal_planner_api,
-  planning_optimizer_client: MealPlannerApi.Optimization.OptimizerMock,
-  start_optimizer_server: false
-
 # Email-code auth — Bamboo LocalAdapter captures deliveries in test
 # (`Bamboo.SentEmail.all/0` under LocalAdapter). No outbound SMTP.
 config :meal_planner_api, MealPlannerApi.Mailer, adapter: Bamboo.LocalAdapter

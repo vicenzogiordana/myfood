@@ -9,20 +9,6 @@ defmodule MealPlannerApiWeb.PlanningChatController do
   # from the legacy `current_user.account_id` field. See
   # `AccountScopeHelpers.scope_user_to_membership/2`.
 
-  def create(conn, payload) do
-    user = scoped_user(conn)
-
-    case PlanningChatService.generate_menu(user, payload) do
-      {:ok, result} ->
-        json(conn, %{data: serialize_generation(result)})
-
-      {:error, reason} ->
-        conn
-        |> put_status(:unprocessable_entity)
-        |> json(%{error: serialize_reason(reason)})
-    end
-  end
-
   def favorites(conn, params) do
     user = scoped_user(conn)
     limit = parse_limit(Map.get(params, "limit"))
@@ -30,20 +16,6 @@ defmodule MealPlannerApiWeb.PlanningChatController do
     case PlanningChatService.quick_favorites(user, limit) do
       {:ok, favorites} ->
         json(conn, %{data: Enum.map(favorites, &serialize_favorite/1)})
-
-      {:error, reason} ->
-        conn
-        |> put_status(:unprocessable_entity)
-        |> json(%{error: serialize_reason(reason)})
-    end
-  end
-
-  def reject(conn, %{"proposal_id" => proposal_id}) do
-    user = scoped_user(conn)
-
-    case PlanningChatService.reject_proposal(user, proposal_id) do
-      {:ok, result} ->
-        json(conn, %{data: serialize_rejection(result)})
 
       {:error, reason} ->
         conn
@@ -69,16 +41,6 @@ defmodule MealPlannerApiWeb.PlanningChatController do
 
   defp parse_limit(_), do: 10
 
-  defp serialize_generation(result) do
-    %{
-      run_id: result.run.id,
-      proposal_id: result.proposal.id,
-      date_from: Date.to_iso8601(result.date_from),
-      date_to: Date.to_iso8601(result.date_to),
-      proposal: result.proposal_json
-    }
-  end
-
   defp serialize_favorite(favorite) do
     %{
       recipe_id: favorite.recipe_id,
@@ -86,14 +48,6 @@ defmodule MealPlannerApiWeb.PlanningChatController do
       slots: favorite.slots,
       prep_time_minutes: Map.get(favorite, :prep_time_minutes),
       calories_per_serving: Map.get(favorite, :calories_per_serving)
-    }
-  end
-
-  defp serialize_rejection(result) do
-    %{
-      proposal_id: result.proposal_id,
-      generation_run_id: result.generation_run_id,
-      status: "rejected"
     }
   end
 

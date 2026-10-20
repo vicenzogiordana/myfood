@@ -25,13 +25,6 @@ defmodule MealPlannerApi.Application do
       MealPlannerApiWeb.Endpoint
     ]
 
-    children =
-      if Application.get_env(:meal_planner_api, :start_optimizer_server, true) do
-        children ++ [{MealPlannerApi.Optimization.OptimizerServer, []}]
-      else
-        children
-      end
-
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: MealPlannerApi.Supervisor]

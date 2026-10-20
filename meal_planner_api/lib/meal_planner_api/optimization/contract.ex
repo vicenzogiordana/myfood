@@ -83,7 +83,7 @@ defmodule MealPlannerApi.Optimization.Contract do
 
   def interpret({:error, reason, details}), do: failure(reason, details)
 
-  # `OptimizerServer` tags solver verdicts as `{reason, details}`.
+  # Solver verdicts may arrive tagged as `{reason, details}`.
   def interpret({:error, {reason, %{} = details}}) when is_atom(reason),
     do: failure(reason, details)
 
