@@ -34,8 +34,9 @@ defmodule MealPlannerApi.PlanningAgent.Battery do
   to what is left of the ceiling, so no run can spend past it.
 
   When a run's cap is the remaining ceiling (lower than the adapter's own)
-  and a model call of the run is refused for it (`spend_cap_reached`: what
-  is left is zero or below one call's reservation), the run is recorded as
+  and a model call of the run is refused for it (the session reports
+  `session_budget_exhausted` with limit `spend_cap`: what is left is zero
+  or below one call's reservation), the run is recorded as
   not run, never graded, and the battery stops: what is left cannot pay for
   any later run either. Every planned run after it is not run too, and the
   report is `incomplete`. A run that reaches the adapter's own per-session

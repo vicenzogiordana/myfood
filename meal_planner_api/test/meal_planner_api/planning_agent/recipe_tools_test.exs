@@ -14,6 +14,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
   alias MealPlannerApi.Persistence.Catalog.Recipe
   alias MealPlannerApi.PlanningAgent.FakeOptimizer
   alias MealPlannerApi.PlanningAgent.Model.Scripted
+  alias MealPlannerApi.PlanningAgent.RecipeDraft
   alias MealPlannerApi.PlanningAgent.Session
   alias MealPlannerApi.Repo
 
@@ -174,6 +175,32 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       refute Map.has_key?(result, "recipe_id")
     end
 
+    test "lists close catalog matches for unknown Ingredients (issue #154)",
+         %{household: h} = ctx do
+      bun = ingredient!("Fictitious pan para hamburguesas")
+      _unrelated = ingredient!("Fictitious lemon")
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [
+            %{"ingredient" => "Fictitious tomatoes", "quantity" => 200, "unit" => "g"},
+            %{"ingredient" => "Pan de hamburguesa", "quantity" => 2, "unit" => "unit"},
+            %{"ingredient" => "Imaginary truffle", "quantity" => 10, "unit" => "g"}
+          ]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["error"] == "unknown_ingredients"
+      matches = Map.new(result["close_matches"], &{&1["ingredient"], &1["matches"]})
+
+      assert hd(matches["Fictitious tomatoes"]) == ctx.tomato.name
+      assert hd(matches["Pan de hamburguesa"]) == bun.name
+      refute "Fictitious lemon" in matches["Pan de hamburguesa"]
+      assert matches["Imaginary truffle"] == []
+      assert result["hint"] =~ "close_matches"
+    end
+
     test "labels nutrition and cost partial when data is missing, never zero",
          %{household: h} = ctx do
       product!(ctx.pasta, package: {500_000, :g}, price_cents: 1_000)
@@ -264,6 +291,85 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       assert event["name"] == "Fictitious tomato pasta"
       assert is_binary(event["recipe_id"])
       assert %{"complete" => true} = event["nutrition"]
+    end
+  end
+
+  describe "revising a Draft (issue #154)" do
+    # A step re-creating the Draft the previous tool result returned.
+    defp revise_created(args) do
+      fn %{messages: messages} ->
+        %{role: :tool_result, content: %{"recipe_id" => id}} = List.last(messages)
+        {:tool_calls, [{"create_recipe", Map.put(args, "replaces_recipe_id", id)}]}
+      end
+    end
+
+    test "re-creating a Draft with the same name and origin revises it", %{household: h} = ctx do
+      first = draft_args(ctx)
+      again = draft_args(ctx, %{"name" => "  fictitious TOMATO pasta ", "servings" => 4})
+
+      [drafted, revised] =
+        run_tools(h, [
+          {:tool_calls, [{"create_recipe", first}]},
+          {:tool_calls, [{"create_recipe", again}]}
+        ])
+
+      assert drafted["status"] == "drafted"
+      assert revised["status"] == "revised"
+      assert revised["recipe_id"] == drafted["recipe_id"]
+      assert revised["servings"] == 4
+    end
+
+    test "replaces_recipe_id revises the named Draft, whatever its new name",
+         %{household: h} = ctx do
+      [drafted, revised, read] =
+        run_tools(h, [
+          {:tool_calls, [{"create_recipe", draft_args(ctx)}]},
+          revise_created(draft_args(ctx, %{"name" => "Fictitious pasta al pomodoro"})),
+          get_created_recipe()
+        ])
+
+      assert revised["status"] == "revised"
+      assert revised["recipe_id"] == drafted["recipe_id"]
+      assert read["recipe_id"] == drafted["recipe_id"]
+      assert read["name"] == "Fictitious pasta al pomodoro"
+    end
+
+    test "revisions leave one Draft: they never count toward the Draft limit",
+         %{household: h} = ctx do
+      calls = List.duplicate({"create_recipe", draft_args(ctx)}, RecipeDraft.max_drafts() + 1)
+      results = run_tools(h, [{:tool_calls, calls}])
+
+      assert length(results) == RecipeDraft.max_drafts() + 1
+      assert results |> Enum.map(& &1["recipe_id"]) |> Enum.uniq() |> length() == 1
+      refute Enum.any?(results, &(&1["error"] == "draft_limit_reached"))
+    end
+
+    test "a Draft of the other origin with the same name is a different Draft",
+         %{household: h} = ctx do
+      [ai, dictated] =
+        run_tools(h, [
+          {:tool_calls, [{"create_recipe", draft_args(ctx)}]},
+          {:tool_calls, [{"create_recipe", draft_args(ctx, %{"origin" => "user_created"})}]}
+        ])
+
+      assert dictated["status"] == "drafted"
+      assert dictated["recipe_id"] != ai["recipe_id"]
+    end
+
+    test "an unknown replaces_recipe_id is refused", %{household: h} = ctx do
+      args = Map.put(draft_args(ctx), "replaces_recipe_id", Ecto.UUID.generate())
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["error"] == "draft_not_found"
+    end
+
+    test "a partial Draft tells the agent it is usable as is", %{household: h} = ctx do
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", draft_args(ctx)}]}])
+
+      assert result["outcome"] == "partial"
+      assert result["missing"] == ["prices"]
+      assert result["usable"] == true
+      assert result["note"] =~ "do not re-create"
     end
   end
 

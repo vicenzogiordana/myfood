@@ -41,7 +41,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   Subscribers receive `{:planning_agent_event, session_id, event}` where
   `event["type"]` is one of `progress`, `assistant_message`, `question`,
   `proposal`, `recipe_draft`, `recipe_saved`, `optimizer_failed`, `session_brand_changed`,
-  `consent_required`, `limit_reached`,
+  `consent_required`, `limit_reached`, `session_budget_exhausted`,
   `agent_unavailable`, `turn_completed`, `run_finished`, `stopped`, `session_cancelled`,
   `session_ended`, `proposal_confirmed`, `proposal_invalidated`,
   `confirmation_unresolved`, `deviations_approved`, `absence_exception_approved`,
@@ -59,24 +59,35 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   ## Limits
 
-    * `max_iterations` agent iterations (model calls, default 10) per
-      Planning Session; a new Member message does not reset them
+    * `max_iterations` agent iterations (model calls, default 15) per Member
+      message; every message starts its own
+    * `max_session_iterations` model calls (default 60) per Planning
+      Session, never extended (see `MealPlannerApi.PlanningAgent.Allowance`);
+      a call refused before it reached the provider never counts
     * 3 consecutive attempts without verifiable progress
-      (see `MealPlannerApi.PlanningAgent.Allowance`)
     * a global deadline per request (default 5 minutes) after which the
       running turn is killed and its late results are discarded
     * per-call deadlines and retry budgets
       (see `MealPlannerApi.PlanningAgent.CallBounds`)
 
-  Reaching any of the first three stops the run and emits `limit_reached`
-  with `"requires_authorization" => true`. From then on `send_message/2`
-  refuses with `:authorization_required` until the session's Member calls
+  Reaching the message's iterations, the no-progress streak or the deadline
+  stops the run and emits `limit_reached` with
+  `"requires_authorization" => true`. From then on `send_message/2` refuses
+  with `:authorization_required` until the session's Member calls
   `authorize_continuation/2`, which extends only the reached limit and
-  resumes the request. Counters never reset on their own. The spend and
-  token caps of the model adapter are per Planning Session as well and are
-  never extended by an authorization: the adapter's ledger is initialised
-  once at start and carried across turns, so neither Stop nor a new message
-  resets it.
+  resumes the request.
+
+  The spend and token caps of the model adapter and the session's iteration
+  ceiling are per Planning Session and never extended: the adapter's ledger
+  is initialised once at start and carried across turns, so neither Stop
+  nor a new message resets it. Exhausting any of them ends the agent's part
+  of the session gracefully (issue #154): it emits `session_budget_exhausted`
+  with `limit` (`spend_cap`, `token_cap` or `session_iterations`), a
+  code-rendered `message` and the latest Proposal (or `nil`), and
+  `send_message/2` refuses with `:session_budget_exhausted` without a turn.
+  Without a Proposal the session then ends (`session_ended`) and releases the
+  Household's slot; with one it stays open for the Member to confirm,
+  approve or cancel it.
 
   ## Start rate limit
 
@@ -211,7 +222,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   @supervisor MealPlannerApi.PlanningAgent.SessionSupervisor
   @task_supervisor MealPlannerApi.PlanningAgent.TaskSupervisor
 
-  @default_max_iterations 10
+  @default_max_iterations 15
+  @default_max_session_iterations 60
   @default_deadline_ms 5 * 60 * 1000
   @default_grace_ms 15 * 60 * 1000
   @default_idle_ms 30 * 60 * 1000
@@ -249,7 +261,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       (default from `config :meal_planner_api, :planning_agent`)
     * `:optimizer` — `{module, opts}` implementing `MealPlannerApi.PlanningAgent.Optimizer`
     * `:subscriber` — pid receiving events (more can join with `subscribe/2`)
-    * `:max_iterations`, `:deadline_ms` — execution limits
+    * `:max_iterations`, `:max_session_iterations`, `:deadline_ms` —
+      execution limits (see "Limits")
     * `:call_policies` — per-kind overrides of the per-call deadlines and
       retry budgets (see `MealPlannerApi.PlanningAgent.CallBounds`)
     * `:recipe_search` — `{module, opts}` replacing the recipe search read
@@ -314,6 +327,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       optimizer: Keyword.get_lazy(opts, :optimizer, fn -> config(:optimizer) end),
       subscriber: Keyword.get(opts, :subscriber),
       max_iterations: Keyword.get(opts, :max_iterations, @default_max_iterations),
+      max_session_iterations:
+        Keyword.get(opts, :max_session_iterations, @default_max_session_iterations),
       deadline_ms: Keyword.get(opts, :deadline_ms, @default_deadline_ms),
       call_policies: Keyword.get(opts, :call_policies, %{}),
       recipe_search: Keyword.get(opts, :recipe_search),
@@ -346,7 +361,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
              | :busy
              | :invalid_message
              | :message_too_long
-             | :authorization_required}
+             | :authorization_required
+             | :session_budget_exhausted}
   def send_message(session, text), do: GenServer.call(session, {:send_message, text})
 
   @doc """
@@ -727,8 +743,9 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       task: nil,
       deadline_ref: nil,
       os_pids: MapSet.new(),
-      allowance: if(saved, do: saved.allowance, else: Allowance.new(args.max_iterations)),
+      allowance: allowance(args, saved),
       pending_limit: saved && saved.pending_limit,
+      exhausted: saved && Map.get(saved, :exhausted),
       deadline_ms: args.deadline_ms,
       call_policies: CallBounds.policies(args.call_policies),
       recipe_search: args.recipe_search,
@@ -793,6 +810,12 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         emit(state, %{"type" => "consent_required"})
         {:reply, {:error, :consent_required}, state}
 
+      # Nothing the agent could do any more: the Member is shown why again,
+      # never a turn that can only be refused (issue #154).
+      state.exhausted != nil ->
+        emit(state, budget_exhausted_event(state))
+        {:reply, {:error, :session_budget_exhausted}, state}
+
       state.task != nil ->
         {:reply, {:error, :busy}, state}
 
@@ -801,11 +824,13 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
       true ->
         # The Member's message answers any budget Deviation: from now on the
-        # agent may draft recipes if they asked for them (issue #148).
+        # agent may draft recipes if they asked for them (issue #148). It
+        # also starts its own iterations.
         state = %{
           state
           | messages: state.messages ++ [%{role: :user, content: text}],
-            workspace: Map.put(state.workspace, :budget_conflict, nil)
+            workspace: Map.put(state.workspace, :budget_conflict, nil),
+            allowance: Allowance.start_message(state.allowance)
         }
 
         {:reply, :ok, start_turn(state)}
@@ -1039,14 +1064,14 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         allowance: result.allowance
     }
 
-    {:noreply, finish_run(state, result.outcome)}
+    state |> finish_run(result.outcome) |> after_run()
   end
 
   # A turn that replied just before the deadline finished on its own, so its
   # outcome stands; otherwise the run reached its time limit.
   defp do_info({:deadline, ref}, %{task: %Task{ref: ref}} = state) do
     case halt_turn(state) do
-      {state, {:ok, result}} -> {:noreply, finish_run(state, result.outcome)}
+      {state, {:ok, result}} -> state |> finish_run(result.outcome) |> after_run()
       {state, _shutdown} -> {:noreply, finish_run(state, {:limit_reached, "time"})}
     end
   end
@@ -1617,6 +1642,16 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     %{state | pending_limit: limit}
   end
 
+  # A cap or ceiling that is never extended is exhausted (issue #154): the
+  # agent's part of the session ends gracefully. The Member gets a message
+  # and the latest Proposal, both rendered by code, and no more turns start.
+  defp finish_run(state, {:exhausted, limit}) do
+    state = %{state | exhausted: limit}
+    emit(state, budget_exhausted_event(state))
+    emit(state, %{"type" => "run_finished", "outcome" => "partial"})
+    state
+  end
+
   # The Member left while the run was working: no new model call started.
   defp finish_run(state, {:interrupted, _reason}) do
     emit(state, %{"type" => "run_finished", "outcome" => "interrupted"})
@@ -1631,6 +1666,49 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   defp reason_string(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp reason_string(_reason), do: "provider_error"
+
+  defp budget_exhausted_event(state) do
+    proposal = state.workspace.proposal
+
+    message =
+      if proposal,
+        do:
+          "This planning session has used up what the assistant can spend on it. " <>
+            "Your latest proposal is below: you can still confirm it. To keep planning, " <>
+            "start a new planning session.",
+        else:
+          "This planning session has used up what the assistant can spend on it. " <>
+            "Start a new planning session to keep planning."
+
+    %{
+      "type" => "session_budget_exhausted",
+      "limit" => state.exhausted,
+      "message" => message,
+      "proposal" => proposal
+    }
+  end
+
+  # An exhausted session without a Proposal holds nothing the Member could
+  # still act on: it ends at once and releases the Household's slot, so a
+  # new Planning Session can start. With a Proposal it stays open for the
+  # human actions on it (confirm, approve, cancel) until its idle expiry.
+  defp after_run(%{exhausted: nil} = state), do: {:noreply, state}
+
+  defp after_run(%{workspace: %{proposal: proposal}} = state) when proposal != nil,
+    do: {:noreply, state}
+
+  defp after_run(state) do
+    _ = PlanningRepo.expire_session(state.account_id, state.session_id)
+    emit(state, %{"type" => "session_ended"})
+    {:stop, :normal, %{state | session_id: nil}}
+  end
+
+  defp allowance(args, saved) do
+    fresh =
+      Allowance.new(args.max_iterations, max_session_iterations: args.max_session_iterations)
+
+    if saved, do: Allowance.restore(saved.allowance, fresh), else: fresh
+  end
 
   # A turn that ends restarts the idle time: the Member reads its result.
   defp clear_turn(state) do
@@ -1676,6 +1754,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       workspace: state.workspace,
       allowance: state.allowance,
       pending_limit: state.pending_limit,
+      exhausted: state.exhausted,
       model: Model.recoverable(state.model, unseal(state.model_state)),
       running?: running?
     }
@@ -1806,6 +1885,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     "consent_required" => [],
     "limit_reached" => ~w(limit requires_authorization),
     "agent_unavailable" => ~w(reason),
+    "session_budget_exhausted" => ~w(limit message proposal),
     "turn_completed" => [],
     "run_finished" => ~w(outcome),
     "stopped" => [],
@@ -1829,6 +1909,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     |> Map.replace_lazy("meals", fn meals ->
       Enum.map(List.wrap(meals), &Map.take(&1, @meal_fields))
     end)
+    |> Map.replace_lazy("proposal", fn proposal -> proposal && sanitize(proposal) end)
   end
 
   defp sanitize(_event), do: nil

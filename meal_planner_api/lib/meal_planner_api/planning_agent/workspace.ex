@@ -40,7 +40,7 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
   """
 
   alias MealPlannerApi.Optimization.Variety
-  alias MealPlannerApi.PlanningAgent.{Diners, RecipeSearch}
+  alias MealPlannerApi.PlanningAgent.{Diners, RecipeDraft, RecipeSearch}
 
   # Highest meaningful cap: every meal of a 7-day window with all four slots.
   @max_variety_cap 28
@@ -144,6 +144,9 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
   def reason("recipe_not_found"), do: "No recipe with this id is available to the household."
   def reason("recipe_not_for_slot"), do: "This recipe does not suit that meal slot."
 
+  def reason("recipe_not_plannable"),
+    do: "A dictated Recipe Draft cannot be planned until the Member saves it."
+
   def reason("restriction_conflict"),
     do:
       "This recipe conflicts with a household Restriction and cannot be pinned. " <>
@@ -237,6 +240,18 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
     # Snapshots stored before #148 lack `must_change`, hence `Map.put`.
     ws = %{ws | proposal: proposal, proposed: proposed, released: MapSet.new()}
     Map.put(ws, :must_change, MapSet.new())
+  end
+
+  @doc "Renames the Pins of `recipe_id`, after its Recipe Draft was revised."
+  @spec rename_pins(t(), Ecto.UUID.t(), String.t()) :: t()
+  def rename_pins(%__MODULE__{} = ws, recipe_id, name) do
+    pins =
+      Map.new(ws.pins, fn
+        {key, %{recipe_id: ^recipe_id} = pin} -> {key, %{pin | name: name}}
+        other -> other
+      end)
+
+    %{ws | pins: pins}
   end
 
   @doc "The Workspace as `get_workspace` returns it to the agent."
@@ -478,7 +493,35 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
       else: :ok
   end
 
+  # A Recipe Draft of this Workspace is pinned like a stored recipe (issue
+  # #154): only an AI-created Draft is plannable, it must suit the slot, and
+  # it is checked again against the household's and the meal's guests'
+  # Restrictions.
   defp pinnable_recipe(ctx, ws, recipe_id, {date, slot}) do
+    case Map.fetch(Map.get(ws, :recipe_drafts, %{}), recipe_id) do
+      {:ok, draft} -> pinnable_draft(ctx, ws, draft, {date, slot})
+      :error -> pinnable_stored(ctx, ws, recipe_id, {date, slot})
+    end
+  end
+
+  defp pinnable_draft(ctx, ws, draft, {date, slot}) do
+    cond do
+      not RecipeDraft.plannable?(draft) ->
+        {:error, "recipe_not_plannable", %{}}
+
+      slot not in draft.slots ->
+        {:error, "recipe_not_for_slot", %{}}
+
+      RecipeDraft.restricted?(draft, ctx.household) or
+          guest_conflict?(ctx, ws, %{date: date, slot: slot, recipe_id: draft.id}) ->
+        {:error, "restriction_conflict", %{"replacements" => replacements(ctx, ws, date, slot)}}
+
+      true ->
+        {:ok, draft}
+    end
+  end
+
+  defp pinnable_stored(ctx, ws, recipe_id, {date, slot}) do
     case RecipeSearch.lookup(ctx.household, [recipe_id]) do
       {:ok, %{^recipe_id => {:safe, recipe}}} ->
         cond do

@@ -172,7 +172,7 @@ grace expires the work is cancelled, the Workspace discarded and the slot releas
 | `start_session` | `{range_from, range_to, slots?}` — ISO dates, at most 31 days of unplanned days; `slots` from `breakfast`, `lunch`, `snack`, `dinner` (default `lunch`, `dinner`) | `{session_id}` or `{reason}`: `session_already_active`, `session_start_rate_limited`, `range_already_planned`, `overlapping_range`, `invalid_range`, `invalid_slots`, `subscription_required`, `spend_caps_unconfigured`, `pricing_unconfigured`, `provider_unconfigured`, `internal_error` |
 | `resume_session` | `{}` — only the session's Member, within the absence grace (also after a server restart) | `{session_id, proposal}` (the last valid Proposal or `null`) or `{reason}`: `forbidden` (another Member, or no longer an active Member), `no_session` (none, or its grace expired) |
 | `give_consent` | `{}` — explicit consent before the first external AI use | `ok` |
-| `send_message` | `{text}` — a non-blank string of at most 4,000 bytes | `ok`, or `{reason}`: `invalid_message` (missing, non-string or blank `text`), `message_too_long`, `consent_required`, `busy`, `authorization_required` (a limit was reached), `no_active_session`, `internal_error` |
+| `send_message` | `{text}` — a non-blank string of at most 4,000 bytes | `ok`, or `{reason}`: `invalid_message` (missing, non-string or blank `text`), `message_too_long`, `consent_required`, `busy`, `authorization_required` (a limit was reached), `session_budget_exhausted` (the session's budget is used up: the `session_budget_exhausted` event is pushed again, no turn starts), `no_active_session`, `internal_error` |
 | `authorize_continuation` | `{}` — only the session's Member, after `limit_reached` | `ok` (the request resumes with that limit extended) or `{reason}`: `forbidden`, `no_limit_reached`, `no_active_session` |
 | `save_recipe` | `{recipe_id}` — only the session's Member, for a `recipe_draft` with `origin: "user_created"` (a dictated recipe) | `{recipe_id, name, origin: "user_created"}` — saved as a user-created Household Recipe — or `{reason}`: `forbidden`, `busy`, `not_found`, `not_dictated` (AI-created Drafts are saved only by confirming a Proposal that uses them), `no_active_session` |
 | `cancel_session` | `{}` — the session's Member or the Household Owner; also cancels a session waiting for recovery after a restart | `{status: "cancelled"}` or `{reason}`: `forbidden`, `no_active_session` |
@@ -193,8 +193,9 @@ Every event is pushed as `agent_event` with `type` and `session_id`:
 | `optimizer_failed` | `{reason}` | The optimizer failed (including `optimizer_busy` / `optimizer_unconfigured` from the global subprocess cap); no fallback plan is produced |
 | `session_brand_changed` | `{ingredient, brand, source, previous_brand, previous_source}` — `source` is `session`, `household` or `null` | The agent set or cleared a Session Brand (this Planning Session only; household settings are unchanged). `brand` is the brand now bought for the ingredient |
 | `consent_required` | `{}` | Consent must be given before the agent can call the AI provider |
-| `limit_reached` | `{limit, requires_authorization: true}` — `iterations`, `no_progress` or `time` | Execution stopped: 10 iterations per Planning Session (new messages do not reset them), 3 consecutive attempts without new evidence, or 5 minutes per request. Nothing runs until the Member sends `authorize_continuation` |
-| `agent_unavailable` | `{reason}` | The AI provider cannot be used now: `provider_unavailable` / `provider_timeout` after up to 5 retries, `provider_busy` (global provider concurrency cap) after up to 5 retries, or at once for `provider_unauthorized`, `provider_rejected_request`, `provider_conflict`, `spend_cap_reached`, `token_cap_reached` |
+| `limit_reached` | `{limit, requires_authorization: true}` — `iterations`, `no_progress` or `time` | Execution stopped: 15 model calls for this Member message (every message gets its own), 3 consecutive attempts without new evidence, or 5 minutes per request. Nothing runs until the Member sends `authorize_continuation` |
+| `session_budget_exhausted` | `{limit, message, proposal}` — `limit` is `spend_cap`, `token_cap` or `session_iterations` (60 model calls per Planning Session); `proposal` is the latest Proposal (same shape as the `proposal` event) or `null` | The session's budget is used up and is never extended. Show `message` (rendered by code) and the Proposal: it can still be confirmed, approved or cancelled; the agent takes no more messages (`send_message` replies `session_budget_exhausted`). Without a Proposal the session ends at once (`session_ended`) and a new one can start |
+| `agent_unavailable` | `{reason}` | The AI provider cannot be used now: `provider_unavailable` / `provider_timeout` after up to 5 retries, `provider_busy` (global provider concurrency cap) after up to 5 retries, or at once for `provider_unauthorized`, `provider_rejected_request`, `provider_conflict` |
 | `turn_completed` | `{}` | The agent finished answering |
 | `run_finished` | `{outcome}` — `complete`, `partial`, `failure`, `cancelled`, `interrupted`, `unknown` | Exactly one per request or authorized continuation; `partial` means stopped by a limit, `interrupted` that the Member left and no new model call started, `unknown` that the run crashed |
 | `session_recovered` | `{interrupted}` | The session was restored after a server restart; `interrupted: true` means a request was running and was not resumed — the Member asks again |
@@ -269,8 +270,13 @@ brand the cheapest Product is bought.
 
 A Recipe Draft exists only in the Planning Session's Workspace: it is never
 saved by the agent and disappears when the session ends unconfirmed. Its
-Ingredients are catalog Ingredients only (an unknown one rejects the Draft),
-and its nutrition and cost are computed by code:
+Ingredients are catalog Ingredients only (an unknown one rejects the Draft and
+the agent gets close catalog matches to retry with), and its nutrition and cost
+are computed by code. Re-creating a Draft (by `replaces_recipe_id`, or with the
+same name and origin) revises it in place, keeping its `recipe_id`, so the client
+receives a new `recipe_draft` event for the same id instead of a duplicate. An
+AI-created Draft can be pinned to a meal like any recipe. Its computed
+nutrition and cost look like:
 
 ```json
 {
@@ -312,8 +318,15 @@ over it starts no subprocess and is reported as `optimizer_failed` with
 `optimizer_busy` (`optimizer_unconfigured` when the cap is unset).
 The spend and token caps bound every provider call of one Planning Session; they
 are not reset between messages and never extended by `authorize_continuation`,
-so once they are used up the session replies `agent_unavailable` with
-`spend_cap_reached` or `token_cap_reached` and a new Planning Session is needed.
+so once they are used up the session emits `session_budget_exhausted` (limit
+`spend_cap` or `token_cap`) with the latest Proposal, and a new Planning Session
+is needed to keep planning. The money cap (`PLANNING_AGENT_SPEND_CAP_MICROS`, e.g.
+US$3 per session) is the real limit: its reservation before each call is the
+conservative worst case. `PLANNING_AGENT_TOKEN_CAP` is only a safety net: with
+Claude it reserves the request bytes / 3 plus the output limit once (no fallback
+doubling) and cache reads never count toward it. A call refused by a cap (or by
+the provider concurrency cap) before it reached the provider is not counted as
+one of the session's model calls.
 With Claude, a declined request (after the server-side refusal fallback) is
 reported as `agent_unavailable` with `provider_refused`, a reply cut off at the
 output limit with `provider_output_truncated`, and a full context window with
