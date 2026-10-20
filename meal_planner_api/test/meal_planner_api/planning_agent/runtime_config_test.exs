@@ -25,7 +25,8 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
                 ANTHROPIC_CACHE_READ_PRICE_MICROS_PER_MTOK
                 ANTHROPIC_FALLBACK_INPUT_PRICE_MICROS_PER_MTOK
                 ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK
-                PLANNING_AGENT_CLAUDE_MODEL PLANNING_AGENT_CLAUDE_EFFORT)
+                PLANNING_AGENT_CLAUDE_MODEL PLANNING_AGENT_CLAUDE_EFFORT
+                PLANNING_AGENT_CLAUDE_FALLBACKS)
 
   @valid %{
     "OPENAI_API_KEY" => "fictitious-key",
@@ -167,6 +168,25 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
     assert adapter[:effort] == "low"
     assert adapter[:cache_write_price_micros_per_mtok] == 5_000_000
     assert adapter[:cache_read_price_micros_per_mtok] == 200_000
+  end
+
+  test "refusal fallbacks can be turned off for models that reject them" do
+    off =
+      read_runtime(
+        Map.merge(@valid, @claude)
+        |> Map.put("PLANNING_AGENT_CLAUDE_FALLBACKS", "false")
+      )
+
+    assert Keyword.fetch!(off, ClaudeMessages)[:fallbacks] == false
+
+    for unset <- [nil, "maybe"] do
+      env = Map.merge(@valid, @claude)
+      env = if unset, do: Map.put(env, "PLANNING_AGENT_CLAUDE_FALLBACKS", unset), else: env
+      adapter = Keyword.fetch!(read_runtime(env), ClaudeMessages)
+      refute Keyword.has_key?(adapter, :fallbacks)
+      assert {:ok, state} = ClaudeMessages.init(adapter)
+      assert state.config.fallbacks == true
+    end
   end
 
   test "a malformed Claude price leaves paid execution refused" do

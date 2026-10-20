@@ -86,7 +86,8 @@ defmodule Mix.Tasks.PlanningAgent.Battery do
                   {:fallback_output_price_micros_per_mtok,
                    "ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK", :integer},
                   {:model, "PLANNING_AGENT_CLAUDE_MODEL", :string},
-                  {:effort, "PLANNING_AGENT_CLAUDE_EFFORT", :string}
+                  {:effort, "PLANNING_AGENT_CLAUDE_EFFORT", :string},
+                  {:fallbacks, "PLANNING_AGENT_CLAUDE_FALLBACKS", :boolean}
                 ]
 
   @optimizer_env [
@@ -183,6 +184,14 @@ defmodule Mix.Tasks.PlanningAgent.Battery do
   defp parse(:integer, value) do
     case Integer.parse(String.trim(value)) do
       {integer, ""} -> integer
+      _ -> nil
+    end
+  end
+
+  defp parse(:boolean, value) do
+    case String.trim(value) do
+      "true" -> true
+      "false" -> false
       _ -> nil
     end
   end
