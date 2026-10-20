@@ -271,8 +271,14 @@ brand the cheapest Product is bought.
 A Recipe Draft exists only in the Planning Session's Workspace: it is never
 saved by the agent and disappears when the session ends unconfirmed. Its
 Ingredients are catalog Ingredients only (an unknown one rejects the Draft and
-the agent gets close catalog matches to retry with), and its nutrition and cost
-are computed by code. Re-creating a Draft (by `replaces_recipe_id`, or with the
+the agent gets close catalog matches to retry with; one with no close match is
+listed as missing from the catalog, and the agent tells the Member that dish
+cannot be made instead of guessing other names), and its nutrition and cost
+are computed by code. When the Member asks for a dish no recipe provides, the
+agent creates it directly as an AI-created Draft, without asking first, and says
+it was created with AI and may contain errors; it still asks first before
+creating recipes to fit an infeasible budget or a plan limited to "only recipes
+with X". Re-creating a Draft (by `replaces_recipe_id`, or with the
 same name and origin) revises it in place, keeping its `recipe_id`, so the client
 receives a new `recipe_draft` event for the same id instead of a duplicate. An
 AI-created Draft can be pinned to a meal like any recipe. Its computed

@@ -177,7 +177,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
         description:
           "Draft a new recipe when existing recipes do not fit, or build the recipe a Member " <>
             "dictates (origin user_created). Use catalog Ingredient names only: unknown " <>
-            "Ingredients reject the Draft and list close catalog matches to use instead. " <>
+            "Ingredients reject the Draft and list close catalog matches to use instead; one " <>
+            "under missing_from_catalog has none, so never retry it under another name. " <>
             "Nutrition and cost are computed by code and reported partial when data is " <>
             "missing; a partial Draft is usable, never re-create it only for that. To fix a " <>
             "Draft, call again with replaces_recipe_id (the same name and origin also " <>
