@@ -220,10 +220,6 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Run do
             notes: ["message not sent: session budget exhausted" | state.notes]
         }
 
-      {:error, :authorization_required} ->
-        # A limit stopped the run and the Member never authorizes more.
-        %{state | halted: true, notes: ["message not sent: authorization required" | state.notes]}
-
       {:error, reason} ->
         %{state | errors: ["message refused: #{inspect(reason)}" | state.errors]}
     end

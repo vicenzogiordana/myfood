@@ -201,6 +201,43 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       assert result["hint"] =~ "close_matches"
     end
 
+    # Issue #158: guessing other names for an Ingredient the catalog does not
+    # have only burns attempts until the no-progress limit cuts the run.
+    test "an Ingredient without close matches is named as missing and not to be guessed",
+         %{household: h} = ctx do
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [
+            %{"ingredient" => "Fictitious tomatoes", "quantity" => 200, "unit" => "g"},
+            %{"ingredient" => "Imaginary truffle", "quantity" => 10, "unit" => "g"}
+          ]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["error"] == "unknown_ingredients"
+      assert result["missing_from_catalog"] == ["Imaginary truffle"]
+      assert result["hint"] =~ "Imaginary truffle is not in the catalog"
+      assert result["hint"] =~ "Do not retry it with other names"
+      assert result["hint"] =~ "tell the household"
+      assert result["hint"] =~ "plan the rest"
+    end
+
+    test "every unknown Ingredient with a close match is retryable, none is missing",
+         %{household: h} = ctx do
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [
+            %{"ingredient" => "Fictitious tomatoes", "quantity" => 200, "unit" => "g"}
+          ]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["missing_from_catalog"] == []
+      refute result["hint"] =~ "not in the catalog"
+    end
+
     test "labels nutrition and cost partial when data is missing, never zero",
          %{household: h} = ctx do
       product!(ctx.pasta, package: {500_000, :g}, price_cents: 1_000)

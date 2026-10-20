@@ -74,10 +74,14 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   stops the run and emits `limit_reached` with
   `"requires_authorization" => true`. When the latest tool result of the
   turn was a service failure, an `assistant_message` rendered by code
-  precedes it, naming the failing tools and their failure kinds. From then on `send_message/2` refuses
-  with `:authorization_required` until the session's Member calls
-  `authorize_continuation/2`, which extends only the reached limit and
-  resumes the request.
+  precedes it, naming the failing tools and their failure kinds; when the
+  turn's latest tool results were repeated validation failures of one tool
+  (e.g. a Recipe Draft needing Ingredients the catalog lacks), it names that
+  cause instead. Nothing runs until the Member continues, in either of two
+  ways: `authorize_continuation/2` extends only the reached limit and
+  resumes the request, and a new `send_message/2` is a new request that
+  authorizes continuing by itself (issue #158). Neither passes the session's
+  ceilings and caps.
 
   The spend and token caps of the model adapter and the session's iteration
   ceiling are per Planning Session and never extended: the adapter's ledger
@@ -363,7 +367,6 @@ defmodule MealPlannerApi.PlanningAgent.Session do
              | :busy
              | :invalid_message
              | :message_too_long
-             | :authorization_required
              | :session_budget_exhausted}
   def send_message(session, text), do: GenServer.call(session, {:send_message, text})
 
@@ -793,6 +796,12 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   defp persisted({:noreply, state}), do: {:noreply, persist(state)}
   defp persisted(stop), do: stop
 
+  # A Member message after a reached limit authorizes continuing past it.
+  defp authorize_pending(allowance, %{pending_limit: nil}), do: allowance
+
+  defp authorize_pending(allowance, %{pending_limit: limit}),
+    do: Allowance.authorize(allowance, limit)
+
   defp do_call(:record_consent, _from, state) do
     case MealPlannerApi.PlanningAgent.Consent.record(state.account_id, state.user_id) do
       :ok -> {:reply, :ok, %{state | consent?: true}}
@@ -821,18 +830,18 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       state.task != nil ->
         {:reply, {:error, :busy}, state}
 
-      state.pending_limit != nil ->
-        {:reply, {:error, :authorization_required}, state}
-
       true ->
         # The Member's message answers any budget Deviation: from now on the
         # agent may draft recipes if they asked for them (issue #148). It
-        # also starts its own iterations.
+        # also starts its own iterations, and after a reached limit it is the
+        # Member's authorization to continue (issue #158); the session's
+        # ceilings and caps still apply.
         state = %{
           state
           | messages: state.messages ++ [%{role: :user, content: text}],
             workspace: Map.put(state.workspace, :budget_conflict, nil),
-            allowance: Allowance.start_message(state.allowance)
+            allowance: state.allowance |> authorize_pending(state) |> Allowance.start_message(),
+            pending_limit: nil
         }
 
         {:reply, :ok, start_turn(state)}
