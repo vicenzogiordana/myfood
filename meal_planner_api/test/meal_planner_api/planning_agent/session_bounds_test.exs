@@ -322,6 +322,17 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
     defp search_forever(query),
       do: fn _request -> {:tool_calls, [{"search_recipes", %{"query" => query}}]} end
 
+    # A Recipe Draft whose only Ingredient is `ingredient`.
+    defp pizza_args(ingredient),
+      do: %{
+        "name" => "Imaginary pizza",
+        "servings" => 2,
+        "slots" => ["lunch"],
+        "origin" => "ai_created",
+        "ingredients" => [%{"ingredient" => ingredient, "quantity" => 300, "unit" => "g"}],
+        "steps" => ["Bake it."]
+      }
+
     test "every Member message gets its own iterations (issue #154)", %{household: h} do
       script = [
         {:tool_calls, [{"search_recipes", %{"query" => "rice"}}]},
@@ -557,9 +568,60 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
                       %{"type" => "limit_reached", "limit" => "no_progress"}}
     end
 
+    # Issue #158: the model guessed ingredient names the catalog does not
+    # have until the no-progress limit cut the run, without a word to the
+    # Member. The code then names the recipe and the missing ingredients.
+    test "a run cut by repeated unknown ingredients names the recipe and the ingredients",
+         %{household: h} do
+      script =
+        Enum.map(
+          ["Imaginary flour", "Imaginary wheat flour", "Imaginary flour", "Imaginary dough"],
+          &{:tool_calls, [{"create_recipe", pizza_args(&1)}]}
+        )
+
+      {session_id, pid} = start!(h, script)
+
+      :ok = Session.send_message(pid, "Pizzas on Monday lunch")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "assistant_message", "text" => text}},
+                     2_000
+
+      assert text =~
+               "the recipe for Imaginary pizza needs ingredients that are not in the catalog: " <>
+                 "Imaginary flour, Imaginary wheat flour"
+
+      refute text =~ "our side"
+      refute text =~ "?"
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "no_progress"}}
+    end
+
+    test "a single rejected recipe before progress adds no notice", %{household: h} do
+      script = [
+        {:tool_calls, [{"create_recipe", pizza_args("Imaginary flour")}]},
+        search_forever("rice"),
+        search_forever("rice"),
+        search_forever("rice"),
+        search_forever("rice")
+      ]
+
+      {session_id, pid} = start!(h, script)
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "no_progress"}},
+                     2_000
+
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "assistant_message"}}
+    end
+
     # A fixed meal whose Recipe is gone is the Member's own choice, not a
     # service outage, so the notice must not blame the service for it.
-    test "a run cut by an unavailable fixed meal adds no failure notice", %{household: h} do
+    test "a run cut by an unavailable fixed meal names it without blaming the service",
+         %{household: h} do
       pinned = recipe!("Fictitious pinned stew", [ingredient!("Fictitious stew beans")])
       successor = recipe!("Fictitious successor stew", [ingredient!("Fictitious stew lentils")])
 
@@ -605,7 +667,13 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
         end)
 
       assert %{"error" => "fixed_meal_unavailable"} = tool_result(last_request, "run_optimizer")
-      refute_received {:planning_agent_event, ^session_id, %{"type" => "assistant_message"}}
+
+      assert_received {:planning_agent_event, ^session_id,
+                       %{"type" => "assistant_message", "text" => text}}
+
+      assert text =~ "meal plan optimizer kept rejecting the request (fixed meal unavailable)"
+      refute text =~ "our side"
+      refute text =~ "try again later"
     end
 
     test "a limit reached without failing tools adds no notice", %{household: h} do

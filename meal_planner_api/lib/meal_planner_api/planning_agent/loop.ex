@@ -225,27 +225,40 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
   # A limit that cuts a turn whose latest tool result is a service failure
   # (a backend that is down, not a misused tool) is caused by those tools:
   # the code tells the Member which tools failed and why, whatever the model
-  # did before (quality battery task A7). Never a question.
+  # did before (quality battery task A7). A limit that cuts a turn whose
+  # latest tool results are repeated validation failures of one tool is
+  # caused by what that tool keeps rejecting: the code names it (issue
+  # #158). Never a question.
   defp finish(turn, {:limit_reached, _limit} = outcome) do
-    case failing_tools(turn.messages) do
-      [] -> :ok
-      failures -> turn.emit.(%{"type" => "assistant_message", "text" => failure_notice(failures)})
-    end
+    if notice = limit_notice(turn.messages),
+      do: turn.emit.(%{"type" => "assistant_message", "text" => notice})
 
     build_result(turn, outcome)
   end
 
   defp finish(turn, outcome), do: build_result(turn, outcome)
 
+  defp limit_notice(messages) do
+    current = current_turn(messages)
+
+    case failing_tools(current) do
+      [] -> validation_notice(current)
+      failures -> failure_notice(failures)
+    end
+  end
+
+  # The messages since the Member's latest message.
+  defp current_turn(messages) do
+    messages
+    |> Enum.reverse()
+    |> Enum.take_while(&(&1.role != :user))
+    |> Enum.reverse()
+  end
+
   # The tools of this turn whose latest result is a service failure, in the
   # order they were first called, when the turn's latest tool result is one.
-  defp failing_tools(messages) do
-    results =
-      messages
-      |> Enum.reverse()
-      |> Enum.take_while(&(&1.role != :user))
-      |> Enum.reverse()
-      |> Enum.filter(&(&1.role == :tool_result))
+  defp failing_tools(current) do
+    results = Enum.filter(current, &(&1.role == :tool_result))
 
     if results != [] and service_failure?(List.last(results).content) do
       latest = Map.new(results, &{&1.name, &1.content})
@@ -305,6 +318,96 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
     "I had to stop: some of the tools I need kept failing: #{tools}. " <>
       "This is a problem on our side, not with your request. Please try again later."
   end
+
+  @max_named_ingredients 10
+  @max_name_length 80
+
+  # The latest tool results of the turn, when at least two in a row are
+  # validation failures (a tool refused what it was given, not a service
+  # outage) of one and the same tool.
+  defp validation_notice(current) do
+    arguments = for %{role: :tool_call, id: id} = call <- current, into: %{}, do: {id, call}
+
+    repeated =
+      current
+      |> Enum.filter(&(&1.role == :tool_result))
+      |> Enum.reverse()
+      |> then(fn
+        [%{name: name} | _] = latest ->
+          Enum.take_while(latest, &(&1.name == name and validation_failure?(&1.content)))
+
+        [] ->
+          []
+      end)
+      |> Enum.reverse()
+
+    case repeated do
+      [_, _ | _] -> validation_text(repeated, arguments)
+      _too_few -> nil
+    end
+  end
+
+  defp validation_failure?(%{"error" => "skipped_after_question"}), do: false
+
+  defp validation_failure?(%{"error" => error} = content) when is_binary(error),
+    do: not service_failure?(content)
+
+  defp validation_failure?(_content), do: false
+
+  # A rejected Recipe Draft is named by the recipe the model asked for, and
+  # unknown Ingredients by the names it sent; both are bounded and never
+  # tool output.
+  defp validation_text([%{name: "create_recipe"} | _] = failures, arguments) do
+    causes =
+      failures
+      |> Enum.map(&{recipe_name(arguments[&1.id]), &1.content})
+      |> Enum.chunk_by(fn {recipe, content} -> {recipe, content["error"]} end)
+      |> Enum.map(&recipe_cause/1)
+      |> Enum.uniq()
+      |> Enum.join("; ")
+
+    "I had to stop: #{causes}. Send a new message to continue, for example with another dish."
+  end
+
+  defp validation_text([%{name: name} | _] = failures, _arguments) do
+    reasons = failures |> Enum.map(&failure_reason(&1.content)) |> Enum.uniq() |> Enum.join(", ")
+    tool = Map.get(@tool_names, name, tool_label(name))
+
+    "I had to stop: the #{tool} kept rejecting the request (#{reasons}). " <>
+      "Send a new message to continue."
+  end
+
+  defp recipe_cause([{recipe, %{"error" => "unknown_ingredients"}} | _] = failures) do
+    ingredients =
+      failures
+      |> Enum.flat_map(fn {_recipe, content} -> List.wrap(content["ingredients"]) end)
+      |> Enum.map(&bounded_name/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+      |> Enum.take(@max_named_ingredients)
+      |> Enum.join(", ")
+
+    "the recipe for #{recipe} needs ingredients that are not in the catalog: #{ingredients}"
+  end
+
+  defp recipe_cause([{recipe, content} | _]),
+    do: "the recipe for #{recipe} was rejected (#{failure_reason(content)})"
+
+  defp recipe_name(%{arguments: %{"name" => name}}), do: bounded_name(name) || "the dish"
+  defp recipe_name(_call), do: "the dish"
+
+  # Model-sent names only reach the Member as one bounded printable line.
+  defp bounded_name(name) when is_binary(name) do
+    name =
+      name
+      |> String.replace(~r/[[:cntrl:]]+/u, " ")
+      |> String.trim()
+      |> String.slice(0, @max_name_length)
+
+    if name == "", do: nil, else: name
+  end
+
+  defp bounded_name(_name), do: nil
 
   defp build_result(turn, outcome) do
     %{
