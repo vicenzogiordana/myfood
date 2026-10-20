@@ -140,7 +140,8 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
   def reason("restriction_conflict"),
     do:
       "This recipe conflicts with a household Restriction and cannot be pinned. " <>
-        "Offer one of the safe replacements instead."
+        "Pick one of the safe replacements yourself, plan and present the Proposal, then " <>
+        "tell the household what changed and why. Do not ask before presenting."
 
   def reason("recipe_excluded"), do: "The recipe is excluded in this session; include it first."
   def reason("recipe_pinned"), do: "The recipe is pinned; unpin it first."

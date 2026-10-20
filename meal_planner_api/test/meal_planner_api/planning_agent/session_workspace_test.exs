@@ -235,10 +235,12 @@ defmodule MealPlannerApi.PlanningAgent.SessionWorkspaceTest do
       assert last_result(results, "get_workspace")["variety_cap"] == 2
     end
 
-    test "a Pin conflicting with a Restriction is refused with safe replacements to offer",
+    test "a Pin conflicting with a Restriction is refused with safe replacements to pick",
          %{household: h, recipes: r} do
       diet!(member!(h), :vegetarian)
 
+      # Resolve and inform (issue #148, battery A1): the agent pins a safe
+      # replacement itself, plans, presents and explains; it asks nothing.
       script = [
         edit(%{
           "action" => "pin",
@@ -248,28 +250,46 @@ defmodule MealPlannerApi.PlanningAgent.SessionWorkspaceTest do
         }),
         fn request ->
           %{content: %{"replacements" => [first | _]}} = List.last(request.messages)
-          {:tool_calls, [{"ask_human", %{"question" => "Can I use #{first["name"]} instead?"}}]}
-        end
+
+          {:tool_calls,
+           [
+             {"edit_workspace",
+              %{
+                "action" => "pin",
+                "date" => "2026-11-02",
+                "slot" => "dinner",
+                "recipe_id" => first["recipe_id"]
+              }}
+           ]}
+        end,
+        {:tool_calls, [{"run_optimizer", %{}}]},
+        present(),
+        {:text,
+         "Zeta chicken rice is not safe for everyone, so Monday dinner is Alpha lentil stew."}
       ]
 
       {session_id, pid} = start!(h, script)
       results = run_turn!(session_id, pid, "Pin the chicken rice on Monday dinner")
 
-      assert %{
-               "error" => "restriction_conflict",
-               "reason" => reason,
-               "replacements" => replacements
-             } =
-               last_result(results, "edit_workspace")
+      assert [
+               %{
+                 "error" => "restriction_conflict",
+                 "reason" => reason,
+                 "replacements" => replacements
+               },
+               %{"status" => "ok", "pinned" => %{"name" => "Alpha lentil stew"}}
+             ] = results(results, "edit_workspace")
 
       refute reason =~ "Fictitious Member"
+      assert reason =~ "Pick one of the safe replacements yourself"
+      assert reason =~ "Do not ask before presenting"
       names = Enum.map(replacements, & &1["name"])
       assert names != []
       refute "Zeta chicken rice" in names
       assert "Alpha lentil stew" in names
 
-      assert_received {:planning_agent_event, ^session_id,
-                       %{"type" => "question", "text" => "Can I use Alpha lentil stew instead?"}}
+      assert %{"status" => "valid"} = last_result(results, "present_proposal")
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "question"}}
     end
 
     test "a Pin of an Excluded Recipe and the exclusion of a pinned recipe are refused",
