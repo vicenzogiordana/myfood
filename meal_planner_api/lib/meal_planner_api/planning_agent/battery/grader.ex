@@ -229,13 +229,23 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Grader do
        else: ["no planned recipe uses #{name}"]
   end
 
+  # The asked meal changes and every other meal of the first Proposal is
+  # kept (issue #148: "change Tuesday dinner and keep every other meal").
   defp check({:changed_meal, date, slot}, evidence, final) do
     first = List.first(evidence.proposals)
 
     if first && first["proposal_id"] != final["proposal_id"] &&
          recipe_at(first, date, slot) != recipe_at(final, date, slot),
-       do: [],
+       do: moved_meals(first, final, {date, slot}),
        else: ["#{date} #{slot} did not change"]
+  end
+
+  defp moved_meals(first, final, changed) do
+    for meal <- meals(first),
+        key = {meal["date"], meal["slot"]},
+        key != changed,
+        recipe_at(final, meal["date"], meal["slot"]) != meal["recipe_id"],
+        do: "#{meal["date"]} #{meal["slot"]} changed although it was kept"
   end
 
   defp recipe_at(proposal, date, slot) do

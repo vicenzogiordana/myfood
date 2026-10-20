@@ -84,24 +84,11 @@ defmodule MealPlannerApi.PlanningAgent.BatteryTest do
   defp good_script("A9"), do: @plan ++ @plan
 
   defp good_script("A10") do
-    # Release Tuesday dinner and rule its recipe out, so the optimizer must
-    # pick another one.
-    change = fn request ->
-      recipe_id =
-        request.messages
-        |> Enum.filter(&match?(%{role: :tool_result, name: "run_optimizer"}, &1))
-        |> List.last()
-        |> then(& &1.content["meals"])
-        |> Enum.find_value(
-          &(&1["date"] == "2026-11-03" and &1["slot"] == "dinner" and &1["recipe_id"])
-        )
-
+    # Release only Tuesday dinner: code makes the next run change it and keep
+    # every other meal (issue #148).
+    change =
       {:tool_calls,
-       [
-         {"edit_workspace", %{"action" => "release", "date" => "2026-11-03", "slot" => "dinner"}},
-         {"edit_workspace", %{"action" => "exclude", "recipe_id" => recipe_id}}
-       ]}
-    end
+       [{"edit_workspace", %{"action" => "release", "date" => "2026-11-03", "slot" => "dinner"}}]}
 
     @plan ++ [change | @plan]
   end

@@ -49,11 +49,25 @@ Out of scope: running the paid battery (the parent re-runs it after merge).
 
 - [x] T1 Released Meals change and per-run exclusions keep fixed meals (A10)
   - Route: inline (focused files already mapped: optimizador.py, tools.ex, workspace.ex)
+  - RED: AvoidedMealTests (4 failing) and session_workspace_test "single-meal change" (4 failing)
   - Checks: `python -m unittest test_optimizador` (59 OK); `mix test test/meal_planner_api/planning_agent` (475 passed)
-  - Commit: see T1 commit below
-- [ ] T2 Infeasible budget: create_recipe refuses AI Drafts after an unanswered budget Deviation; present_proposal returns the cause (A5)
-- [ ] T3 Resolve and inform: instructions and Restriction-Pin refusal (A1, A6)
-- [ ] T4 Battery fixtures and graders reviewed for A1, A5, A6, A10; docs
+  - Commit: fdc1ae3
+- [x] T2 Infeasible budget: create_recipe refuses AI Drafts after an unanswered budget Deviation; present_proposal returns the cause (A5)
+  - Route: inline (tools.ex, workspace.ex, session.ex one line each area)
+  - RED: budget_conflict_test (2 failing)
+  - Checks: `mix test test/meal_planner_api/planning_agent` (479 passed)
+  - Commit: 4e7088c
+- [x] T3 Resolve and inform: instructions and Restriction-Pin refusal (A1, A6)
+  - Route: inline
+  - RED: household_context_test "conflicts" (4 failing), Restriction-Pin reason (1 failing)
+  - Checks: household_context, session_workspace, purchase_tools tests passed
+  - Commit: 062ffbb
+- [x] T4 Battery fixtures and graders reviewed for A1, A5, A6, A10; docs
+  - Route: inline
+  - A1, A5, A6 fixtures already encode the decisions (solvable A1/A6 need a valid Proposal; A5 unsolvable, a valid Proposal is a hard violation). A10 grader now also requires every other meal kept; good A10 script releases only Tuesday dinner.
+  - RED: grader_test "only the meal ... may change" (1 failing)
+  - Checks: `mix precommit` (1477/1478; the one failure is the timing-based SessionBoundsTest backoff test, untouched, passes 4/4 in isolation)
+  - Commit: see git log (docs(planning-agent) / test commit of T4)
 
 ## Acceptance criteria
 
@@ -78,8 +92,8 @@ run separately by the pipeline (Jorge el Curioso).
 
 ## Progress
 
-- T1 done.
+- T1-T4 done.
 
 ## Next step
 
-T2.
+Open the PR; the parent re-runs the paid battery after merge.

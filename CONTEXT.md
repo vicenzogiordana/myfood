@@ -75,7 +75,7 @@ A recipe a Member ruled out for the rest of a Planning Session.
 _Avoid_: Blacklist, banned recipe
 
 **Released Meal**:
-A day and meal slot of the current Proposal that the next optimization may change; every other slot stays as it is. Only slots the Member mentioned are released unless the Member agrees to more.
+A day and meal slot of the current Proposal that the next optimization may change; every other slot stays as it is. Only slots the Member mentioned are released unless the Member agrees to more. A meal the Member asked to change always gets a different recipe; "redo the whole week" releases every meal without forcing each one to change.
 _Avoid_: Unlocked meal, free slot
 
 **Stop**:
