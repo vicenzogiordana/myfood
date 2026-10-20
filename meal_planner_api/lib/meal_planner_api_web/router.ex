@@ -181,12 +181,10 @@ defmodule MealPlannerApiWeb.Router do
     get("/calendar", CalendarController, :index)
     get("/calendar/slot", CalendarController, :show_slot)
     put("/calendar/meals/range", CalendarController, :replace_range)
-    get("/planning/weekly", PlanningController, :weekly)
-    post("/planning/confirm", PlanningController, :confirm)
+    # Plans are produced only by the culinary agent on the planning channel
+    # (issue #110); these endpoints only read and toggle favorites.
     get("/planning/favorites", PlanningChatController, :favorites)
-    post("/planning/chat", PlanningChatController, :create)
     put("/planning/slots/favorite", PlanningController, :toggle_slot_favorite)
-    post("/planning/proposals/:proposal_id/reject", PlanningChatController, :reject)
 
     post("/cooking/start", CookingController, :start)
     get("/cooking/sessions/:session_id", CookingController, :show)

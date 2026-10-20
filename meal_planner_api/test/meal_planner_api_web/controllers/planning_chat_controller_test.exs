@@ -74,68 +74,6 @@ defmodule MealPlannerApiWeb.PlanningChatControllerTest do
     assert conn.status == 404
   end
 
-  test "planning chat creates a proposal (PR3 retired HTTP confirm)", %{conn: conn} do
-    token = issue_token(conn, %{"user_id" => "u_chat", "account_id" => "acct_chat"})
-
-    {:ok, %{account_id: account_id, user_id: user_id}} =
-      Identity.ensure_persistent_identity(%{
-        id: "u_chat",
-        account_id: "acct_chat",
-        plan: :family_4
-      })
-
-    {:ok, breakfast_recipe} =
-      Catalog.create_recipe(%{
-        account_id: account_id,
-        created_by_user_id: user_id,
-        name: "Avena chat",
-        source: :user_created,
-        servings: 2,
-        suitable_for_slots: [:breakfast]
-      })
-
-    {:ok, lunch_recipe} =
-      Catalog.create_recipe(%{
-        account_id: account_id,
-        created_by_user_id: user_id,
-        name: "Tacos vegetarianos",
-        source: :user_created,
-        servings: 4,
-        suitable_for_slots: [:lunch]
-      })
-
-    {:ok, dinner_recipe} =
-      Catalog.create_recipe(%{
-        account_id: account_id,
-        created_by_user_id: user_id,
-        name: "Sopa chat",
-        source: :user_created,
-        servings: 2,
-        suitable_for_slots: [:dinner]
-      })
-
-    conn =
-      conn
-      |> put_req_header("authorization", "Bearer " <> token)
-      |> post("/api/planning/chat", %{
-        "message" => "Necesito menu para la semana",
-        "date_from" => "2026-03-23",
-        "date_to" => "2026-03-24",
-        "requested_recipe_ids" => [breakfast_recipe.id, lunch_recipe.id, dinner_recipe.id],
-        "kcal_target" => 2200,
-        "weekly_budget_cents" => 90_000
-      })
-
-    body = json_response(conn, 200)
-
-    proposal_id = body["data"]["proposal_id"]
-
-    assert is_binary(proposal_id)
-    assert length(body["data"]["proposal"]["scheduled_meals"]) == 6
-    assert is_map(body["data"]["proposal"]["weekly_plan"])
-    assert length(body["data"]["proposal"]["weekly_plan"]["days"]) >= 2
-  end
-
   test "favorites endpoint returns user starred recipes", %{conn: conn} do
     token = issue_token(conn, %{"user_id" => "u_fav", "account_id" => "acct_fav"})
 

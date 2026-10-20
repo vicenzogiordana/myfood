@@ -12,13 +12,6 @@ defmodule MealPlannerApi.Application do
       MealPlannerApiWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:meal_planner_api, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: MealPlannerApi.PubSub},
-      # DynamicSupervisor para GenerationServer (v2 streaming)
-      # El Registry se inicia dentro del Supervisor para mantenerlo bajo el mismo árbol
-      MealPlannerApi.Generation.Supervisor,
-      # DynamicSupervisor for ephemeral `PlanningSession` lifecycle GenServers
-      # (PR3 of `ephemeral-planning-sessions`). One server per active session;
-      # `:temporary` children terminate alongside the session's terminal status.
-      MealPlannerApi.Generation.PlanningSessionSupervisor,
       # Periodic sweeper for stale `PlanningSession` leases. Default tick is
       # 30_000 ms; override via `:planning_session_sweeper_interval` config.
       MealPlannerApi.Generation.PlanningSession.Sweeper,
@@ -31,13 +24,6 @@ defmodule MealPlannerApi.Application do
       # Start to serve requests, typically the last entry
       MealPlannerApiWeb.Endpoint
     ]
-
-    children =
-      if Application.get_env(:meal_planner_api, :start_optimizer_server, true) do
-        children ++ [{MealPlannerApi.Optimization.OptimizerServer, []}]
-      else
-        children
-      end
 
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options

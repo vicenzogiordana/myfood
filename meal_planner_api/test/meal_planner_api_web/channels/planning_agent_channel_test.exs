@@ -72,6 +72,52 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     assert_reply(ref, :ok, %{status: "cancelled"})
   end
 
+  test "the planning topic serves the agent flow only", %{household: h} do
+    token =
+      issue_access_v2_token(
+        Repo.get!(User, h.owner.user_id),
+        Repo.get!(AccountMembership, h.owner.membership_id)
+      )
+
+    {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+    # Routed by the socket, not by naming the module.
+    {:ok, _reply, socket} = subscribe_and_join(socket, "planning:#{h.account_id}", %{})
+    assert socket.channel == PlanningAgentChannel
+
+    # Legacy events are no longer served.
+    for {event, payload} <- [
+          {"generate_menu", %{"constraints" => %{}}},
+          {"chat", %{"message" => "cambia el lunes", "proposal_id" => Ecto.UUID.generate()}},
+          {"confirm_proposal", %{"proposal_id" => Ecto.UUID.generate()}},
+          {"start_planning", %{"range_from" => "2026-11-02", "range_to" => "2026-11-02"}}
+        ] do
+      ref = push(socket, event, payload)
+      assert_reply(ref, :error, %{reason: "invalid_payload"})
+    end
+
+    ref = push(socket, "start_session", @range)
+    assert_reply(ref, :ok, %{session_id: session_id})
+    assert is_binary(session_id)
+
+    cancel!(socket)
+  end
+
+  test "a Member cannot join the planning topic of another Household", %{household: h} do
+    other = household!("Other Fictitious Household")
+
+    token =
+      issue_access_v2_token(
+        Repo.get!(User, h.owner.user_id),
+        Repo.get!(AccountMembership, h.owner.membership_id)
+      )
+
+    {:ok, socket} = connect(UserSocket, %{"token" => token})
+
+    assert {:error, %{reason: "forbidden"}} =
+             subscribe_and_join(socket, "planning:#{other.account_id}", %{})
+  end
+
   test "a Member cannot join another Household's agent channel", %{household: h} do
     other = household!("Other Fictitious Household")
 

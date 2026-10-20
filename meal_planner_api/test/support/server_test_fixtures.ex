@@ -1,9 +1,9 @@
 defmodule MealPlannerApi.Generation.ServerTestFixtures do
   @moduledoc """
-  Shared fixture builders for `Generation.Server` integration tests.
+  Shared fixture builders for confirmed-plan, cart and validator tests
+  (first written for the legacy generation server, retired in issue #110).
 
-  These helpers hand-build the entities needed to drive `Server.confirm/2`
-  end-to-end through the existing DB layer (`Catalog`, `PlanningRepo`,
+  These helpers hand-build planning entities through the existing DB layer (`Catalog`, `PlanningRepo`,
   `Data.RecipeRepo`) without dragging in a DataCase — tests that use these
   helpers must declare `async: false` and `setup` with
   `Ecto.Adapters.SQL.Sandbox.checkout(MealPlannerApi.Repo)`.
@@ -14,8 +14,7 @@ defmodule MealPlannerApi.Generation.ServerTestFixtures do
     * Scheduled meal / proposal / generation_run ids are binary_ids
       (`Ecto.UUID`); both kinds flow through the existing schema unchanged.
     * Slots are inserted into `proposal.proposal_json["slots"]` as plain
-      maps with the exact shape `Generation.Server.persist_scheduled_meals/2`
-      consumes (`slot_key`, `recipe_id`, `name`, `price_cents`).
+      plain maps (`slot_key`, `recipe_id`, `name`, `price_cents`).
   """
 
   alias MealPlannerApi.Data.{PlanningRepo, RecipeRepo, ShoppingRepo}

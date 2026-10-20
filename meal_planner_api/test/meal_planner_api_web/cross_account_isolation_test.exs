@@ -13,9 +13,11 @@ defmodule MealPlannerApiWeb.CrossAccountIsolationTest do
   The launch prompt lists `GET /api/planning`, `GET /api/cooking`, and
   `GET /api/shopping` as checkpoints. None of those three literal routes
   exist in `router.ex` — the closest real GET routes are used instead:
-  `GET /api/planning/weekly`, `GET /api/cooking/sessions/:session_id`,
-  and `GET /api/shopping-list`. This is documented explicitly rather
-  than silently substituted.
+  `GET /api/cooking/sessions/:session_id` and `GET /api/shopping-list`.
+  This is documented explicitly rather than silently substituted. The
+  legacy `GET /api/planning/weekly` was retired with the legacy planner
+  (issue #110); planning isolation is now proven by the planning channel
+  join tests.
 
   ## `403 account_mismatch` vs. `current_membership`-based scoping
 
@@ -23,14 +25,14 @@ defmodule MealPlannerApiWeb.CrossAccountIsolationTest do
   segment in its URL, so it is the only route in this test that can
   produce `EnforceAccountScope`'s `403 account_mismatch` (a URL-vs-JWT
   tenancy mismatch, per task 3.7). `GET /api/calendar`,
-  `GET /api/planning/weekly`, `GET /api/cooking/sessions/:session_id`,
+  `GET /api/cooking/sessions/:session_id`,
   `GET /api/inventory`, and `GET /api/shopping-list` carry no
   `:account_id` in their URL at all (per `router.ex`) — for these, the
   isolation guarantee this test proves is the one tasks 3.14-3.20
   established: `current_membership.account_id` (never
   `current_user.account_id`) is the ONLY thing that decides which
   Account's data comes back. A token scoped to Account A must never see
-  Account B's calendar meals, planning candidates, cooking sessions,
+  Account B's calendar meals, cooking sessions,
   inventory items, or shopping items — and vice versa after
   `switch-account`.
   """
@@ -218,7 +220,6 @@ defmodule MealPlannerApiWeb.CrossAccountIsolationTest do
 
   defp assert_scoped_to(conn, own, other) do
     assert_calendar_scoped(conn, own, other)
-    assert_planning_weekly_scoped(conn, own, other)
     assert_cooking_scoped(conn, own, other)
     assert_inventory_scoped(conn, own, other)
     assert_shopping_scoped(conn, own, other)
@@ -245,20 +246,6 @@ defmodule MealPlannerApiWeb.CrossAccountIsolationTest do
     assert own.breakfast_recipe_id in recipe_ids and own.dinner_recipe_id in recipe_ids
     refute other.breakfast_recipe_id in recipe_ids
     refute other.dinner_recipe_id in recipe_ids
-  end
-
-  defp assert_planning_weekly_scoped(conn, own, other) do
-    resp = get(conn, "/api/planning/weekly")
-    body = json_response(resp, 200)
-
-    breakfast_recipe_ids =
-      body["data"]["days"]
-      |> Enum.flat_map(& &1["meals"])
-      |> Enum.filter(&(&1["slot"] == "breakfast"))
-      |> Enum.map(& &1["recipe_id"])
-
-    assert own.breakfast_recipe_id in breakfast_recipe_ids
-    refute other.breakfast_recipe_id in breakfast_recipe_ids
   end
 
   defp assert_cooking_scoped(conn, own, other) do

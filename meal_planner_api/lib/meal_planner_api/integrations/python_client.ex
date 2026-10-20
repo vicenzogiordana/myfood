@@ -2,7 +2,7 @@ defmodule MealPlannerApi.Integrations.PythonClient do
   @moduledoc """
   HTTP client for the Python OR-Tools optimization service.
 
-  Used by GenerationServer during planning to call the optimizer.
+  Not used by planning since the legacy planner was switched off (issue #110).
   The Python service must be reachable at `python_optimizer_url` (default: http://localhost:8000).
 
   ## Python API protocol

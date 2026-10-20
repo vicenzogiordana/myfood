@@ -8,8 +8,8 @@ defmodule MealPlannerApi.Persistence.Planning.PlanningMessage do
   `intent_kind` is intentionally a free-form string column: the
   `:role = :assistant` rows carry the validated typed-intent name, while
   `:role = :user | :system` rows leave it NULL. The closed set of
-  intent kinds is enforced at the boundary by
-  `GenerationService.validate_ai_intent/1` (PR2).
+  intent kinds was enforced by the legacy planner, switched off in issue
+  #110.
   """
 
   use Ecto.Schema
