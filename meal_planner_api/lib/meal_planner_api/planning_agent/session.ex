@@ -1206,6 +1206,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       clock: state.clock,
       recipe_drafts: state.workspace.recipe_drafts,
       absence_exceptions: state.workspace.absence_exceptions,
+      # The guests the shown Proposal was scaled to (issue #152).
+      guests: Map.get(state.workspace, :guests, %{}),
       # The Session Brands the shown Proposal was built with.
       session_brands: Map.get(state.workspace, :session_brands, %{})
     }
@@ -1817,7 +1819,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     "absence_exception_approved" => ~w(meals),
     "session_recovered" => ~w(interrupted)
   }
-  @meal_fields ~w(date slot recipe_id name origin draft)
+  @meal_fields ~w(date slot recipe_id name origin draft diners guests batches)
 
   # Streaming carries progress only: known event types with known fields.
   # Anything else, such as raw tool output or model reasoning, is dropped.

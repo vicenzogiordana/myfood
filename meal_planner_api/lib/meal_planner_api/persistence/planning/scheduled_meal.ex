@@ -12,6 +12,10 @@ defmodule MealPlannerApi.Persistence.Planning.ScheduledMeal do
     field(:recipe_version_id, :binary_id, read_after_writes: true)
     field(:recipe_snapshot, :map, read_after_writes: true)
     field(:selected_quantity, :integer, default: 1)
+    # Who eats it (issue #152): Members present plus guests. Nil for meals
+    # planned before diners were recorded.
+    field(:diners, :integer)
+    field(:guests, :integer, default: 0)
 
     belongs_to(:account, MealPlannerApi.Persistence.Accounts.Account)
     belongs_to(:recipe, MealPlannerApi.Persistence.Catalog.Recipe)
@@ -34,9 +38,13 @@ defmodule MealPlannerApi.Persistence.Planning.ScheduledMeal do
       :recipe_id,
       :is_cooked,
       :ai_generation_id,
-      :selected_quantity
+      :selected_quantity,
+      :diners,
+      :guests
     ])
     |> validate_number(:selected_quantity, greater_than: 0)
+    |> validate_number(:diners, greater_than_or_equal_to: 0)
+    |> validate_number(:guests, greater_than_or_equal_to: 0)
     |> validate_required([:account_id, :date, :slot])
     |> foreign_key_constraint(:account_id)
     |> foreign_key_constraint(:recipe_id)

@@ -50,6 +50,14 @@ _Avoid_: Weekly plan, sub-plan, menu
 A recipe assigned to a day and meal slot in the Meal Plan, with its portions and any guest constraints.
 _Avoid_: Scheduled meal, menu item
 
+**Diners**:
+Who eats one Planned Meal: the Household Members present (every Member unless an Absence Exception covers that meal) plus its Guests. A Planned Meal buys its recipe once per batch, ceil(diners / recipe servings), and the Purchase, budget and Projected Pantry use those batches. The Nutrition Goal ignores Guests.
+_Avoid_: Headcount, covers, people
+
+**Guest**:
+Someone outside the Household eating one Planned Meal, set as the Member states it. Guest cost counts against the Household's budget. A Guest's allergy or diet applies only when the Member volunteers it, to that meal only, as a hard rule; it never changes the Household and is never asked for.
+_Avoid_: Visitor, extra member
+
 **Planning Range**:
 The consecutive, not-yet-planned days covered by one planning. Planning Ranges never overlap.
 _Avoid_: Planning week, period
