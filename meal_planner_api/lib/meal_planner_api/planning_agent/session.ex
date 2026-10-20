@@ -1245,7 +1245,9 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       # The guests the shown Proposal was scaled to (issue #152).
       guests: Map.get(state.workspace, :guests, %{}),
       # The Session Brands the shown Proposal was built with.
-      session_brands: Map.get(state.workspace, :session_brands, %{})
+      session_brands: Map.get(state.workspace, :session_brands, %{}),
+      # The meals the Household does not eat at home (issue #160).
+      skipped: Workspace.skipped(state.workspace)
     }
 
     with {:valid, meals} <- ProposalValidator.validate(Proposal.meals(shown), ctx),
@@ -1888,7 +1890,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     "progress" => ~w(step call attempt tool outcome),
     "assistant_message" => ~w(text),
     "question" => ~w(text),
-    "proposal" => ~w(proposal_id status meals purchase consumed_cost budget deviations),
+    "proposal" => ~w(proposal_id status meals skipped purchase consumed_cost budget deviations),
     "recipe_draft" =>
       ~w(recipe_id name origin draft servings slots ingredients steps nutrition cost),
     "optimizer_failed" => ~w(reason),

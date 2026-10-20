@@ -19,7 +19,7 @@ contract between the planning code and the solver (spec #93, issues #97, #98 and
 
 | Field | Meaning |
 |---|---|
-| `days`, `slots` | The Planning Range: every day × slot gets exactly one meal. Days are a non-empty list of ISO dates (`YYYY-MM-DD`); `PlanningService` turns weekday names into the dates of the upcoming range before sending them |
+| `days`, `slots` | The Planning Range: every day × slot that is not skipped gets exactly one meal. Days are a non-empty list of ISO dates (`YYYY-MM-DD`); `PlanningService` turns weekday names into the dates of the upcoming range before sending them |
 | `candidates_by_slot` | `{slot: [candidate]}`; candidates carry `recipe_id`, `estimated_cost_cents`, per-serving `calories_per_serving`, `protein_g_per_serving`, `carbs_g_per_serving`, `fat_g_per_serving`, `inventory_hit_count`, and `violates_restriction: true` when code found the recipe unsafe for a Member |
 | `constraints.weekly_budget_cents` | Budget for the whole range |
 | `constraints.macro_bounds` | Optional daily `{min, max}` for `calories`, `protein_g`, `carbs_g`, `fat_g`; built from the Household Nutrition Goal by `MealPlannerApi.Optimization.Contract.nutrition_bounds/1` |
@@ -28,6 +28,7 @@ contract between the planning code and the solver (spec #93, issues #97, #98 and
 | `excluded_recipe_ids` | Optional Excluded Recipes |
 | `fixed_meals` | Optional `{day, slot, recipe_id}` range meals that never move: Pins and, on a re-optimization, every meal of the previous Proposal that was not released. Each names a range day and slot and a candidate of that slot, at most once per day and slot (otherwise `invalid_fixed_meals`) |
 | `avoided_meals` | Optional `{day, slot, recipe_id}` range meals that must not take that recipe (otherwise `invalid_avoided_meals`): a Released Meal the Member asked to change avoids its previous recipe, and a recipe excluded for one run that a fixed meal keeps is avoided on every free meal instead of excluded everywhere. The recipe stays open on every other day and slot; a fixed meal is never avoided |
+| `skipped_meals` | Optional `{day, slot}` range meals the Household does not eat at home (issue #160, `edit_workspace` `skip`). They are out of the range: never planned or returned, they count toward no goal (budget, daily nutrition, variety), and a slot skipped on every day needs no candidate. Each names a range day and slot at most once and never a fixed meal (otherwise `invalid_skipped_meals`); an avoided meal there is ignored |
 | `time_limit_ms` | Solver deadline. Python defaults to 120 000, but `OptimizerServer` always sends one below its own timeout (`optimizer_timeout_ms` minus up to 1.5 s) and clamps larger caller values, so slow solves end as `inconclusive` or a feasible incumbent instead of an Elixir timeout |
 
 ## Goal policy

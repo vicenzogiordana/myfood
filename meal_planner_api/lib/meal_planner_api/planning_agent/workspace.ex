@@ -31,6 +31,11 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
       `set_guests` (`MealPlannerApi.PlanningAgent.Diners`): every meal is
       scaled to its diners, and a guest restriction the household
       volunteered binds that meal only
+    * `skipped` — `{date, slot}` meals the Household does not eat at home
+      (issue #160), set with `skip` / `unskip`: they are out of the range,
+      never planned, bought or saved. A skip covers the whole meal for the
+      Household, unlike an Absence Exception, which lifts one Restriction
+      of one Member
     * `budget_conflict` — the cause of the budget Deviation of the last
       Proposal, while the household has not answered it: AI-created Recipe
       Drafts are refused until their next message (issue #148)
@@ -63,6 +68,7 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
             price_refreshes: %{},
             session_brands: %{},
             guests: %{},
+            skipped: MapSet.new(),
             budget_conflict: nil
 
   @type key :: {Date.t(), String.t()}
@@ -81,6 +87,7 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
           price_refreshes: MealPlannerApi.PlanningAgent.Prices.refresh_memo(),
           session_brands: %{Ecto.UUID.t() => %{ingredient: String.t(), brand: String.t()}},
           guests: %{key() => Diners.guests()},
+          skipped: MapSet.t(key()),
           budget_conflict: map() | nil
         }
 
@@ -125,6 +132,8 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
       action == "release_all" -> release_all(ws)
       action == "set_variety_cap" -> set_variety_cap(ws, args)
       action == "set_guests" -> set_guests(ws, args, ctx)
+      action == "skip" -> skip(ws, args, ctx)
+      action == "unskip" -> unskip(ws, args, ctx)
       true -> {:error, "unknown_action", %{}}
     end
   end
@@ -135,7 +144,9 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
     do: "Approvals and confirmations are made only by the household in the app."
 
   def reason("unknown_action"),
-    do: "Use pin, unpin, exclude, include, release, release_all, set_variety_cap or set_guests."
+    do:
+      "Use pin, unpin, exclude, include, release, release_all, set_variety_cap, set_guests, " <>
+        "skip or unskip."
 
   def reason("invalid_date"), do: "The date must be an ISO date (YYYY-MM-DD)."
   def reason("date_outside_range"), do: "The date is outside the Planning Range."
@@ -157,6 +168,7 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
   def reason("recipe_pinned"), do: "The recipe is pinned; unpin it first."
   def reason("no_meal_to_keep"), do: "There is no proposed meal there to keep; name a recipe."
   def reason("not_pinned"), do: "No Pin exists for that day and slot."
+  def reason("not_skipped"), do: "That day and slot is not skipped."
   def reason("no_proposal"), do: "There is no Proposal yet; run the optimizer and present one."
   def reason("no_proposed_meal"), do: "The last Proposal has no meal for that day and slot."
   def reason("meal_pinned"), do: "That meal is pinned; unpin it before releasing it."
@@ -175,20 +187,47 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
     do: "The variety cap must be an integer from 1 to #{@max_variety_cap}."
 
   @doc """
+  The skipped meals of a Workspace, or of a session or tool context
+  (`ctx.skipped`, else its Workspace's). Snapshots stored before #160 lack
+  the field: nothing is skipped.
+  """
+  @spec skipped(t() | map()) :: MapSet.t(key())
+  def skipped(%{skipped: %MapSet{} = skipped}), do: skipped
+  def skipped(%{workspace: workspace}), do: skipped(workspace)
+  def skipped(_ws_or_ctx), do: MapSet.new()
+
+  @doc "Skipped meals as `{date, slot}` data, in date and `slots` order."
+  @spec skipped_data(MapSet.t(key()), [String.t()]) :: [map()]
+  def skipped_data(skipped, slots) do
+    order = slots |> Enum.with_index() |> Map.new()
+
+    skipped
+    |> Enum.sort_by(&sort_key(&1, order))
+    |> Enum.map(&key_data/1)
+  end
+
+  @doc """
   The meals the optimizer must keep: every Pin plus, once a Proposal exists,
-  each of its meals that was not released.
+  each of its meals that was not released. A skipped meal is never kept.
   """
   @spec fixed_meals(t()) :: [%{date: Date.t(), slot: String.t(), recipe_id: Ecto.UUID.t()}]
   def fixed_meals(%__MODULE__{} = ws) do
+    skipped = skipped(ws)
+
     kept =
       for meal <- ws.proposed,
           key = {meal.date, meal.slot},
           not MapSet.member?(ws.released, key),
           not Map.has_key?(ws.pins, key),
+          not MapSet.member?(skipped, key),
           into: %{},
           do: {key, meal.recipe_id}
 
-    pins = Map.new(ws.pins, fn {key, pin} -> {key, pin.recipe_id} end)
+    pins =
+      for {key, pin} <- ws.pins,
+          not MapSet.member?(skipped, key),
+          into: %{},
+          do: {key, pin.recipe_id}
 
     kept
     |> Map.merge(pins)
@@ -206,9 +245,11 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
   @spec avoided_meals(t()) :: [%{date: Date.t(), slot: String.t(), recipe_id: Ecto.UUID.t()}]
   def avoided_meals(%__MODULE__{} = ws) do
     must_change = Map.get(ws, :must_change, MapSet.new())
+    skipped = skipped(ws)
 
     for meal <- ws.proposed,
         key = {meal.date, meal.slot},
+        not MapSet.member?(skipped, key),
         MapSet.member?(must_change, key),
         MapSet.member?(ws.released, key),
         not Map.has_key?(ws.pins, key) do
@@ -285,7 +326,8 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
         ws
         |> Map.get(:guests, %{})
         |> Enum.sort_by(fn {key, _guests} -> sort_key(key, order) end)
-        |> Enum.map(fn {key, guests} -> Diners.data(key, guests) end)
+        |> Enum.map(fn {key, guests} -> Diners.data(key, guests) end),
+      "skipped" => ws |> skipped() |> skipped_data(ctx.slots)
     }
   end
 
@@ -415,6 +457,38 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
          "status" => "ok",
          "guests" => Diners.data(key, guests || %{count: 0, restrictions: []})
        }}
+    end
+  end
+
+  # A meal the Household does not eat at home (issue #160). The whole meal is
+  # left out for the Household; a Pin there is removed, since the household
+  # just said nobody eats that meal at home.
+  defp skip(ws, args, ctx) do
+    with {:ok, key} <- meal_key(args, ctx) do
+      pinned? = Map.has_key?(ws.pins, key)
+
+      ws =
+        ws
+        |> Map.merge(%{
+          pins: Map.delete(ws.pins, key),
+          released: MapSet.delete(ws.released, key),
+          must_change: ws |> Map.get(:must_change, MapSet.new()) |> MapSet.delete(key)
+        })
+        |> Map.put(:skipped, ws |> skipped() |> MapSet.put(key))
+
+      {:ok, ws, %{"status" => "ok", "skipped" => key_data(key), "unpinned" => pinned?}}
+    end
+  end
+
+  defp unskip(ws, args, ctx) do
+    with {:ok, key} <- meal_key(args, ctx) do
+      skipped = skipped(ws)
+
+      if MapSet.member?(skipped, key),
+        do:
+          {:ok, Map.put(ws, :skipped, MapSet.delete(skipped, key)),
+           %{"status" => "ok", "unskipped" => key_data(key)}},
+        else: {:error, "not_skipped", %{}}
     end
   end
 

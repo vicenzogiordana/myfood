@@ -26,7 +26,7 @@ defmodule MealPlannerApi.PlanningAgent.FakeOptimizer do
       Map.new(payload["fixed_meals"] || [], &{{&1["day"], &1["slot"]}, &1["recipe_id"]})
 
     meals =
-      for day <- payload["days"], slot <- payload["slots"] do
+      for {day, slot} <- planned(payload) do
         [first | _] = payload["candidates_by_slot"][slot]
         recipe_id = Map.get(fixed, {day, slot}, first["recipe_id"])
         %{"day" => day, "slot" => slot, "recipe_id" => recipe_id}
@@ -39,11 +39,21 @@ defmodule MealPlannerApi.PlanningAgent.FakeOptimizer do
   def everywhere(recipe_id) do
     fn payload ->
       meals =
-        for day <- payload["days"], slot <- payload["slots"] do
+        for {day, slot} <- planned(payload) do
           %{"day" => day, "slot" => slot, "recipe_id" => recipe_id}
         end
 
       {:ok, %{"meals" => meals}}
     end
+  end
+
+  @doc "Every day and slot of the payload that is not skipped (issue #160)."
+  def planned(payload) do
+    skipped = MapSet.new(payload["skipped_meals"] || [], &{&1["day"], &1["slot"]})
+
+    for day <- payload["days"],
+        slot <- payload["slots"],
+        not MapSet.member?(skipped, {day, slot}),
+        do: {day, slot}
   end
 end

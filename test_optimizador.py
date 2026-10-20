@@ -697,6 +697,87 @@ class AvoidedMealTests(unittest.TestCase):
                 self.assertEqual(frame["error"], "invalid_avoided_meals")
 
 
+def skip(day, slot="lunch"):
+    return {"day": day, "slot": slot}
+
+
+class SkippedMealTests(unittest.TestCase):
+    """Skipped meals: a day and slot the Household does not eat at home (issue #160).
+
+    A skipped meal is out of the range: it is never planned and counts toward
+    no goal.
+    """
+
+    def test_a_skipped_meal_is_not_planned(self):
+        frame = solve_over_port(payload({"lunch": [recipe("a"), recipe("b")],
+                                         "dinner": [recipe("c"), recipe("d")]},
+                                        days=["2026-09-07", "2026-09-08"], slots=["lunch", "dinner"],
+                                        skipped_meals=[skip("2026-09-07", "dinner")]))
+
+        self.assertEqual(frame["type"], "solution")
+        self.assertEqual(
+            [(meal["day"], meal["slot"]) for meal in frame["result"]["meals"]],
+            [("2026-09-07", "lunch"), ("2026-09-08", "lunch"), ("2026-09-08", "dinner")],
+        )
+
+    def test_a_skipped_meal_counts_toward_no_goal(self):
+        result, error = _solve(payload([recipe("a", cost=600, kcal=800)],
+                                       days=["2026-09-07", "2026-09-09"], budget=600,
+                                       macro_bounds=bounds(calories={"min": 700, "max": 900}),
+                                       skipped_meals=[skip("2026-09-09")]))
+
+        self.assertIsNone(error)
+        self.assertEqual(recipe_ids(result), ["a"])
+        self.assertEqual(result["deviations"], [])
+
+    def test_a_fully_skipped_day_gets_no_goal_stage_terms_or_deviations(self):
+        solvers = []
+
+        def create():
+            solver = REAL_CREATE_SOLVER()
+            solvers.append(solver)
+            return solver
+
+        result, error = _solve(payload({"lunch": [recipe("a", cost=600, kcal=500)],
+                                        "dinner": [recipe("b", cost=600, kcal=500)]},
+                                       days=["2026-09-07", "2026-09-08"], slots=["lunch", "dinner"],
+                                       budget=2400,
+                                       macro_bounds=bounds(calories={"min": 1200, "max": 1500}),
+                                       skipped_meals=[skip("2026-09-08", "lunch"),
+                                                      skip("2026-09-08", "dinner")]),
+                               create_solver=create)
+
+        self.assertIsNone(error)
+        self.assertEqual(recipe_ids(result), ["a", "b"])
+        # The planned day keeps its goal: 1000 kcal against a 1200 minimum.
+        self.assertEqual(result["deviations"], [
+            {"goal": "calories", "priority": 2, "day": "2026-09-07", "direction": "below_min",
+             "bound": 1200, "actual": 1000, "amount": 200},
+        ])
+        names = [var.name() for solver in solvers for var in solver.variables()]
+        self.assertIn("under_calories_2026-09-07", names)
+        self.assertEqual([name for name in names if name.endswith("_2026-09-08")], [])
+
+    def test_a_slot_skipped_on_every_day_needs_no_candidate(self):
+        result, error = _solve(payload({"lunch": [recipe("a")], "dinner": []},
+                                       slots=["lunch", "dinner"],
+                                       skipped_meals=[skip("2026-09-07", "dinner")]))
+
+        self.assertIsNone(error)
+        self.assertEqual(recipe_ids(result), ["a"])
+
+    def test_skipped_meals_must_name_a_free_range_meal(self):
+        for entries in ["x", [{"day": "2026-09-07"}], [skip("2026-09-08")],
+                        [skip("2026-09-07", slot="dinner")], [skip("2026-09-07"), skip("2026-09-07")]]:
+            with self.subTest(entries=entries):
+                frame = solve_over_port(payload([recipe("a")], skipped_meals=entries))
+                self.assertEqual(frame["error"], "invalid_skipped_meals")
+
+        frame = solve_over_port(payload([recipe("a")], skipped_meals=[skip("2026-09-07")],
+                                        fixed_meals=[fixed("2026-09-07", "a")]))
+        self.assertEqual(frame["error"], "invalid_skipped_meals")
+
+
 class ScaleTests(unittest.TestCase):
     def test_a_ninety_meal_range_solves_well_within_the_deadline(self):
         days = [f"2026-10-{day:02d}" for day in range(1, 31)]

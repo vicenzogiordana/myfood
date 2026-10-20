@@ -71,7 +71,7 @@ The exclusive, ephemeral period in which one Member plans one Planning Range wit
 _Avoid_: Planning chat, planning conversation
 
 **Workspace**:
-The working state of a Planning Session: the current Proposal, pinned, excluded and released meals, variety cap, session brands and approved exceptions. It is discarded when the Planning Session ends.
+The working state of a Planning Session: the current Proposal, pinned, excluded, released and skipped meals, variety cap, session brands and approved exceptions. It is discarded when the Planning Session ends.
 _Avoid_: Draft, scratchpad
 
 **Pin**:
@@ -85,6 +85,10 @@ _Avoid_: Blacklist, banned recipe
 **Released Meal**:
 A day and meal slot of the current Proposal that the next optimization may change; every other slot stays as it is. Only slots the Member mentioned are released unless the Member agrees to more. A meal the Member asked to change always gets a different recipe; "redo the whole week" releases every meal without forcing each one to change.
 _Avoid_: Unlocked meal, free slot
+
+**Skipped Meal**:
+A day and meal slot of the Planning Range the Household will not eat at home, so nothing is planned, bought or saved for it. It covers the whole meal for the Household, unlike an Absence Exception, which covers one Member and one Restriction. The agent applies it when a Member says so, without asking.
+_Avoid_: Empty slot, eating out exception
 
 **Stop**:
 Interrupting the culinary agent's current work while keeping the Planning Session and its Workspace.
@@ -135,7 +139,7 @@ _Avoid_: Revision, edit
 ### Ingredients, products and prices
 
 **Ingredient**:
-A generic catalog item a recipe calls for, such as dried pasta. Ingredient Tags and nutrition belong to the Ingredient.
+A generic catalog item a recipe calls for, such as dried pasta. Ingredient Tags and nutrition belong to the Ingredient. Names are matched by similarity, since Members and catalogs spell the same Ingredient differently ("mozzarella" / "Muzzarella").
 _Avoid_: Product, item
 
 **Product**:

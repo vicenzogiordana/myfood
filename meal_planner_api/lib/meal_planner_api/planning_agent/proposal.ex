@@ -11,12 +11,12 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
   """
 
   alias MealPlannerApi.Planning.ProposalStatus
-  alias MealPlannerApi.PlanningAgent.{Diners, Purchase, RecipeDraft}
+  alias MealPlannerApi.PlanningAgent.{Diners, Purchase, RecipeDraft, Workspace}
 
   @type t :: map()
 
   # Fields that make up what the Member saw; the identity is not one of them.
-  @content_fields ~w(status meals purchase consumed_cost budget deviations)
+  @content_fields ~w(status meals skipped purchase consumed_cost budget deviations)
 
   @doc """
   Builds a Proposal for `meals` (validated, each with `:date`, `:slot`,
@@ -24,7 +24,9 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
   session context `ctx`. Every meal is scaled to its diners
   (`MealPlannerApi.PlanningAgent.Diners`) and shows them with its guests and
   the batches of its recipe they need. Every meal shows its Recipe Origin, and a Recipe Draft is marked as
-  one so the Member sees it is AI-created and not yet saved. Prices are
+  one so the Member sees it is AI-created and not yet saved. The meals the
+  Household does not eat at home are listed under `skipped` (issue #160):
+  they have no meal, so the Purchase and the consumed cost leave them out. Prices are
   aged at the context's `:clock` (default: the current time), and the
   Purchase follows the context's chosen brands (`brand_choices/1`). Returns
   the Proposal event and the Purchase it carries.
@@ -59,6 +61,7 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
             "batches" => meal.batches
           }
         end),
+      "skipped" => ctx |> Workspace.skipped() |> Workspace.skipped_data(ctx.slots),
       "purchase" => Purchase.to_data(purchase),
       "consumed_cost" => Purchase.consumed_data(purchase),
       "budget" => budget_data(purchase, ctx.household.budget_cents),
@@ -117,7 +120,9 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
   @spec same_content?(t(), t()) :: boolean()
   def same_content?(a, b), do: content(a) == content(b)
 
-  defp content(proposal), do: proposal |> Map.take(@content_fields) |> without_ages()
+  # A Proposal shown before #160 has no `skipped`: nothing was skipped.
+  defp content(proposal),
+    do: proposal |> Map.put_new("skipped", []) |> Map.take(@content_fields) |> without_ages()
 
   defp without_ages(map) when is_map(map) and not is_struct(map),
     do: map |> Map.delete("age_hours") |> Map.new(fn {k, v} -> {k, without_ages(v)} end)
