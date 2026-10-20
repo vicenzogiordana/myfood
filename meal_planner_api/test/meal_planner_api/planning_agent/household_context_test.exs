@@ -64,6 +64,15 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContextTest do
     refute instructions =~ "12345"
   end
 
+  # Issue #160: "we won't eat at home Wednesday night" had no way to be planned.
+  test "the model skips a meal the household will not eat at home, without asking" do
+    instructions = HouseholdContext.instructions(context(), @range, ["dinner"])
+    section = section(instructions, "Skipped meals:")
+
+    assert section =~ "edit_workspace skip right away, without asking"
+    assert section =~ "not an Absence Exception"
+  end
+
   # Issue #160: the model read integer cents as pesos, 100x too high.
   test "the model quotes only the code-formatted amounts, never cents" do
     instructions = HouseholdContext.instructions(context(), @range, ["dinner"])

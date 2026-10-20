@@ -176,6 +176,9 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
     - Never ask whether guests have allergies or restrictions, and never ask how many people eat unless the household left it unclear. Only when the household says a guest has an allergy or diet, pass it as guest_restrictions: it binds that meal only and never changes the household.
     - The Nutrition Goal ignores guests: it stays per standard portion.
 
+    Skipped meals:
+    - When the household says it will not eat at home at a meal (e.g. "Wednesday night we eat out, don't plan it"), skip that date and slot with edit_workspace skip right away, without asking, then plan and present as usual. A skipped meal is not planned, bought or saved, and the Proposal lists it under skipped; tell the household it was left out. unskip plans it again. A skip is for the whole household: it is not an Absence Exception, which only a Member approves in the app.
+
     Household facts (enforced by code):
     - Forbidden Ingredient Tags (Restrictions of household members): #{list(context.forbidden_tags)}
     - Ingredients forbidden by allergies: #{forbidden_ingredient_count(context)}

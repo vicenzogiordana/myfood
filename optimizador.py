@@ -46,10 +46,16 @@ Payload:
                                everywhere else. When an avoided meal leaves its
                                day and slot without a candidate the error is
                                "infeasible" with the cause "avoided_meal"
+  skipped_meals                optional {"day","slot"} range meals the
+                               Household does not eat at home: they are out
+                               of the range, never planned and counted toward
+                               no goal. Each names a range day and slot at
+                               most once and never a fixed meal
   time_limit_ms                optional solver deadline (default 120 s)
 
 Result:
-  meals        one {"day","slot","recipe_id"} per day and slot
+  meals        one {"day","slot","recipe_id"} per day and slot that is not
+               skipped
   deviations   every numeric goal the plan misses, with its exact amount,
                ordered by priority (budget, calories, macros) then day
   optimality   "optimal" (proven) or "feasible" (deadline hit, not proven)
@@ -247,7 +253,37 @@ def _validate_payload(payload):
     ):
         return "invalid_avoided_meals"
 
+    if not _valid_skipped_meals(payload.get("skipped_meals", []), days, slots, _fixed_meals(payload)):
+        return "invalid_skipped_meals"
+
     return None
+
+
+def _valid_skipped_meals(entries, days, slots, fixed):
+    if not isinstance(entries, list):
+        return False
+
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return False
+        key = (entry.get("day"), entry.get("slot"))
+        if key in seen or key in fixed or key[0] not in days or key[1] not in slots:
+            return False
+        seen.add(key)
+
+    return True
+
+
+def _skipped_meals(payload):
+    """{(day, slot)} of the meals the Household does not eat at home."""
+    return {(entry["day"], entry["slot"]) for entry in payload.get("skipped_meals", [])}
+
+
+def _planned_keys(payload):
+    """Every (day, slot) of the range that is not skipped, in range order."""
+    skipped = _skipped_meals(payload)
+    return [(day, slot) for day in payload["days"] for slot in payload["slots"] if (day, slot) not in skipped]
 
 
 def _valid_fixed_meals(entries, days, slots, candidates_by_slot):
@@ -301,9 +337,10 @@ def _avoided_causes(payload, allowed_by_slot):
     A fixed meal is never avoided: it keeps its recipe.
     """
     fixed = _fixed_meals(payload)
+    skipped = _skipped_meals(payload)
     causes = []
     for (day, slot), recipe_ids in sorted(_avoided_meals(payload).items()):
-        if (day, slot) not in fixed and all(candidate["recipe_id"] in recipe_ids for candidate in allowed_by_slot.get(slot, [])):
+        if (day, slot) not in fixed and (day, slot) not in skipped and all(candidate["recipe_id"] in recipe_ids for candidate in allowed_by_slot.get(slot, [])):
             causes.append({"cause": "avoided_meal", "slot": slot, "day": day})
     return causes
 
@@ -324,6 +361,7 @@ def _number(value):
 def _allowed_candidates(payload):
     """Splits candidates per slot into allowed ones and the hard causes that removed others."""
     excluded = set(payload.get("excluded_recipe_ids", []))
+    planned_slots = {slot for _day, slot in _planned_keys(payload)}
     allowed_by_slot = {}
     causes = []
 
@@ -337,7 +375,8 @@ def _allowed_candidates(payload):
             c for c in candidates if c.get("violates_restriction") is not True and c["recipe_id"] not in excluded
         ]
 
-        if not allowed:
+        # A slot skipped on every day needs no candidate.
+        if not allowed and slot in planned_slots:
             if not candidates:
                 causes.append({"cause": "coverage", "slot": slot})
             if restricted:
@@ -374,33 +413,34 @@ def _solve(payload, create_solver=None):
 
     fixed = _fixed_meals(payload)
     avoided = _avoided_meals(payload)
+    # Skipped meals are out of the range: no variable, no goal.
+    planned = _planned_keys(payload)
 
     x = {}
-    for day in days:
-        for slot in slots:
-            slot_vars = []
-            for index, candidate in enumerate(allowed_by_slot[slot]):
-                var = solver.BoolVar(f"x_{day}_{slot}_{index}")
-                x[(day, slot, index)] = var
-                slot_vars.append(var)
-                # A fixed meal leaves only its own recipe open in its slot.
-                if (day, slot) in fixed and candidate["recipe_id"] != fixed[(day, slot)]:
-                    var.SetUb(0)
-                # An avoided meal closes only that recipe on that day and slot.
-                if (day, slot) not in fixed and candidate["recipe_id"] in avoided.get((day, slot), ()):
-                    var.SetUb(0)
-            # Full coverage is hard: exactly one recipe per (day, slot).
-            solver.Add(solver.Sum(slot_vars) == 1)
+    for day, slot in planned:
+        slot_vars = []
+        for index, candidate in enumerate(allowed_by_slot[slot]):
+            var = solver.BoolVar(f"x_{day}_{slot}_{index}")
+            x[(day, slot, index)] = var
+            slot_vars.append(var)
+            # A fixed meal leaves only its own recipe open in its slot.
+            if (day, slot) in fixed and candidate["recipe_id"] != fixed[(day, slot)]:
+                var.SetUb(0)
+            # An avoided meal closes only that recipe on that day and slot.
+            if (day, slot) not in fixed and candidate["recipe_id"] in avoided.get((day, slot), ()):
+                var.SetUb(0)
+        # Full coverage is hard: exactly one recipe per planned (day, slot).
+        solver.Add(solver.Sum(slot_vars) == 1)
 
     def total(field, day=None):
         return solver.Sum(
             x[(d, slot, index)] * _candidate_num(candidate, field)
-            for d in ([day] if day is not None else days)
-            for slot in slots
+            for d, slot in planned
+            if day is None or d == day
             for index, candidate in enumerate(allowed_by_slot[slot])
         )
 
-    _add_variety_rules(solver, x, payload, allowed_by_slot, fixed)
+    _add_variety_rules(solver, x, payload, allowed_by_slot, fixed, planned)
 
     infinity = solver.infinity()
 
@@ -435,8 +475,7 @@ def _solve(payload, create_solver=None):
             _candidate_num(candidate, "estimated_cost_cents")
             - inventory_weight * _candidate_num(candidate, "inventory_hit_count")
         )
-        for day in days
-        for slot in slots
+        for day, slot in planned
         for index, candidate in enumerate(allowed_by_slot[slot])
     ), []))
 
@@ -445,8 +484,7 @@ def _solve(payload, create_solver=None):
     # order never changes the plan. A stage of its own keeps it exact.
     stages.append((solver.Sum(
         x[(day, slot, index)] * index
-        for day in days
-        for slot in slots
+        for day, slot in planned
         for index, _candidate in enumerate(allowed_by_slot[slot])
     ), []))
 
@@ -464,7 +502,7 @@ def _solve(payload, create_solver=None):
         status = solver.Solve()
 
         if status == pywraplp.Solver.OPTIMAL:
-            assignment = _read_assignment(x, days, slots, allowed_by_slot)
+            assignment = _read_assignment(x, planned, allowed_by_slot)
             if assignment is None:
                 return None, ("abnormal", None)
             _freeze(solver, objective, deviation_vars, solver.Objective().Value())
@@ -472,7 +510,7 @@ def _solve(payload, create_solver=None):
 
         if status == pywraplp.Solver.FEASIBLE:
             # Deadline reached with an incumbent: usable, but not proven optimal.
-            assignment = _read_assignment(x, days, slots, allowed_by_slot) or assignment
+            assignment = _read_assignment(x, planned, allowed_by_slot) or assignment
             optimality = "feasible"
             break
 
@@ -496,15 +534,14 @@ def _solve(payload, create_solver=None):
     return {
         "meals": [
             {"day": day, "slot": slot, "recipe_id": assignment[(day, slot)]["recipe_id"]}
-            for day in days
-            for slot in slots
+            for day, slot in planned
         ],
-        "deviations": _deviations(assignment, days, slots, budget, macro_bounds),
+        "deviations": _deviations(assignment, days, budget, macro_bounds),
         "optimality": optimality,
     }, None
 
 
-def _add_variety_rules(solver, x, payload, allowed_by_slot, fixed):
+def _add_variety_rules(solver, x, payload, allowed_by_slot, fixed, planned):
     """Hard variety rules over the range, with prior meals as fixed context.
 
     Fixed meals beat both rules: they are never refused, but they count like
@@ -533,13 +570,12 @@ def _add_variety_rules(solver, x, payload, allowed_by_slot, fixed):
     # (date, slot, recipe_id) -> decision variables choosing that recipe there.
     # Only free meals are decided; fixed (day, slot) pairs are context.
     chosen = {}
-    for day in days:
-        for slot in slots:
-            if (day, slot) in fixed:
-                continue
-            for index, candidate in enumerate(allowed_by_slot[slot]):
-                key = (dates[day], slot, candidate["recipe_id"])
-                chosen.setdefault(key, []).append(x[(day, slot, index)])
+    for day, slot in planned:
+        if (day, slot) in fixed:
+            continue
+        for index, candidate in enumerate(allowed_by_slot[slot]):
+            key = (dates[day], slot, candidate["recipe_id"])
+            chosen.setdefault(key, []).append(x[(day, slot, index)])
 
     recipe_ids = sorted({recipe_id for _date, _slot, recipe_id in chosen})
     range_dates = sorted(set(dates.values()))
@@ -592,22 +628,21 @@ def _freeze(solver, objective, deviation_vars, optimum):
         solver.Add(objective <= optimum + STAGE_TOLERANCE)
 
 
-def _read_assignment(x, days, slots, allowed_by_slot):
+def _read_assignment(x, planned, allowed_by_slot):
     assignment = {}
-    for day in days:
-        for slot in slots:
-            chosen = [
-                candidate
-                for index, candidate in enumerate(allowed_by_slot[slot])
-                if x[(day, slot, index)].solution_value() > 0.5
-            ]
-            if len(chosen) != 1:
-                return None
-            assignment[(day, slot)] = chosen[0]
+    for day, slot in planned:
+        chosen = [
+            candidate
+            for index, candidate in enumerate(allowed_by_slot[slot])
+            if x[(day, slot, index)].solution_value() > 0.5
+        ]
+        if len(chosen) != 1:
+            return None
+        assignment[(day, slot)] = chosen[0]
     return assignment
 
 
-def _deviations(assignment, days, slots, budget, macro_bounds):
+def _deviations(assignment, days, budget, macro_bounds):
     """Exact per-goal Deviations, recomputed from the chosen recipes."""
     deviations = []
 
@@ -629,7 +664,10 @@ def _deviations(assignment, days, slots, budget, macro_bounds):
         low = float(macro_bounds[goal]["min"])
         high = float(macro_bounds[goal]["max"])
         for day in days:
-            actual = sum(_candidate_num(assignment[(day, slot)], field) for slot in slots)
+            # A skipped meal is not in the assignment and adds nothing.
+            actual = sum(
+                _candidate_num(candidate, field) for (d, _slot), candidate in assignment.items() if d == day
+            )
             if low - actual > 1e-9:
                 direction, bound, amount = "below_min", low, low - actual
             elif actual - high > 1e-9:
