@@ -9,6 +9,8 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
 
   import MealPlannerApi.PlanningAgentFixtures
 
+  require Ecto.Query
+
   alias MealPlannerApi.PlanningAgent.{FakeOptimizer, FakeRecipeSearch}
   alias MealPlannerApi.PlanningAgent.Model.Scripted
   alias MealPlannerApi.PlanningAgent.Session
@@ -553,6 +555,57 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
 
       assert_receive {:planning_agent_event, ^session_id,
                       %{"type" => "limit_reached", "limit" => "no_progress"}}
+    end
+
+    # A fixed meal whose Recipe is gone is the Member's own choice, not a
+    # service outage, so the notice must not blame the service for it.
+    test "a run cut by an unavailable fixed meal adds no failure notice", %{household: h} do
+      pinned = recipe!("Fictitious pinned stew", [ingredient!("Fictitious stew beans")])
+      successor = recipe!("Fictitious successor stew", [ingredient!("Fictitious stew lentils")])
+
+      supersede = fn _request ->
+        MealPlannerApi.Repo.update_all(
+          Ecto.Query.from(r in MealPlannerApi.Persistence.Catalog.Recipe,
+            where: r.id == ^pinned.id
+          ),
+          set: [superseded_by_id: successor.id]
+        )
+
+        {:tool_calls, [{"run_optimizer", %{}}]}
+      end
+
+      pin =
+        {:tool_calls,
+         [
+           {"edit_workspace",
+            %{
+              "action" => "pin",
+              "date" => "2026-11-02",
+              "slot" => "dinner",
+              "recipe_id" => pinned.id
+            }}
+         ]}
+
+      script = [pin, supersede | List.duplicate({:tool_calls, [{"run_optimizer", %{}}]}, 5)]
+      {session_id, pid} = start!(h, script)
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "no_progress"}},
+                     2_000
+
+      last_request =
+        Enum.reduce_while(Stream.repeatedly(fn -> nil end), nil, fn _, last ->
+          receive do
+            {:scripted_model_request, request} -> {:cont, request}
+          after
+            0 -> {:halt, last}
+          end
+        end)
+
+      assert %{"error" => "fixed_meal_unavailable"} = tool_result(last_request, "run_optimizer")
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "assistant_message"}}
     end
 
     test "a limit reached without failing tools adds no notice", %{household: h} do

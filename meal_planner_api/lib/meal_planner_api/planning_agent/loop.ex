@@ -262,6 +262,10 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
 
   @service_failure ~r/_(failed|unavailable|timeout|error)\z/
 
+  # A fixed meal whose Recipe is gone comes from the Member's own choice, not
+  # from a service outage.
+  defp service_failure?(%{"error" => "fixed_meal_unavailable"}), do: false
+
   defp service_failure?(%{"error" => error}) when is_binary(error),
     do: Regex.match?(@service_failure, error)
 
