@@ -410,6 +410,14 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
     end
   end
 
+  @doc """
+  Whether the Draft's Ingredients break a Restriction of the Household
+  context `household` (an allergy, or a reviewed tag it forbids), read now.
+  """
+  @spec restricted?(t(), map()) :: boolean()
+  def restricted?(draft, household),
+    do: restriction_check(:ai_generated, draft.ingredients, household) != :ok
+
   defp restriction_check(:user_created, _ingredients, _household), do: :ok
 
   defp restriction_check(_source, ingredients, household) do
