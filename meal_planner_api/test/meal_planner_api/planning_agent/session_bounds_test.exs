@@ -508,6 +508,66 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
       assert model_requests() == 3
     end
 
+    # Issue A7 of the quality battery: the model may retry broken tools until
+    # the limit cuts the run without ever telling the Member. The code then
+    # tells the Member which tools failed, whatever the model did.
+    test "a run cut by failing tools tells the Member which tools failed", %{household: h} do
+      steps = FakeRecipeSearch.steps!(List.duplicate(:fail, 20))
+      calls = {:tool_calls, [{"search_recipes", %{"query" => "rice"}}, {"run_optimizer", %{}}]}
+
+      {session_id, pid} =
+        start!(h, List.duplicate(calls, 5), recipe_search: {FakeRecipeSearch, steps: steps})
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "assistant_message", "text" => text}},
+                     2_000
+
+      assert text =~ "recipe search (search failed)"
+      assert text =~ "meal plan optimizer (search failed)"
+      assert text =~ "try again later"
+      refute text =~ "?"
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "no_progress"}}
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "run_finished", "outcome" => "partial"}}
+    end
+
+    test "the notice names an unavailable optimizer and its reason", %{household: h} do
+      script = List.duplicate({:tool_calls, [{"run_optimizer", %{}}]}, 5)
+
+      {session_id, pid} =
+        start!(h, script, optimizer: {MealPlannerApi.PlanningAgent.Optimizer.Unavailable, []})
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "assistant_message", "text" => text}},
+                     2_000
+
+      assert text =~ "meal plan optimizer (optimizer unavailable)"
+      refute text =~ "recipe search"
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "no_progress"}}
+    end
+
+    test "a limit reached without failing tools adds no notice", %{household: h} do
+      script = Enum.map(["rice", "bowl", "Fictitious", "rice bowl", "rice"], &search_forever/1)
+      {session_id, pid} = start!(h, script)
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "no_progress"}},
+                     1_000
+
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "assistant_message"}}
+    end
+
     test "a time limit also requires authorization to continue", %{household: h} do
       slow = fn _request -> Process.sleep(1_000) && {:text, "late"} end
 
