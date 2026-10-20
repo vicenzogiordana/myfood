@@ -265,7 +265,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionMealPlanTest do
                       %{"type" => "proposal", "meals" => meals} = proposal}
 
       assert Map.keys(proposal) ==
-               ~w(budget consumed_cost deviations meals proposal_id purchase status type)
+               ~w(budget consumed_cost deviations meals proposal_id purchase skipped status type)
 
       # Recipe Origin and the Draft marker are shown with every Proposal meal,
       # with its diners (issue #152) counted now, never the past meal's portions.

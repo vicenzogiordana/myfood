@@ -187,7 +187,7 @@ Every event is pushed as `agent_event` with `type` and `session_id`:
 | `progress` | `{step}` — `thinking`, `searching_recipes`, `reading_plan` (also for `reuse_plan`), `reading_pantry`, `looking_up_prices`, `reading_recipe`, `drafting_recipe`, `running_optimizer`, `validating_proposal`; `retrying` with `{call, attempt}` (`call`: `model`, `read`, `solver`); `tool_finished` with `{tool, outcome}` | The agent is working (no raw reasoning or tool output: events pass a field allowlist) |
 | `assistant_message` | `{text}` | Agent reply |
 | `question` | `{text}` | The agent asks one question; the turn ended |
-| `proposal` | `{proposal_id, status, meals: [{date, slot, recipe_id, name, origin, draft}], purchase, consumed_cost, budget, deviations}` | A Proposal validated by code; `status` is code-owned (`valid` or `requires_approval`). Every meal shows its Recipe Origin (`traditional`, `ai_created`, `user_created`); `draft: true` marks an unsaved AI-created Recipe Draft, saved as a private Household Recipe only if this Proposal is confirmed. See "Proposal Purchase" below |
+| `proposal` | `{proposal_id, status, meals: [{date, slot, recipe_id, name, origin, draft}], skipped: [{date, slot}], purchase, consumed_cost, budget, deviations}` | A Proposal validated by code; `status` is code-owned (`valid` or `requires_approval`). `skipped` lists the meals the Household does not eat at home: they have no meal, are not bought or costed, and confirming saves nothing for them (see "Skipped meals" below). Every meal shows its Recipe Origin (`traditional`, `ai_created`, `user_created`); `draft: true` marks an unsaved AI-created Recipe Draft, saved as a private Household Recipe only if this Proposal is confirmed. See "Proposal Purchase" below |
 | `recipe_draft` | `{recipe_id, name, origin, draft: true, servings, slots, ingredients: [{ingredient, quantity_milli, unit}], steps, nutrition, cost}` | The agent built a Recipe Draft from catalog Ingredients. `origin` is `ai_created` (disclose as AI-made, possibly imperfect) or `user_created` (a dictated recipe). See "Recipe Drafts" below |
 | `recipe_saved` | `{recipe_id, name, origin}` | The Member saved a dictated recipe as a Household Recipe |
 | `optimizer_failed` | `{reason}` | The optimizer failed (including `optimizer_busy` / `optimizer_unconfigured` from the global subprocess cap); no fallback plan is produced |
@@ -243,6 +243,27 @@ total, unless a brand was chosen for the ingredient (see "Brands" below).
   `within_budget` is `null` unless the lower bound already overspends.
 - `budget_cents` is `null` when the Household has no budget set.
 
+#### Skipped meals
+
+When the Member says the Household will not eat at home at a meal ("Wednesday
+night we eat out, don't plan it"), the agent skips that date and slot with
+`edit_workspace` `skip`, without asking, and `unskip` puts it back (issue
+#160). A skipped meal is out of the range: the optimizer does not fill it
+(`skipped_meals` in the optimizer payload), the Purchase and the consumed cost
+leave it out, the Proposal lists it under `skipped`, and confirming saves no
+Planned Meal for it. Skipping removes a Pin at that meal. A skip covers the
+whole meal for the Household; it is not an Absence Exception, which lifts one
+Restriction of one Member and is approved only by the Member.
+
+#### Money for the agent
+
+Money is integer cents (`*_cents`) in every event and tool result. The agent's
+tool results also carry, next to each `*_cents` integer, the amount formatted
+by code (`"purchase_total": "ARS 49.950,00"` beside `"purchase_total_cents":
+4995000`; `.` between thousands, `,` before the decimals), and the agent is
+told to quote only those and never compute from cents (issue #160). Events
+sent to the client keep only the cents; the client formats them the same way.
+
 #### Brands
 
 A chosen brand for an ingredient is the Session Brand (set from the chat with
@@ -270,8 +291,15 @@ brand the cheapest Product is bought.
 
 A Recipe Draft exists only in the Planning Session's Workspace: it is never
 saved by the agent and disappears when the session ends unconfirmed. Its
-Ingredients are catalog Ingredients only (an unknown one rejects the Draft and
-the agent gets close catalog matches to retry with; one with no close match is
+Ingredients are catalog Ingredients only. Names match the catalog by
+similarity (Postgres `pg_trgm` trigrams over unaccented names, issue #160): a
+spelling variant that is unambiguous (case, accents, a plural ending, e.g.
+"limones" for "Limón") is used under its catalog name and reported to the
+agent; any other unknown one rejects the Draft and the agent gets close
+catalog matches ranked by similarity to retry with ("Muzzarella" for
+"mozzarella", "Harina de trigo" for "harina 000"). `lookup_prices`,
+`set_session_brand` and the `search_recipes` ingredient matching use the same
+similarity. One with no close match is
 listed as missing from the catalog, and the agent tells the Member that dish
 cannot be made instead of guessing other names), and its nutrition and cost
 are computed by code. When the Member asks for a dish no recipe provides, the

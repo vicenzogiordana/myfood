@@ -20,7 +20,7 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
 
   import Ecto.Query
 
-  alias MealPlannerApi.Persistence.Catalog.Ingredient
+  alias MealPlannerApi.PlanningAgent.IngredientMatch
   alias MealPlannerApi.Persistence.Shopping.{PriceObservation, Product, Supermarket}
   alias MealPlannerApi.Repo
 
@@ -122,7 +122,8 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   Looks prices up for the Ingredients named in `names`, reading the
   database first and refreshing missing or stale Ingredients live.
 
-  `names` are Ingredient names (case-insensitive exact match); a lookup
+  `names` are Ingredient names (case-insensitive, or an unambiguous spelling
+  variant; an unknown name lists its close catalog matches); a lookup
   without names finds nothing. Two optional filters narrow the offers of
   the named Ingredients, never adding other Ingredients, and combine with
   AND:
@@ -194,10 +195,13 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
     {all, offers, warnings, memo} =
       fresh_offers(ingredients, now, Keyword.get(opts, :refresh), brand, matches?, memo)
 
+    unknown = Enum.reject(wanted, &Map.has_key?(named, String.downcase(&1)))
+    close = if unknown == [], do: %{}, else: IngredientMatch.close_matches(unknown)
+
     missing =
       Enum.flat_map(wanted, fn name ->
         case Map.fetch(named, String.downcase(name)) do
-          :error -> [miss(name, :unknown_ingredient, filters)]
+          :error -> [unknown_miss(name, Map.get(close, name, []), filters)]
           {:ok, ingredient} -> gap(ingredient, all, offers, filters)
         end
       end)
@@ -217,7 +221,10 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
     }
   end
 
-  @doc "The Ingredient named `name` (case-insensitive exact match), or `nil`."
+  @doc """
+  The Ingredient named `name` (case-insensitive, or an unambiguous spelling
+  variant, see `MealPlannerApi.PlanningAgent.IngredientMatch`), or `nil`.
+  """
   @spec ingredient_by_name(String.t()) :: %{id: Ecto.UUID.t(), name: String.t()} | nil
   def ingredient_by_name(name) do
     name = String.trim(name)
@@ -245,7 +252,7 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
   @spec missing_data(map()) :: map()
   def missing_data(missing) do
     missing
-    |> Map.take([:ingredient, :brand, :product])
+    |> Map.take([:ingredient, :brand, :product, :close_matches])
     |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
     |> Map.put("reason", Atom.to_string(missing.reason))
   end
@@ -455,6 +462,12 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
     end
   end
 
+  # An unknown name lists its close catalog matches (issue #160), when any.
+  defp unknown_miss(name, [], filters), do: miss(name, :unknown_ingredient, filters)
+
+  defp unknown_miss(name, close, filters),
+    do: name |> miss(:unknown_ingredient, filters) |> Map.put(:close_matches, close)
+
   defp miss(name, reason, filters),
     do: filters |> Map.new() |> Map.merge(%{ingredient: name, reason: reason})
 
@@ -518,15 +531,14 @@ defmodule MealPlannerApi.PlanningAgent.Prices do
 
   defp ingredients_by_name([]), do: %{}
 
+  # By lowercased requested name. A spelling variant the catalog spells
+  # otherwise resolves too (issue #160); offers carry the catalog name.
   defp ingredients_by_name(names) do
-    lowered = Enum.map(names, &String.downcase/1)
-
-    from(i in Ingredient,
-      where: fragment("lower(?)", i.name) in ^lowered,
-      select: %{id: i.id, name: i.name}
-    )
-    |> Repo.all()
-    |> Map.new(&{String.downcase(&1.name), &1})
+    names
+    |> IngredientMatch.resolve()
+    |> Map.new(fn {name, ingredient} ->
+      {String.downcase(name), %{id: ingredient.id, name: ingredient.name}}
+    end)
   end
 
   defp supermarket!(name) do

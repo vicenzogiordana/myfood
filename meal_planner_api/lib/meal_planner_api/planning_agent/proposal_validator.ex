@@ -6,7 +6,9 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
 
   Checks, for the session's Household and Planning Range:
 
-    * coverage — exactly one meal per day and slot of the range
+    * coverage — exactly one meal per day and slot of the range, except the
+      skipped meals (`MealPlannerApi.PlanningAgent.Workspace`), which must
+      have none
     * availability — every recipe exists, is visible to the Household, is not
       superseded and suits its slot. An AI-created Recipe Draft of the
       Workspace (`MealPlannerApi.PlanningAgent.RecipeDraft`) counts as
@@ -32,7 +34,7 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
 
   alias MealPlannerApi.Persistence.Catalog.{Recipe, RecipeIngredient}
   alias MealPlannerApi.Planning.{RecipeOrigin, RestrictionValidator}
-  alias MealPlannerApi.PlanningAgent.{Diners, RecipeDraft}
+  alias MealPlannerApi.PlanningAgent.{Diners, RecipeDraft, Workspace}
   alias MealPlannerApi.Repo
 
   @type meal :: %{date: Date.t(), slot: String.t(), recipe_id: String.t()}
@@ -45,7 +47,13 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
   @spec validate([meal()], map()) :: {:valid, [map()]} | {:invalid, [map()]}
   def validate(meals, ctx) do
     {from_date, to_date} = ctx.range
-    expected = for date <- Date.range(from_date, to_date), slot <- ctx.slots, do: {date, slot}
+    skipped = Workspace.skipped(ctx)
+
+    expected =
+      for date <- Date.range(from_date, to_date),
+          slot <- ctx.slots,
+          not MapSet.member?(skipped, {date, slot}),
+          do: {date, slot}
 
     drafts =
       ctx |> RecipeDraft.in_context() |> Map.filter(fn {_, d} -> RecipeDraft.plannable?(d) end)
@@ -53,7 +61,7 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
     recipes = meals |> load_recipes(ctx.account_id) |> Map.merge(draft_recipes(meals, drafts))
 
     violations =
-      coverage_violations(meals, expected) ++
+      coverage_violations(meals, expected, skipped) ++
         availability_violations(meals, recipes) ++
         Enum.uniq_by(
           restriction_violations(
@@ -85,8 +93,19 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
     end
   end
 
-  defp coverage_violations(meals, expected) do
+  defp coverage_violations(meals, expected, skipped) do
     counts = Enum.frequencies_by(meals, &{&1.date, &1.slot})
+
+    planned_skipped =
+      for {{date, slot} = key, _count} <- counts,
+          MapSet.member?(skipped, key),
+          do:
+            violation(
+              "skipped_meal",
+              date,
+              slot,
+              "The household does not eat at home at this day and slot; plan nothing there."
+            )
 
     missing =
       for {date, slot} <- expected,
@@ -97,6 +116,7 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
 
     unexpected =
       for {{date, slot}, count} <- counts,
+          not MapSet.member?(skipped, {date, slot}),
           not MapSet.member?(expected_set, {date, slot}) or count > 1,
           do:
             violation(
@@ -106,7 +126,7 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
               "This day and slot is outside the Planning Range or planned more than once."
             )
 
-    missing ++ Enum.sort_by(unexpected, &{&1["date"], &1["slot"]})
+    missing ++ Enum.sort_by(planned_skipped ++ unexpected, &{&1["date"], &1["slot"]})
   end
 
   defp availability_violations(meals, recipes) do

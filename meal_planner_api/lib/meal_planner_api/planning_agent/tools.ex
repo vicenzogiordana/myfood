@@ -10,7 +10,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     * `get_workspace` — the current Workspace: Proposal, draft, Pins,
       Excluded Recipes, Released Meals and variety cap
     * `edit_workspace` — Pin, unpin, exclude, include, release meals, set
-      the variety cap and set a meal's guests (`MealPlannerApi.PlanningAgent.Diners`);
+      the variety cap, set a meal's guests (`MealPlannerApi.PlanningAgent.Diners`)
+      and skip or unskip a meal the Household does not eat at home;
       invalid edits are refused with a reason and approvals can never be set
     * `get_plan` — the Household's Planned Meals by date or range (planned,
       not eaten)
@@ -60,7 +61,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   alias MealPlannerApi.PlanningAgent.{
     CallBounds,
     Diners,
+    IngredientMatch,
     MealPlan,
+    Money,
     Prices,
     PriceScraper,
     ProjectedPantry,
@@ -129,6 +132,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "included, so never refuse a meal for its size. guests 0 clears them. Add " <>
             "guest_restrictions only when the household says a guest has an allergy or diet; " <>
             "never ask whether guests have any. " <>
+            "skip: the household will not eat at home at that date and slot (e.g. \"Wednesday " <>
+            "night we eat out\"); apply it without asking: that meal is not planned, bought or " <>
+            "saved. unskip: plan it again. " <>
             "Approvals and confirmations are never possible here. Refused edits return a reason.",
         parameters: %{
           "type" => "object",
@@ -136,7 +142,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "action" => %{
               "type" => "string",
               "enum" =>
-                ~w(pin unpin exclude include release release_all set_variety_cap set_guests)
+                ~w(pin unpin exclude include release release_all set_variety_cap set_guests skip unskip)
             },
             "date" => %{"type" => "string", "description" => "ISO date inside the range"},
             "slot" => %{"type" => "string"},
@@ -253,7 +259,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
           "Read prices of the Products covering the named ingredients, with product, " <>
             "presentation, supermarket, currency, observation date and age. Missing or stale " <>
             "prices are refreshed live; when that fails the old price keeps its real age and a " <>
-            "warning is returned. Ingredients without a price are listed as missing; never " <>
+            "warning is returned. Ingredient names match the catalog by similarity; an unknown " <>
+            "name is listed as missing with its close_matches to retry with. Ingredients " <>
+            "without a price are listed as missing; never " <>
             "assume a price for them, and tell the household when a price is stale. The " <>
             "ingredients are required; brand and product only narrow their offers, together, " <>
             "and a missing entry names every filter asked. When `truncated` is true, some " <>
@@ -299,7 +307,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "Brand), or clear it with brand null. It overrides the household's Brand " <>
             "Preference for this session and never changes household settings. The brand " <>
             "must be one a stored Product of the ingredient has (use lookup_prices with brand " <>
-            "first). The household sees every change. Only set it when the household asks.",
+            "first). An unknown ingredient returns close_matches to retry with. The household " <>
+            "sees every change. Only set it when the household asks.",
         parameters: %{
           "type" => "object",
           "properties" => %{
@@ -328,11 +337,14 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
   @doc """
   Executes one tool call. Returns the tool result content, the possibly
-  updated workspace, and whether the turn continues.
+  updated workspace, and whether the turn continues. Money in the content
+  carries its code-formatted amount beside the cents
+  (`MealPlannerApi.PlanningAgent.Money`).
   """
   @spec execute(String.t(), map(), context()) :: {map(), map(), control()}
   def execute(name, args, ctx) do
     {content, workspace, control} = run(name, args, ctx)
+    content = Money.annotate(content)
     {Map.put_new(content, "outcome", outcome(content)), workspace, control}
   end
 
@@ -424,6 +436,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
       {data
        |> Map.put("status", if(revised?, do: "revised", else: "drafted"))
+       |> with_renamed(Map.get(draft, :renamed, []))
        |> Map.merge(RecipeDraft.outcome(draft)), workspace, :continue}
     else
       {:error, error} -> {error, ctx.workspace, :continue}
@@ -448,6 +461,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
     case MealPlan.reuse(ctx.account_id, Map.get(args, "source_from"), ctx.range, ctx.slots) do
       {:ok, meals} ->
+        # Skipped meals stay out of the copied plan (issue #160).
+        skipped = Workspace.skipped(ctx)
+        meals = Enum.reject(meals, &MapSet.member?(skipped, {&1.date, &1.slot}))
         draft = Enum.map(meals, &Map.take(&1, [:date, :slot, :recipe_id]))
 
         {%{"status" => "ok", "meals" => Enum.map(meals, &planned_meal_data/1)},
@@ -479,6 +495,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
          {:ok, payload} <- payload(ctx, candidates_by_slot, exclude_everywhere, fixed, avoided),
          {:ok, solution} <- solve(ctx, payload),
          :ok <- keeps_fixed(solution.meals, fixed),
+         :ok <- leaves_skipped(solution.meals, Workspace.skipped(ctx)),
          :ok <- changes_avoided(solution.meals, avoided) do
       names =
         candidates_by_slot
@@ -547,6 +564,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
           "currency" => purchase.currency,
           "budget" => proposal["budget"],
           "deviations" => deviations,
+          "skipped" => proposal["skipped"],
           "brand_substitutions" => proposal["purchase"]["brand_substitutions"],
           # A budget conflict is answered with the cheaper brand options and
           # their price difference; the agent offers them, never applies them.
@@ -672,6 +690,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
        }, workspace, :continue}
     else
       {:error, reason} -> {%{"error" => reason}, ctx.workspace, :continue}
+      {:error, reason, extra} -> {Map.put(extra, "error", reason), ctx.workspace, :continue}
     end
   end
 
@@ -762,10 +781,15 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
+  # An unknown name lists its close catalog matches (issue #160).
   defp find_ingredient(name) do
     case Prices.ingredient_by_name(name) do
-      nil -> {:error, "unknown_ingredient"}
-      ingredient -> {:ok, ingredient}
+      nil ->
+        {:error, "unknown_ingredient",
+         %{"close_matches" => Map.fetch!(IngredientMatch.close_matches([name]), name)}}
+
+      ingredient ->
+        {:ok, ingredient}
     end
   end
 
@@ -944,7 +968,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   # not excluded everywhere, which would make the fixed meal infeasible: it is
   # avoided on every meal the run may change instead.
   defp avoided_meals(ctx, exclude, fixed) do
-    fixed_keys = MapSet.new(fixed, &{&1.date, &1.slot})
+    fixed_keys = fixed |> MapSet.new(&{&1.date, &1.slot}) |> MapSet.union(Workspace.skipped(ctx))
     kept_recipes = MapSet.new(fixed, & &1.recipe_id)
     {kept_excluded, exclude_everywhere} = Enum.split_with(exclude, &(&1 in kept_recipes))
     {from_date, to_date} = ctx.range
@@ -972,7 +996,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   # forbids is avoided at that day and slot, through the same contract as a
   # Released Meal's previous recipe. Fixed meals stay; the validator checks them.
   defp guest_avoided(ctx, candidates_by_slot, fixed) do
-    fixed_keys = MapSet.new(fixed, &{&1.date, &1.slot})
+    fixed_keys = fixed |> MapSet.new(&{&1.date, &1.slot}) |> MapSet.union(Workspace.skipped(ctx))
 
     meals =
       for {{date, slot} = key, %{restrictions: [_ | _]}} <- Diners.guests(ctx),
@@ -1003,7 +1027,13 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       "candidates_by_slot" => candidates_by_slot,
       "excluded_recipe_ids" => exclude,
       "fixed_meals" => Enum.map(fixed, &meal_key_data/1),
-      "avoided_meals" => Enum.map(avoided, &meal_key_data/1)
+      "avoided_meals" => Enum.map(avoided, &meal_key_data/1),
+      # Meals the Household does not eat at home are out of the range (#160).
+      "skipped_meals" =>
+        ctx
+        |> Workspace.skipped()
+        |> Workspace.skipped_data(ctx.slots)
+        |> Enum.map(&%{"day" => &1["date"], "slot" => &1["slot"]})
     }
 
     prior = Variety.prior_meals(ctx.account_id, from_date)
@@ -1022,6 +1052,14 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     if Enum.all?(fixed, &(Map.get(planned, {&1.date, &1.slot}) == &1.recipe_id)),
       do: :ok,
       else: {:error, :fixed_meal_moved, %{}}
+  end
+
+  # Code, not the optimizer's word, guarantees that a skipped meal is never
+  # planned (issue #160).
+  defp leaves_skipped(meals, skipped) do
+    if Enum.any?(meals, &MapSet.member?(skipped, {&1.date, &1.slot})),
+      do: {:error, :skipped_meal_planned, %{}},
+      else: :ok
   end
 
   # Code also guarantees that a Released Meal the household asked to change
@@ -1158,6 +1196,18 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   end
 
   defp drafts(ctx), do: RecipeDraft.in_context(ctx)
+
+  # Requested Ingredient names the catalog spells otherwise (issue #160): the
+  # agent is told which catalog name was used, to say it that way.
+  defp with_renamed(result, []), do: result
+
+  defp with_renamed(result, renamed) do
+    Map.merge(result, %{
+      "renamed_ingredients" => renamed,
+      "renamed_note" =>
+        "These Ingredients were matched to the catalog names shown; call them by those names."
+    })
+  end
 
   defp with_nutrition_outcome(%{"nutrition" => %{"complete" => true}} = recipe), do: recipe
 

@@ -6,9 +6,12 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
 
   Every Draft is grounded in the catalog:
 
-    * Ingredients are matched by exact name (case-insensitive) against the
-      catalog; any unknown Ingredient rejects the whole Draft, it is never
-      invented
+    * Ingredients are matched against the catalog by
+      `MealPlannerApi.PlanningAgent.IngredientMatch`: the exact name
+      (case-insensitive) or an unambiguous spelling variant (accents, a
+      plural ending), reported under `renamed`. Any other unknown Ingredient
+      rejects the whole Draft with close catalog matches ranked by
+      similarity; it is never invented
     * nutrition per serving is computed by code from the Ingredients'
       nutrition per 100 g or ml. A nutrient is only reported when every
       Ingredient has it in a weight or volume unit; otherwise it is `nil`
@@ -32,7 +35,6 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
   import Ecto.Query
 
   alias MealPlannerApi.Persistence.Catalog.{
-    Ingredient,
     IngredientTag,
     Recipe,
     RecipeIngredient,
@@ -40,7 +42,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
   }
 
   alias MealPlannerApi.Planning.RecipeOrigin
-  alias MealPlannerApi.PlanningAgent.{Prices, Purchase}
+  alias MealPlannerApi.PlanningAgent.{IngredientMatch, Prices, Purchase}
   alias MealPlannerApi.Repo
 
   @max_drafts 10
@@ -51,15 +53,6 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
   @max_step_length 1_000
   @max_quantity 100_000
   @known_slots ~w(breakfast lunch snack dinner)
-  @max_close_matches 5
-  @max_catalog_scan 200
-  @accented "áàâäéèêëíìîïóòôöúùûüñç"
-  @plain "aaaaeeeeiiiioooouuuunc"
-  @plain_by_accented @accented
-                     |> String.to_charlist()
-                     |> Enum.zip(String.to_charlist(@plain))
-                     |> Map.new()
-  @filler_words ~w(con para del los las sin and the with)
   @units %{"g" => :g, "ml" => :ml, "unit" => :unit}
   @nutrients [
     {"calories", :calories_per_100},
@@ -84,7 +77,8 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
           ingredients: [ingredient()],
           steps: [String.t()],
           nutrition: map(),
-          cost: map()
+          cost: map(),
+          renamed: [%{String.t() => String.t()}]
         }
 
   @doc "How many Drafts one Planning Session may hold."
@@ -155,7 +149,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
          {:ok, source} <- source(args),
          {:ok, requested} <- requested_ingredients(args),
          {:ok, steps} <- steps(args),
-         {:ok, ingredients, catalog} <- resolve(requested),
+         {:ok, ingredients, catalog, renamed} <- resolve(requested),
          :ok <- restriction_check(source, ingredients, household) do
       {:ok,
        %{
@@ -167,7 +161,8 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
          ingredients: ingredients,
          steps: steps,
          nutrition: nutrition(ingredients, catalog, servings),
-         cost: cost(ingredients, servings)
+         cost: cost(ingredients, servings),
+         renamed: renamed
        }}
     end
   end
@@ -422,18 +417,13 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
   # ---------------------------------------------------------------------------
 
   defp resolve(requested) do
-    lowered = requested |> Enum.map(&String.downcase(&1.name)) |> Enum.uniq()
+    resolved = requested |> Enum.map(& &1.name) |> IngredientMatch.resolve()
 
-    catalog =
-      from(i in Ingredient, where: fragment("lower(?)", i.name) in ^lowered)
-      |> Repo.all()
-      |> Map.new(&{String.downcase(&1.name), &1})
-
-    case Enum.reject(requested, &Map.has_key?(catalog, String.downcase(&1.name))) do
+    case Enum.reject(requested, &Map.has_key?(resolved, &1.name)) do
       [] ->
         ingredients =
           Enum.map(requested, fn item ->
-            ingredient = Map.fetch!(catalog, String.downcase(item.name))
+            ingredient = Map.fetch!(resolved, item.name)
 
             %{
               ingredient_id: ingredient.id,
@@ -443,11 +433,19 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
             }
           end)
 
-        {:ok, ingredients, Map.new(catalog, fn {_, i} -> {i.id, i} end)}
+        keys = Enum.map(ingredients, &{&1.ingredient_id, &1.unit})
+
+        if Enum.uniq(keys) == keys do
+          {:ok, ingredients, Map.new(resolved, fn {_, i} -> {i.id, i} end),
+           renamed(requested, resolved)}
+        else
+          invalid("duplicate_ingredient")
+        end
 
       unknown ->
         names = unknown |> Enum.map(& &1.name) |> Enum.uniq()
-        matches = close_matches(names)
+        by_name = IngredientMatch.close_matches(names)
+        matches = Enum.map(names, &%{"ingredient" => &1, "matches" => Map.fetch!(by_name, &1)})
         missing = for %{"ingredient" => name, "matches" => []} <- matches, do: name
 
         {:error,
@@ -461,8 +459,19 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
     end
   end
 
-  @retry_hint "Retry with catalog names from close_matches, or drop the Ingredient. " <>
-                "search_recipes finds recipes, not Ingredients."
+  # Requested names that resolved to a catalog Ingredient spelled otherwise
+  # (accents, a plural ending): the agent is told which name was used.
+  defp renamed(requested, resolved) do
+    for %{name: name} <- requested,
+        catalog = Map.fetch!(resolved, name).name,
+        String.downcase(catalog) != String.downcase(name),
+        uniq: true,
+        do: %{"requested" => name, "catalog" => catalog}
+  end
+
+  @retry_hint "Retry with catalog names from close_matches (ranked by similarity: the first " <>
+                "is usually the same Ingredient spelled otherwise, e.g. Muzzarella for " <>
+                "mozzarella), or drop the Ingredient. search_recipes finds recipes, not Ingredients."
 
   # An Ingredient without any close match is not in the catalog (issue
   # #158): guessing other names for it only burns attempts.
@@ -481,78 +490,6 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
       "plan the rest, and leave that meal for the household to decide. " <>
       "If the dish works without #{pronoun}, drop #{pronoun}. For any other unknown Ingredient: " <>
       @retry_hint
-  end
-
-  # Close catalog matches of unknown Ingredient names (issue #154): catalog
-  # names sharing a word with the request (accents, case and a plural ending
-  # ignored), best first.
-  defp close_matches(names) do
-    words_by_name = Map.new(names, &{&1, words(&1)})
-    words = words_by_name |> Map.values() |> List.flatten() |> Enum.uniq()
-    catalog = catalog_with_words(words)
-
-    Enum.map(names, fn name ->
-      %{"ingredient" => name, "matches" => rank(name, words_by_name[name], catalog)}
-    end)
-  end
-
-  defp catalog_with_words([]), do: []
-
-  defp catalog_with_words(words) do
-    condition =
-      Enum.reduce(words, dynamic(false), fn word, acc ->
-        dynamic(
-          [i],
-          ^acc or
-            fragment("translate(lower(?), ?, ?) LIKE ?", i.name, @accented, @plain, ^"%#{word}%")
-        )
-      end)
-
-    from(i in Ingredient, where: ^condition, select: i.name, limit: @max_catalog_scan)
-    |> Repo.all()
-  end
-
-  defp rank(_name, [], _catalog), do: []
-
-  defp rank(name, words, catalog) do
-    wanted = normalize(name)
-
-    catalog
-    |> Enum.map(fn candidate ->
-      plain = normalize(candidate)
-      shared = Enum.count(words, &String.contains?(plain, &1))
-      {candidate, shared, String.jaro_distance(wanted, plain)}
-    end)
-    |> Enum.filter(fn {_candidate, shared, _similarity} -> shared > 0 end)
-    |> Enum.sort_by(fn {candidate, shared, similarity} -> {-shared, -similarity, candidate} end)
-    |> Enum.take(@max_close_matches)
-    |> Enum.map(&elem(&1, 0))
-  end
-
-  # Words of three letters or more, without a plural ending.
-  defp words(name) do
-    name
-    |> normalize()
-    |> String.split(~r/[^a-z0-9]+/, trim: true)
-    |> Enum.filter(&(String.length(&1) >= 3 and &1 not in @filler_words))
-    |> Enum.map(&singular/1)
-    |> Enum.uniq()
-  end
-
-  defp singular(word) do
-    cond do
-      String.length(word) > 4 and String.ends_with?(word, "es") -> String.slice(word, 0..-3//1)
-      String.length(word) > 3 and String.ends_with?(word, "s") -> String.slice(word, 0..-2//1)
-      true -> word
-    end
-  end
-
-  defp normalize(name) do
-    name
-    |> String.downcase()
-    |> String.to_charlist()
-    |> Enum.map(fn char -> Map.get(@plain_by_accented, char, char) end)
-    |> List.to_string()
   end
 
   @doc """

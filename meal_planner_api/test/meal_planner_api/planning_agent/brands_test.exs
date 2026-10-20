@@ -326,10 +326,13 @@ defmodule MealPlannerApi.PlanningAgent.BrandsTest do
                  "chosen_brand" => "Fictitious Luchetti",
                  "source" => "household",
                  "chosen_total_cents" => 1_400,
+                 "chosen_total" => "ARS 14,00",
                  "alternative_product" => "Fictitious penne",
                  "alternative_brand" => "Fictitious Matarazzo",
                  "alternative_total_cents" => 1_000,
-                 "difference_cents" => 400
+                 "alternative_total" => "ARS 10,00",
+                 "difference_cents" => 400,
+                 "difference" => "ARS 4,00"
                }
              ]
     end
@@ -369,6 +372,24 @@ defmodule MealPlannerApi.PlanningAgent.BrandsTest do
 
       assert errors == ["unknown_ingredient", "unknown_brand", "brand_required"]
       assert drain_brand_events(session_id, []) == []
+    end
+
+    # Issue #160: an Ingredient spelled otherwise is offered by its catalog name.
+    test "an unknown ingredient lists close catalog matches", %{household: h} do
+      %{pasta: pasta} = pasta_world!(h)
+      typo = String.replace(pasta.name, "pasta", "pastta")
+
+      calls = [{"set_session_brand", %{"ingredient" => typo, "brand" => "Any"}}]
+      {session_id, pid} = start!(h, [{:tool_calls, calls}, {:text, "done"}])
+      :ok = Session.send_message(pid, "Brands")
+
+      assert_receive {:scripted_model_request, _first}
+      assert_receive {:scripted_model_request, %{messages: messages}}
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+
+      %{content: result} = List.last(messages)
+      assert result["error"] == "unknown_ingredient"
+      assert hd(result["close_matches"]) == pasta.name
     end
 
     test "a Session Brand shown to the Member survives a turn cut by the deadline",

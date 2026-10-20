@@ -92,6 +92,15 @@ defmodule MealPlannerApi.PlanningAgent.SessionToolsTest do
              ]
     end
 
+    # Issue #160: ingredients match by similarity, not only by literal text.
+    test "filters by an ingredient spelled otherwise", %{household: h} do
+      assert recipe_names(run_search(h, %{"ingredient" => "lentils"})) == ["Alpha lentil stew"]
+    end
+
+    test "a text query finds an ingredient spelled otherwise", %{household: h} do
+      assert recipe_names(run_search(h, %{"query" => "lentill"})) == ["Alpha lentil stew"]
+    end
+
     test "recipes violating a Member's Restriction are excluded by code", %{household: h} do
       diet!(member!(h), :vegetarian)
       refute "Zeta chicken rice" in recipe_names(run_search(h, %{"query" => "rice"}))
