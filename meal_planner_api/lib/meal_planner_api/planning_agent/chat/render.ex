@@ -23,6 +23,16 @@ defmodule MealPlannerApi.PlanningAgent.Chat.Render do
   def event(%{"type" => "agent_unavailable", "reason" => reason}),
     do: ["[unavailable] the agent stopped: #{reason}"]
 
+  def event(%{"type" => "session_budget_exhausted"} = event) do
+    latest =
+      case event["proposal"] do
+        %{} = proposal -> ["latest proposal:" | proposal(proposal)]
+        _ -> ["no proposal was presented"]
+      end
+
+    ["[exhausted] #{event["limit"]}: #{event["message"]}" | latest]
+  end
+
   def event(%{"type" => "optimizer_failed", "reason" => reason}),
     do: ["[optimizer] failed: #{reason}"]
 

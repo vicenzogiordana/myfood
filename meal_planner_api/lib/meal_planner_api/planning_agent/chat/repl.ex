@@ -236,6 +236,13 @@ defmodule MealPlannerApi.PlanningAgent.Chat.Repl do
           {:error, :authorization_required} ->
             refused(state, "message", "a limit was reached; /continue authorizes more")
 
+          {:error, :session_budget_exhausted} ->
+            refused(
+              state,
+              "message",
+              "this session's budget is used up; /confirm the latest proposal or /quit and start a new chat"
+            )
+
           {:error, reason} ->
             refused(state, "message", reason)
         end
