@@ -222,7 +222,91 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
     %{turn | allowance: allowance}
   end
 
-  defp finish(turn, outcome) do
+  # A limit that cuts a turn whose latest tool result is a service failure
+  # (a backend that is down, not a misused tool) is caused by those tools:
+  # the code tells the Member which tools failed and why, whatever the model
+  # did before (quality battery task A7). Never a question.
+  defp finish(turn, {:limit_reached, _limit} = outcome) do
+    case failing_tools(turn.messages) do
+      [] -> :ok
+      failures -> turn.emit.(%{"type" => "assistant_message", "text" => failure_notice(failures)})
+    end
+
+    build_result(turn, outcome)
+  end
+
+  defp finish(turn, outcome), do: build_result(turn, outcome)
+
+  # The tools of this turn whose latest result is a service failure, in the
+  # order they were first called, when the turn's latest tool result is one.
+  defp failing_tools(messages) do
+    results =
+      messages
+      |> Enum.reverse()
+      |> Enum.take_while(&(&1.role != :user))
+      |> Enum.reverse()
+      |> Enum.filter(&(&1.role == :tool_result))
+
+    if results != [] and service_failure?(List.last(results).content) do
+      latest = Map.new(results, &{&1.name, &1.content})
+
+      results
+      |> Enum.map(& &1.name)
+      |> Enum.uniq()
+      |> Enum.filter(&service_failure?(latest[&1]))
+      |> Enum.map(&{&1, failure_reason(latest[&1])})
+    else
+      []
+    end
+  end
+
+  @service_failure ~r/_(failed|unavailable|timeout|error)\z/
+
+  # A fixed meal whose Recipe is gone comes from the Member's own choice, not
+  # from a service outage.
+  defp service_failure?(%{"error" => "fixed_meal_unavailable"}), do: false
+
+  defp service_failure?(%{"error" => error}) when is_binary(error),
+    do: Regex.match?(@service_failure, error)
+
+  defp service_failure?(_content), do: false
+
+  # Only code-defined failure kinds reach the Member, never tool output.
+  defp failure_reason(%{"error" => "optimizer_failed", "reason" => reason})
+       when is_binary(reason),
+       do: humanize(reason)
+
+  defp failure_reason(%{"error" => error}), do: humanize(error)
+
+  defp humanize(code) do
+    if Regex.match?(~r/\A[a-z][a-z_]{0,40}\z/, code),
+      do: String.replace(code, "_", " "),
+      else: "unexpected error"
+  end
+
+  @tool_names %{
+    "search_recipes" => "recipe search",
+    "run_optimizer" => "meal plan optimizer",
+    "lookup_prices" => "price lookup",
+    "get_recipe" => "recipe details",
+    "get_plan" => "saved plans",
+    "reuse_plan" => "saved plans",
+    "get_pantry" => "pantry"
+  }
+
+  defp failure_notice(failures) do
+    tools =
+      failures
+      |> Enum.map(fn {name, reason} ->
+        "#{Map.get(@tool_names, name, tool_label(name))} (#{reason})"
+      end)
+      |> Enum.join(", ")
+
+    "I had to stop: some of the tools I need kept failing: #{tools}. " <>
+      "This is a problem on our side, not with your request. Please try again later."
+  end
+
+  defp build_result(turn, outcome) do
     %{
       outcome: outcome,
       model_state: turn.model_state,

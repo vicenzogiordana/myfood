@@ -127,7 +127,15 @@ if config_env() != :test do
            Enum.reject(
              [
                model: optional_string.("PLANNING_AGENT_CLAUDE_MODEL"),
-               effort: optional_string.("PLANNING_AGENT_CLAUDE_EFFORT")
+               effort: optional_string.("PLANNING_AGENT_CLAUDE_EFFORT"),
+               # Server-side refusal fallbacks are on by default; models that
+               # reject the `fallbacks` parameter (e.g. claude-haiku-5-5) need
+               # PLANNING_AGENT_CLAUDE_FALLBACKS=false. Anything else reads as unset.
+               fallbacks:
+                 Map.get(
+                   %{"true" => true, "false" => false},
+                   optional_string.("PLANNING_AGENT_CLAUDE_FALLBACKS")
+                 )
              ],
              &is_nil(elem(&1, 1))
            )

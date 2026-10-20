@@ -132,7 +132,9 @@ The battery makes paid provider calls. It needs:
     `ANTHROPIC_CACHE_WRITE_PRICE_MICROS_PER_MTOK` (default 1.25x input),
     `ANTHROPIC_CACHE_READ_PRICE_MICROS_PER_MTOK` (default 1x input),
     `PLANNING_AGENT_CLAUDE_MODEL` (default `claude-opus-5-5`) and
-    `PLANNING_AGENT_CLAUDE_EFFORT` (default `medium`).
+    `PLANNING_AGENT_CLAUDE_EFFORT` (default `medium`) and
+    `PLANNING_AGENT_CLAUDE_FALLBACKS` (default `true`; set `false` for models
+    that reject server-side refusal fallbacks, such as `claude-haiku-5-5`).
 - The OR-Tools optimizer: `PLANNING_AGENT_MAX_CONCURRENT_OPTIMIZER_RUNS`,
   plus `OPTIMIZER_PYTHON` pointing at a Python with the version pinned in
   `requirements.txt`.

@@ -306,6 +306,21 @@ defmodule MealPlannerApi.PlanningAgent.BatteryTest do
     assert a11["violations"] == ["unsolvable_presented_valid"]
   end
 
+  test "a silent agent that retries broken tools still names the cause on A7" do
+    # The claude-haiku-5-5 shape: retries until the no-progress limit cuts
+    # the run, never telling the Member. The code-rendered notice does.
+    retry = {:tool_calls, [{"search_recipes", %{"query" => "lunch"}}, {"run_optimizer", %{}}]}
+    model = fn _task, _run -> {Scripted, script: List.duplicate(retry, 30)} end
+    a7 = Enum.filter(Tasks.all(), &(&1.id == "A7"))
+
+    report = run!(model: model, tasks: a7, runs_per_task: 1)
+
+    assert [%{"task_id" => "A7", "outcome" => "correct"} = run] = report["runs"]
+    assert run["evidence"]["limits"] == ["no_progress"]
+    assert [notice] = run["evidence"]["messages"]
+    assert notice =~ "recipe search (search failed)"
+  end
+
   test "stops at the spend ceiling and reports the battery incomplete" do
     model = fn task, _run ->
       {MealPlannerApi.PlanningAgent.BatterySpendingModel,

@@ -72,7 +72,9 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
   Reaching the message's iterations, the no-progress streak or the deadline
   stops the run and emits `limit_reached` with
-  `"requires_authorization" => true`. From then on `send_message/2` refuses
+  `"requires_authorization" => true`. When the latest tool result of the
+  turn was a service failure, an `assistant_message` rendered by code
+  precedes it, naming the failing tools and their failure kinds. From then on `send_message/2` refuses
   with `:authorization_required` until the session's Member calls
   `authorize_continuation/2`, which extends only the reached limit and
   resumes the request.
