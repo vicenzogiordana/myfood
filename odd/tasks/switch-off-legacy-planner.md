@@ -54,10 +54,12 @@ Shopping Lists stay as they are.
 ## Acceptance criteria
 
 - [x] Only start after a passing battery report is linked (see Gate evidence).
-- [ ] The planning channel serves the agent flow only.
-- [ ] Regex intent parsing, the legacy generation server and the greedy
+- [x] The planning channel serves the agent flow only.
+- [x] Regex intent parsing, the legacy generation server and the greedy
       fallback are removed with their tests.
-- [ ] Existing confirmed Meal Plans and Shopping Lists are unaffected.
+- [x] Existing confirmed Meal Plans and Shopping Lists are unaffected (no
+      migration, schema or data change; calendar, shopping and confirmation
+      tests pass unchanged).
 
 ## Tasks
 
@@ -67,10 +69,10 @@ Shopping Lists stay as they are.
       deletion-dominated).
 - [x] T2 — Delete `Generation.Server` / `Generation.Supervisor` and the regex
       intent parsing in `GenerationService`. Route: inline.
-- [ ] T3 — Delete `OptimizerServer` + `OptimizerFallback` and the REST
+- [x] T3 — Delete `OptimizerServer` + `OptimizerFallback` and the REST
       plan-generation endpoints and services that depended on them. Route:
       inline.
-- [ ] T4 — Docs (ARCHITECTURE, socket docs) and full checks.
+- [x] T4 — Docs (`docs/CHANNELS.md`, socket moduledoc) and full checks.
 
 ## Checks
 
@@ -85,7 +87,18 @@ Shopping Lists stay as they are.
   parsing"): RED observed on `legacy_planner_retired_test.exs` (4/8 passed);
   GREEN: services, optimization and web tests 537 passed after seeding plans
   in `planning_candidate_builder_test.exs` (it relied on another test's
-  committed plans and failed alone on a fresh database).
+  committed plans and failed alone on a fresh database). Commit `e495aa2`.
+- T3 (`c9c8c92`): RED observed (10/19 passed: optimizer modules and REST
+  routes still present); GREEN: full suite 1280/1282 with 2 timing flakes in
+  `session_approval_test.exs` (100 ms receives under machine load), which
+  passed 3/3 when rerun alone.
+- T4 (docs commit): `mix precommit` exit 0, 1282 passed, 24 skipped.
+
+## Follow-ups (outside this task's edit surfaces)
+
+- `meal_planner_api/ARCHITECTURE.md` and
+  `meal_planner_api/frontend_integration_guide.md` still describe the
+  retired REST plan endpoints and the legacy planner.
 
 ## Delivery
 

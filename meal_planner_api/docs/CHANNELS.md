@@ -126,76 +126,21 @@ Real-time calendar updates for meal planning.
 
 ---
 
-### planning:* — Weekly Planning
+### planning:* — Culinary Agent Planning Session (spec #93)
 
-Real-time meal planning workflow coordination.
+Topic: `planning:<household_id>` (the current membership's `account_id`), with
+`planning_agent:<household_id>` kept as an alias for clients that adopted it during the
+rollout; both serve the same flow. It is a thin adapter over
+`MealPlannerApi.PlanningAgent.Session`.
 
-**Topic Pattern:** `planning:<account_id>`
-
-#### Incoming Events
-
-| Event | Payload | Description |
-|-------|---------|-------------|
-| `start_planning` | `{"week_start": "YYYY-MM-DD", "constraints": {...}}` | Start a new weekly plan |
-| `choose_slot` | `{"slot_id": "uuid", "recipe_id": "uuid"}` | Assign recipe to a slot |
-| `remove_slot` | `{"slot_id": "uuid"}` | Remove recipe from a slot |
-| `generate_plan` | `{"strategy": "balanced|quick|varied"}` | Trigger AI plan generation |
-| `accept_plan` | `{"plan_id": "uuid"}` | Accept generated plan |
-| `cancel_planning` | `{}` | Cancel current planning session |
-
-**Example Payload (start_planning):**
-```json
-{
-  "week_start": "2026-06-09",
-  "constraints": {
-    "meals_per_day": 3,
-    "max_prep_time": 60,
-    "dietary_restrictions": ["vegetarian"],
-    "favorite_recipe_ids": ["123", "456"]
-  }
-}
-```
-
-#### Outgoing Events
-
-| Event | Payload | Description |
-|-------|---------|-------------|
-| `plan_started` | `{"plan_id": "uuid", "week_start": "YYYY-MM-DD"}` | Planning session started |
-| `plan_generated` | `{"plan_id": "uuid", "slots": [...], "confidence": 0.92}` | AI plan is ready |
-| `slot_chosen` | `{"slot_id": "uuid", "recipe": {...}}` | User confirmed a slot choice |
-| `slot_removed` | `{"slot_id": "uuid"}` | Slot was cleared |
-| `plan_conflict` | `{"slot_id": "uuid", "conflicts": [...], "suggestions": [...]}` | Conflict detected |
-| `plan_saved` | `{"plan_id": "uuid", "saved_count": 21}` | Plan committed to calendar |
-| `planning_error` | `{"code": "string", "message": "string"}` | Error during planning |
-
-**Example Response (plan_generated):**
-```json
-{
-  "plan_id": "550e8400-e29b-41d4-a716-446655440002",
-  "slots": [
-    {
-      "date": "2026-06-09",
-      "slot": "breakfast",
-      "recipe": {
-        "id": "101",
-        "name": "Oatmeal with Berries",
-        "calories_per_serving": 280
-      },
-      "confidence": 0.95
-    }
-  ],
-  "confidence": 0.92,
-  "missing_meals": 2
-}
-```
-
----
-
-### planning_agent:* — Culinary Agent Planning Session (spec #93)
-
-Topic: `planning_agent:<household_id>` (the current membership's `account_id`). Lives
-beside the legacy `planning:*` flow; it is a thin adapter over
-`MealPlannerApi.PlanningAgent.Session`. The Household always comes from the
+**The legacy planner is switched off (issue #110).** Households plan only through this
+agent flow. The legacy `planning:*` events (`generate_menu`, `chat`, `swap_constraints`,
+`confirm_proposal`, `reject_proposal`, `start_planning`, `send_message` with a typed
+`intent`, `cancel_planning`) reply `invalid_payload`; regex intent parsing, the in-memory
+generation server and the optimizer server's silent greedy fallback are removed, and so are
+the REST plan endpoints (`GET /api/planning/weekly`, `POST /api/planning/confirm`,
+`POST /api/planning/chat`, `POST /api/planning/proposals/:id/reject`). Already confirmed
+Meal Plans and Shopping Lists are unchanged. The Household always comes from the
 membership, never from a payload.
 
 One Planning Session per Household: while one is active, any other Member's

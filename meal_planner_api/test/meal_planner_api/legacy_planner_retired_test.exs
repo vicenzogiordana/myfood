@@ -46,13 +46,25 @@ defmodule MealPlannerApi.LegacyPlannerRetiredTest do
 
   for {verb, path} <- @retired_routes do
     test "#{verb} #{path} is no longer routed" do
-      assert :error = Phoenix.Router.route_info(MealPlannerApiWeb.Router, unquote(verb), unquote(path), "")
+      assert :error =
+               Phoenix.Router.route_info(
+                 MealPlannerApiWeb.Router,
+                 unquote(verb),
+                 unquote(path),
+                 ""
+               )
     end
   end
 
   for {verb, path} <- @kept_routes do
     test "#{verb} #{path} is still routed" do
-      assert %{} = Phoenix.Router.route_info(MealPlannerApiWeb.Router, unquote(verb), unquote(path), "")
+      assert %{} =
+               Phoenix.Router.route_info(
+                 MealPlannerApiWeb.Router,
+                 unquote(verb),
+                 unquote(path),
+                 ""
+               )
     end
   end
 
