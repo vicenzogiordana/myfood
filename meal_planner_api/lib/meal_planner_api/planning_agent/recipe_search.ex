@@ -14,6 +14,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
 
   alias MealPlannerApi.Persistence.Catalog.{Ingredient, IngredientTag, Recipe, RecipeIngredient}
   alias MealPlannerApi.Planning.RecipeOrigin
+  alias MealPlannerApi.PlanningAgent.IngredientMatch
   alias MealPlannerApi.Repo
 
   @default_limit 20
@@ -142,12 +143,16 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
 
   defp filter_slot(query, _), do: query
 
+  # Ingredient names match by text or by similarity (issue #160), so a
+  # spelling variant ("mozzarella" / "Muzzarella") finds its recipes.
   defp filter_text(query, text) when is_binary(text) do
     case like_pattern(text) do
       nil ->
         query
 
       pattern ->
+        similar = IngredientMatch.similar_ids(text)
+
         where(
           query,
           [r],
@@ -156,7 +161,9 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
               from(ri in RecipeIngredient,
                 join: i in Ingredient,
                 on: i.id == ri.ingredient_id,
-                where: ri.recipe_id == parent_as(:recipe).id and ilike(i.name, ^pattern)
+                where:
+                  ri.recipe_id == parent_as(:recipe).id and
+                    (ilike(i.name, ^pattern) or i.id in ^similar)
               )
             )
         )
@@ -171,6 +178,8 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
         query
 
       pattern ->
+        similar = IngredientMatch.similar_ids(text)
+
         where(
           query,
           [r],
@@ -178,7 +187,9 @@ defmodule MealPlannerApi.PlanningAgent.RecipeSearch do
             from(ri in RecipeIngredient,
               join: i in Ingredient,
               on: i.id == ri.ingredient_id,
-              where: ri.recipe_id == parent_as(:recipe).id and ilike(i.name, ^pattern)
+              where:
+                ri.recipe_id == parent_as(:recipe).id and
+                  (ilike(i.name, ^pattern) or i.id in ^similar)
             )
           )
         )

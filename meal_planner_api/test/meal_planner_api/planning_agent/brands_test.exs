@@ -371,6 +371,24 @@ defmodule MealPlannerApi.PlanningAgent.BrandsTest do
       assert drain_brand_events(session_id, []) == []
     end
 
+    # Issue #160: an Ingredient spelled otherwise is offered by its catalog name.
+    test "an unknown ingredient lists close catalog matches", %{household: h} do
+      %{pasta: pasta} = pasta_world!(h)
+      typo = String.replace(pasta.name, "pasta", "pastta")
+
+      calls = [{"set_session_brand", %{"ingredient" => typo, "brand" => "Any"}}]
+      {session_id, pid} = start!(h, [{:tool_calls, calls}, {:text, "done"}])
+      :ok = Session.send_message(pid, "Brands")
+
+      assert_receive {:scripted_model_request, _first}
+      assert_receive {:scripted_model_request, %{messages: messages}}
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+
+      %{content: result} = List.last(messages)
+      assert result["error"] == "unknown_ingredient"
+      assert hd(result["close_matches"]) == pasta.name
+    end
+
     test "a Session Brand shown to the Member survives a turn cut by the deadline",
          %{household: h} do
       %{pasta: pasta} = pasta_world!(h)

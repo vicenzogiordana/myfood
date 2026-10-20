@@ -60,6 +60,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   alias MealPlannerApi.PlanningAgent.{
     CallBounds,
     Diners,
+    IngredientMatch,
     MealPlan,
     Prices,
     PriceScraper,
@@ -253,7 +254,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
           "Read prices of the Products covering the named ingredients, with product, " <>
             "presentation, supermarket, currency, observation date and age. Missing or stale " <>
             "prices are refreshed live; when that fails the old price keeps its real age and a " <>
-            "warning is returned. Ingredients without a price are listed as missing; never " <>
+            "warning is returned. Ingredient names match the catalog by similarity; an unknown " <>
+            "name is listed as missing with its close_matches to retry with. Ingredients " <>
+            "without a price are listed as missing; never " <>
             "assume a price for them, and tell the household when a price is stale. The " <>
             "ingredients are required; brand and product only narrow their offers, together, " <>
             "and a missing entry names every filter asked. When `truncated` is true, some " <>
@@ -299,7 +302,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "Brand), or clear it with brand null. It overrides the household's Brand " <>
             "Preference for this session and never changes household settings. The brand " <>
             "must be one a stored Product of the ingredient has (use lookup_prices with brand " <>
-            "first). The household sees every change. Only set it when the household asks.",
+            "first). An unknown ingredient returns close_matches to retry with. The household " <>
+            "sees every change. Only set it when the household asks.",
         parameters: %{
           "type" => "object",
           "properties" => %{
@@ -673,6 +677,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
        }, workspace, :continue}
     else
       {:error, reason} -> {%{"error" => reason}, ctx.workspace, :continue}
+      {:error, reason, extra} -> {Map.put(extra, "error", reason), ctx.workspace, :continue}
     end
   end
 
@@ -763,10 +768,15 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     end
   end
 
+  # An unknown name lists its close catalog matches (issue #160).
   defp find_ingredient(name) do
     case Prices.ingredient_by_name(name) do
-      nil -> {:error, "unknown_ingredient"}
-      ingredient -> {:ok, ingredient}
+      nil ->
+        {:error, "unknown_ingredient",
+         %{"close_matches" => Map.fetch!(IngredientMatch.close_matches([name]), name)}}
+
+      ingredient ->
+        {:ok, ingredient}
     end
   end
 

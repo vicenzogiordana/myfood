@@ -121,6 +121,37 @@ defmodule MealPlannerApi.PlanningAgent.PurchaseToolsTest do
              ]
     end
 
+    # Issue #160: the catalog spells Ingredients its own way.
+    test "a spelling variant finds its catalog Ingredient", %{household: h} do
+      {:ok, lemon} =
+        MealPlannerApi.Persistence.Catalog.create_ingredient(%{name: "Limón", category: :otros})
+
+      _ = product!(lemon, price_cents: 700)
+
+      result = run_tool(h, "lookup_prices", %{"ingredients" => ["limones"]})
+
+      assert [%{"ingredient" => "Limón", "price_cents" => 700}] = result["prices"]
+      assert result["missing"] == []
+    end
+
+    test "an unknown name lists close catalog matches", %{household: h} do
+      {:ok, _} =
+        MealPlannerApi.Persistence.Catalog.create_ingredient(%{
+          name: "Muzzarella",
+          category: :otros
+        })
+
+      result = run_tool(h, "lookup_prices", %{"ingredients" => ["mozzarella"]})
+
+      assert result["missing"] == [
+               %{
+                 "ingredient" => "mozzarella",
+                 "reason" => "unknown_ingredient",
+                 "close_matches" => ["Muzzarella"]
+               }
+             ]
+    end
+
     test "requires a list of ingredient names", %{household: h} do
       assert %{"error" => "ingredients_required"} = run_tool(h, "lookup_prices", %{})
     end

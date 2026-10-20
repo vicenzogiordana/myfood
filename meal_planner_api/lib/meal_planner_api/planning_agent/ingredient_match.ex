@@ -14,6 +14,7 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
 
     * `close_matches/1` — catalog names close to each request, best first;
       an empty list means nothing in the catalog is close
+    * `similar_ids/1` — the Ingredients close to one name, for searches
     * `resolve/1` — the catalog Ingredient each request names: its exact
       name (case-insensitive) or, when exactly one close candidate is the
       same name up to case, accents, punctuation and a plural ending, that
@@ -29,6 +30,7 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
 
   @threshold 0.4
   @max_matches 5
+  @max_search_matches 20
   @accented "áàâäéèêëíìîïóòôöúùûüñç"
   @plain "aaaaeeeeiiiioooouuuunc"
   @plain_by_accented @accented
@@ -64,8 +66,17 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
   @spec close_matches([String.t()]) :: %{String.t() => [String.t()]}
   def close_matches(names) do
     names
-    |> candidates()
+    |> candidates(@max_matches)
     |> Map.new(fn {name, found} -> {name, Enum.map(found, & &1.name)} end)
+  end
+
+  @doc """
+  Ids of the catalog Ingredients close to `name` (at most
+  #{@max_search_matches}), for searches that filter by Ingredient.
+  """
+  @spec similar_ids(String.t()) :: [Ecto.UUID.t()]
+  def similar_ids(name) do
+    [name] |> candidates(@max_search_matches) |> Map.get(name, []) |> Enum.map(& &1.id)
   end
 
   @doc """
@@ -80,7 +91,7 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
 
     variant_ids =
       unresolved
-      |> candidates()
+      |> candidates(@max_matches)
       |> Enum.flat_map(fn {name, found} ->
         case Enum.filter(found, &same_name?(name, &1.name)) do
           [only] -> [{name, only.id}]
@@ -119,7 +130,7 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
 
   # Close candidates by requested name, best first. The trigram operators use
   # the index; their thresholds are set for this query's transaction only.
-  defp candidates(names) do
+  defp candidates(names, limit) do
     wanted = names |> Enum.reject(&(String.trim(&1) == "")) |> Enum.uniq()
     empty = Map.new(names, &{&1, []})
 
@@ -138,7 +149,7 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
               to_string(@threshold)
             ])
 
-            Repo.query!(@candidates_sql, [wanted, @max_matches]).rows
+            Repo.query!(@candidates_sql, [wanted, limit]).rows
           end)
 
         Enum.reduce(Enum.reverse(rows), empty, fn [name, id, catalog_name], acc ->
