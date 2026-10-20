@@ -386,7 +386,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     with true <-
            map_size(drafts) < RecipeDraft.max_drafts() ||
              {:error, %{"error" => "draft_limit_reached"}},
-         {:ok, draft} <- RecipeDraft.build(args, ctx.household) do
+         {:ok, draft} <- RecipeDraft.build(args, ctx.household),
+         :ok <- not_escaping_budget(draft, ctx.workspace) do
       data = RecipeDraft.to_data(draft)
       emit(ctx, Map.put(data, "type", "recipe_draft"))
       workspace = Map.put(ctx.workspace, :recipe_drafts, Map.put(drafts, draft.id, draft))
@@ -521,7 +522,15 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             if(deviations == [], do: [], else: Purchase.brand_alternatives(purchase))
         }
 
-        {result, Workspace.present(ctx.workspace, proposal, meals), :continue}
+        conflict = budget_conflict(deviations, purchase, ctx.household.budget_cents)
+        result = if conflict, do: Map.put(result, "budget_conflict", conflict), else: result
+
+        workspace =
+          ctx.workspace
+          |> Workspace.present(proposal, meals)
+          |> Map.put(:budget_conflict, conflict)
+
+        {result, workspace, :continue}
 
       {:invalid, violations} ->
         {%{"status" => "invalid", "violations" => violations}, ctx.workspace, :continue}
@@ -647,6 +656,60 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
   defp run(_name, _arguments, ctx),
     do: {%{"error" => "unknown_tool"}, ctx.workspace, :continue}
+
+  # ---------------------------------------------------------------------------
+  # Infeasible budget (issue #148)
+  # ---------------------------------------------------------------------------
+
+  @budget_guidance "This Proposal breaks the budget. Try other existing recipes first " <>
+                     "(exclude the expensive ones and run the optimizer again). If no plan " <>
+                     "fits, tell the household it cannot be done within the budget, name the " <>
+                     "real cause (packages_over_budget lists every package that alone costs " <>
+                     "more than the whole budget) and ask with ask_human whether they want " <>
+                     "new recipes created. Never create recipes before they say yes."
+
+  # A budget Deviation is answered with its real cause and the guidance the
+  # agent must relay; nil when the Purchase fits the budget.
+  defp budget_conflict(deviations, purchase, budget_cents) do
+    case Enum.find(deviations, &(&1["type"] == "budget")) do
+      nil ->
+        nil
+
+      deviation ->
+        %{
+          "budget_cents" => budget_cents,
+          "purchase_total_cents" => purchase.total_cents,
+          "over_by_cents" => deviation["difference_cents"],
+          "packages_over_budget" =>
+            for line <- purchase.lines, line.offer.price_cents > budget_cents do
+              %{
+                "ingredient" => line.offer.ingredient,
+                "product" => line.offer.product,
+                "package_price_cents" => line.offer.price_cents
+              }
+            end,
+          "guidance" => @budget_guidance
+        }
+    end
+  end
+
+  # An AI-created Recipe Draft never escapes a budget Deviation the household
+  # has not answered yet: until their next message, only a recipe a Member
+  # dictates is built.
+  defp not_escaping_budget(draft, workspace) do
+    if RecipeDraft.plannable?(draft) and Map.get(workspace, :budget_conflict) != nil do
+      {:error,
+       %{
+         "error" => "new_recipes_not_requested",
+         "reason" =>
+           "The household has not asked for new recipes. Tell them the plan cannot fit the " <>
+             "budget with the existing recipes, name the cause and ask with ask_human " <>
+             "whether they want new recipes created."
+       }}
+    else
+      :ok
+    end
+  end
 
   # ---------------------------------------------------------------------------
   # Brands

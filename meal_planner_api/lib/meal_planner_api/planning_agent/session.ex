@@ -800,7 +800,14 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         {:reply, {:error, :authorization_required}, state}
 
       true ->
-        state = %{state | messages: state.messages ++ [%{role: :user, content: text}]}
+        # The Member's message answers any budget Deviation: from now on the
+        # agent may draft recipes if they asked for them (issue #148).
+        state = %{
+          state
+          | messages: state.messages ++ [%{role: :user, content: text}],
+            workspace: Map.put(state.workspace, :budget_conflict, nil)
+        }
+
         {:reply, :ok, start_turn(state)}
     end
   end

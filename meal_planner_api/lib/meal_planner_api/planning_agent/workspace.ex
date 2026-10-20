@@ -27,6 +27,9 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
       (`%{ingredient: name, brand: brand}`), set with `set_session_brand`:
       they override the Household's Brand Preference for this session only
       and are discarded with it
+    * `budget_conflict` — the cause of the budget Deviation of the last
+      Proposal, while the household has not answered it: AI-created Recipe
+      Drafts are refused until their next message (issue #148)
 
   `edit/3` applies one edit or refuses it with a reason; approvals are human
   actions and can never be set here.
@@ -54,7 +57,8 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
             deviation_approval: nil,
             absence_exceptions: [],
             price_refreshes: %{},
-            session_brands: %{}
+            session_brands: %{},
+            budget_conflict: nil
 
   @type key :: {Date.t(), String.t()}
   @type t :: %__MODULE__{
@@ -70,7 +74,8 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
           deviation_approval: map() | nil,
           absence_exceptions: [map()],
           price_refreshes: MealPlannerApi.PlanningAgent.Prices.refresh_memo(),
-          session_brands: %{Ecto.UUID.t() => %{ingredient: String.t(), brand: String.t()}}
+          session_brands: %{Ecto.UUID.t() => %{ingredient: String.t(), brand: String.t()}},
+          budget_conflict: map() | nil
         }
 
   @type ctx :: %{
