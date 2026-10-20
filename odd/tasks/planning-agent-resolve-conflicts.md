@@ -67,7 +67,7 @@ Out of scope: running the paid battery (the parent re-runs it after merge).
   - A1, A5, A6 fixtures already encode the decisions (solvable A1/A6 need a valid Proposal; A5 unsolvable, a valid Proposal is a hard violation). A10 grader now also requires every other meal kept; good A10 script releases only Tuesday dinner.
   - RED: grader_test "only the meal ... may change" (1 failing)
   - Checks: `mix precommit` (1477/1478; the one failure is the timing-based SessionBoundsTest backoff test, untouched, passes 4/4 in isolation)
-  - Commit: see git log (docs(planning-agent) / test commit of T4)
+  - Commit: aea4b07
 
 ## Acceptance criteria
 
