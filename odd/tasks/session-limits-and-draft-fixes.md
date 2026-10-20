@@ -66,4 +66,15 @@ writer of this pipeline).
 
 ## Progress
 
-(updated per task with commit evidence)
+All tasks done. T7 docs commit 49c9a6f.
+
+Verification (2026-10-20):
+- `MYFOOD_TEST_DATABASE=meal_planner_api_test154 mix test`: 1317 passed, 24 skipped
+- `mix precommit`: exit 0 (compile --warnings-as-errors, deps.unlock --unused,
+  format, 1317 tests passed); the only warnings are pre-existing ones in
+  untouched test files.
+
+Not changed: the OpenAI adapter keeps its token reservation (the issue
+targets the Claude adapter); `optimizador.py` is untouched.
+
+Next step: PR review (Jorge el Curioso), then merge.
