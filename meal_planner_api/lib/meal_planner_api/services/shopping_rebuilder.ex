@@ -3,8 +3,8 @@ defmodule MealPlannerApi.Services.ShoppingRebuilder do
   Pure stateless functions for computing net shopping shortages
   from confirmed scheduled meals and available inventory.
 
-  No side effects. All DB writes are done by the caller
-  (Generation.Server). This separation makes the math testable
+  No side effects. All DB writes are done by the caller.
+  This separation makes the math testable
   without database fixtures.
 
   ## Usage

@@ -12,9 +12,6 @@ defmodule MealPlannerApi.Application do
       MealPlannerApiWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:meal_planner_api, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: MealPlannerApi.PubSub},
-      # DynamicSupervisor para GenerationServer (v2 streaming)
-      # El Registry se inicia dentro del Supervisor para mantenerlo bajo el mismo árbol
-      MealPlannerApi.Generation.Supervisor,
       # Periodic sweeper for stale `PlanningSession` leases. Default tick is
       # 30_000 ms; override via `:planning_session_sweeper_interval` config.
       MealPlannerApi.Generation.PlanningSession.Sweeper,

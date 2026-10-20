@@ -137,7 +137,7 @@ defmodule MealPlannerApi.Data.RecipeRepo do
 
   Shape: `%{recipe_id => [%{ingredient_id, unit, quantity_milli}]}`. Recipe ids
   with no `recipe_ingredients` are absent from the map (callers default via
-  `Map.get(map, id, [])`). Feeds `GenerationService.build_cart_lines/2`.
+  `Map.get(map, id, [])`).
   """
   @spec list_ingredients_for_recipes([binary()]) :: %{binary() => [map()]}
   def list_ingredients_for_recipes(recipe_ids) when is_list(recipe_ids) do
@@ -206,7 +206,6 @@ defmodule MealPlannerApi.Data.RecipeRepo do
 
   @doc """
   Returns recipes with their prices preloaded.
-  Used by GenerationServer to enrich optimizer responses with recipe names and prices.
   """
   @spec list_by_ids_with_prices([pos_integer()]) :: [Recipe.t()]
   def list_by_ids_with_prices(recipe_ids) when is_list(recipe_ids) do
@@ -227,13 +226,11 @@ defmodule MealPlannerApi.Data.RecipeRepo do
   end
 
   # -------------------------------------------------------------------------
-  # Favorite IDs (for GenerationServer optimization hints)
+  # Favorite IDs
   # -------------------------------------------------------------------------
 
   @doc """
   Returns the list of favorite recipe IDs for a given account.
-  Used by GenerationServer to inject preferred_recipe_ids into the OR-Tools payload.
-
   Returns a list of maps with `:id` key, e.g. `[%{id: 1}, %{id: 5}]`.
   """
   @spec list_favorite_ids(pos_integer()) :: [%{id: pos_integer()}]

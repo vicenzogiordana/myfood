@@ -61,11 +61,11 @@ Shopping Lists stay as they are.
 
 ## Tasks
 
-- [ ] T1 — Route `planning:*` to the agent channel; delete the legacy
+- [x] T1 — Route `planning:*` to the agent channel; delete the legacy
       `PlanningChannel`, `IntentAtomizer`, the AI chat intent forwarding, and
       the legacy session server/supervisor. Route: inline (single writer,
       deletion-dominated).
-- [ ] T2 — Delete `Generation.Server` / `Generation.Supervisor` and the regex
+- [x] T2 — Delete `Generation.Server` / `Generation.Supervisor` and the regex
       intent parsing in `GenerationService`. Route: inline.
 - [ ] T3 — Delete `OptimizerServer` + `OptimizerFallback` and the REST
       plan-generation endpoints and services that depended on them. Route:
@@ -79,7 +79,13 @@ Shopping Lists stay as they are.
 
 ## Progress / evidence
 
-(filled per task)
+- T1 (`dd70187`): RED observed (`assert socket.channel == PlanningAgentChannel`
+  failed against main's routing); GREEN: channel + generation tests 127 passed.
+- T2 (commit "retire the legacy generation server and regex intent
+  parsing"): RED observed on `legacy_planner_retired_test.exs` (4/8 passed);
+  GREEN: services, optimization and web tests 537 passed after seeding plans
+  in `planning_candidate_builder_test.exs` (it relied on another test's
+  committed plans and failed alone on a fresh database).
 
 ## Delivery
 

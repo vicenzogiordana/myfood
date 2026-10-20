@@ -622,7 +622,7 @@ defmodule MealPlannerApi.Data.PlanningRepo do
   Composable Multi step (PR2 of issue #35): row-locks the session via
   `SELECT ... FOR UPDATE` and transitions `:active` → `:committed`.
 
-  The caller (`Generation.Server.do_confirm/3`) is responsible for
+  The caller is responsible for
   pre-validating the session — this step is a belt-and-suspenders guard
   against TOCTOU. If the session is missing or no longer `:active`, the
   step returns `{:error, :session_lock_lost}`, the Multi aborts, and the

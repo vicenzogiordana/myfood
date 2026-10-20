@@ -6,8 +6,7 @@ defmodule MealPlannerApi.Integrations.PythonClient.Mock do
   complete proposal. Used in dev + test environments.
 
   Since this is a Phoenix Channel environment, progress is simulated
-  via `Process.send_after` — not real broadcasts. The GenerationServer
-  test harness intercepts these by stubbing `send(self(), {:broadcast, ...})`.
+  via `Process.send_after` — not real broadcasts.
   """
 
   @doc "Returns mock optimization result."

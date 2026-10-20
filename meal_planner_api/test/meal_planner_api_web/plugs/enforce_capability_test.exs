@@ -34,7 +34,7 @@ defmodule MealPlannerApiWeb.Plugs.EnforceCapabilityTest do
   setup do
     # Explicit checkout — `test_helper.exs` starts the sandbox in `:auto`
     # mode, but other test files in the suite (notably
-    # `ChannelCase`/`Generation.ServerTest`) flip it to `:shared` and
+    # `ChannelCase`) flip it to `:shared` and
     # never restore. Without an explicit checkout, the first
     # `Repo.insert!` in this file raises `DBConnection.OwnershipError`
     # once the suite reaches this point in execution order.
