@@ -28,13 +28,15 @@ defmodule MealPlannerApiWeb.UserSocket do
 
   ## Channels
 
-  This socket multiplexes four main topic namespaces:
+  This socket multiplexes these topic namespaces:
 
   | Channel Pattern | Module | Purpose | Key Events |
   |-----------------|--------|---------|------------|
-  | `ai_chat:*` | `AIChannel` | AI meal planning assistant | `new_message`, `regenerate` |
+  | `ai_chat:*` | `AIChannel` | AI chat assistant | `new_message` |
   | `calendar:*` | `CalendarChannel` | Calendar operations | `slot_updated`, `meal_assigned` |
-  | `planning:*` | `PlanningChannel` | Weekly planning | `plan_generated`, `slot_chosen` |
+  | `planning:*` | `PlanningAgentChannel` | Planning through the culinary agent | `start_session`, `send_message`, `agent_event` |
+  | `planning_agent:*` | `PlanningAgentChannel` | Same agent flow (rollout topic) | as `planning:*` |
+  | `shopping:*` | `ShoppingChannel` | Shopping List updates | |
   | `cooking:*` | `CookingChannel` | Cooking mode | `step_complete`, `timer_start` |
 
   ## Token Refresh
@@ -70,7 +72,9 @@ defmodule MealPlannerApiWeb.UserSocket do
   channel("ai_chat:*", MealPlannerApiWeb.AIChannel)
   channel("shopping:*", MealPlannerApiWeb.ShoppingChannel)
   channel("calendar:*", MealPlannerApiWeb.CalendarChannel)
-  channel("planning:*", MealPlannerApiWeb.PlanningChannel)
+  # The legacy planner is switched off (issue #110): Households plan only
+  # through the culinary agent, on either topic.
+  channel("planning:*", MealPlannerApiWeb.PlanningAgentChannel)
   channel("planning_agent:*", MealPlannerApiWeb.PlanningAgentChannel)
   channel("cooking:*", MealPlannerApiWeb.CookingChannel)
 

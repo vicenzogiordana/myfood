@@ -6,7 +6,7 @@ defmodule MealPlannerApiWeb.MembershipScopedChannelTest do
 
     * The same User, `:active` in two different Accounts, opens two
       independent sockets — one scoped to Account_A, one to Account_B.
-    * Both joins succeed (each PlanningChannel join is verified
+    * Both joins succeed (each planning channel join is verified
       independently against the socket's own current_membership, per
       tasks 3.9-3.12).
     * A broadcast sent to Account_A's topic is received only by the
@@ -16,7 +16,7 @@ defmodule MealPlannerApiWeb.MembershipScopedChannelTest do
 
   import MealPlannerApi.FactoryHelpers
 
-  alias MealPlannerApiWeb.{Endpoint, PlanningChannel, UserSocket}
+  alias MealPlannerApiWeb.{Endpoint, PlanningAgentChannel, UserSocket}
 
   test "multi-familia User joins two Account-scoped planning topics via two sockets" do
     user =
@@ -40,8 +40,8 @@ defmodule MealPlannerApiWeb.MembershipScopedChannelTest do
     topic_a = "planning:#{membership_a.account_id}"
     topic_b = "planning:#{membership_b.account_id}"
 
-    assert {:ok, _reply_a, socket_a} = subscribe_and_join(socket_a, PlanningChannel, topic_a)
-    assert {:ok, _reply_b, socket_b} = subscribe_and_join(socket_b, PlanningChannel, topic_b)
+    assert {:ok, _reply_a, socket_a} = subscribe_and_join(socket_a, PlanningAgentChannel, topic_a)
+    assert {:ok, _reply_b, socket_b} = subscribe_and_join(socket_b, PlanningAgentChannel, topic_b)
 
     assert socket_a.assigns.current_membership.account_id == membership_a.account_id
     assert socket_b.assigns.current_membership.account_id == membership_b.account_id

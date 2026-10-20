@@ -15,10 +15,6 @@ defmodule MealPlannerApi.Application do
       # DynamicSupervisor para GenerationServer (v2 streaming)
       # El Registry se inicia dentro del Supervisor para mantenerlo bajo el mismo árbol
       MealPlannerApi.Generation.Supervisor,
-      # DynamicSupervisor for ephemeral `PlanningSession` lifecycle GenServers
-      # (PR3 of `ephemeral-planning-sessions`). One server per active session;
-      # `:temporary` children terminate alongside the session's terminal status.
-      MealPlannerApi.Generation.PlanningSessionSupervisor,
       # Periodic sweeper for stale `PlanningSession` leases. Default tick is
       # 30_000 ms; override via `:planning_session_sweeper_interval` config.
       MealPlannerApi.Generation.PlanningSession.Sweeper,

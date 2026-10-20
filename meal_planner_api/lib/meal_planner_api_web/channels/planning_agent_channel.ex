@@ -1,10 +1,13 @@
 defmodule MealPlannerApiWeb.PlanningAgentChannel do
   @moduledoc """
   Thin Phoenix adapter over `MealPlannerApi.PlanningAgent.Session` (spec #93),
-  living beside the legacy `planning:*` flow.
+  the only planning flow since the legacy planner was switched off (issue
+  #110).
 
-  Topic: `planning_agent:<household_id>`. The Household always comes from the
-  socket's current membership; payloads never choose it.
+  Topics: `planning:<household_id>` and its rollout alias
+  `planning_agent:<household_id>`; both serve this agent flow only. The
+  Household always comes from the socket's current membership; payloads never
+  choose it.
 
   Incoming events:
 
@@ -49,7 +52,13 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
   @default_slots ["lunch", "dinner"]
 
   @impl true
-  def join("planning_agent:" <> topic_account_id, _payload, socket) do
+  def join("planning:" <> topic_account_id, payload, socket),
+    do: join_household(topic_account_id, payload, socket)
+
+  def join("planning_agent:" <> topic_account_id, payload, socket),
+    do: join_household(topic_account_id, payload, socket)
+
+  defp join_household(topic_account_id, _payload, socket) do
     membership = LoadCurrentMembershipSocket.membership_from_socket(socket)
 
     cond do
