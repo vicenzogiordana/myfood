@@ -111,7 +111,13 @@ defmodule Mix.Tasks.PlanningAgent.Chat do
       )
     end
 
-    :ok = Sandbox.mode(Repo, :auto)
+    # One shared, never-expiring owner outside a transaction: writes persist,
+    # and long-lived processes (the Session, sweepers) are not disconnected
+    # by the sandbox's ownership timeout.
+    _owner =
+      Sandbox.start_owner!(Repo, shared: true, sandbox: false, ownership_timeout: :infinity)
+
+    :ok
   end
 
   defp optimizer_opts(env) do
