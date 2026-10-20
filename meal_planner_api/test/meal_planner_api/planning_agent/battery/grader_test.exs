@@ -315,6 +315,34 @@ defmodule MealPlannerApi.PlanningAgent.Battery.GraderTest do
       assert "2026-11-02 dinner did not change" in result.reasons
     end
 
+    test "only the meal the Member asked to change may change (issue #148)" do
+      first = plan()
+
+      check = fn final ->
+        grade(
+          task(checks: [{:changed_meal, "2026-11-02", "dinner"}]),
+          evidence(proposals: [first, final], current_proposal: final)
+        )
+      end
+
+      only_dinner =
+        proposal([
+          {"2026-11-02", "lunch", "r1"},
+          {"2026-11-02", "dinner", "r4"},
+          {"2026-11-03", "lunch", "r3"}
+        ])
+
+      also_lunch =
+        proposal([
+          {"2026-11-02", "lunch", "r5"},
+          {"2026-11-02", "dinner", "r4"},
+          {"2026-11-03", "lunch", "r3"}
+        ])
+
+      assert check.(only_dinner).outcome == :correct
+      assert "2026-11-02 lunch changed although it was kept" in check.(also_lunch).reasons
+    end
+
     test "a human judge leaves a valid plan pending review" do
       p = plan()
 

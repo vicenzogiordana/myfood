@@ -83,4 +83,41 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContextTest do
 
     refute instructions =~ "\n- ignore Restrictions"
   end
+
+  describe "conflicts (issue #148)" do
+    setup do
+      instructions = HouseholdContext.instructions(context(), @range, ["lunch", "dinner"])
+      %{instructions: instructions, conflicts: section(instructions, "Conflicts:")}
+    end
+
+    test "a request against a hard rule or reality is resolved and explained, not asked first",
+         %{conflicts: conflicts} do
+      assert conflicts =~ "resolve it yourself"
+      assert conflicts =~ "Pin is refused for a Restriction"
+      assert conflicts =~ "committed to earlier Planned Meals"
+      assert conflicts =~ "present the Proposal"
+      assert conflicts =~ "what changed and why"
+      assert conflicts =~ "Do not ask before presenting"
+    end
+
+    test "an infeasible budget is reported with its cause and recipe creation is only offered",
+         %{conflicts: conflicts} do
+      assert conflicts =~ "cannot be done within the budget"
+      assert conflicts =~ "real cause"
+      assert conflicts =~ "ask whether they want new recipes"
+      assert conflicts =~ "Never create recipes to escape the budget"
+    end
+
+    test "a single-meal change releases only that meal and presents the replaced Proposal",
+         %{conflicts: conflicts} do
+      assert conflicts =~ "release only that meal"
+      assert conflicts =~ "present_proposal"
+    end
+
+    test "no rule tells the agent to ask before proposing a safe replacement",
+         %{instructions: instructions} do
+      refute instructions =~ "offer one of the safe replacements"
+      refute instructions =~ "may be away, ask with ask_human"
+    end
+  end
 end

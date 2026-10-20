@@ -7,8 +7,9 @@ defmodule MealPlannerApi.PlanningAgent.BatteryOptimizer do
   It keeps every fixed meal, then fills each free day and slot with the
   first candidate that is not on the previous or next day in the same slot
   and stays within the variety cap over any 7 days, counting the prior
-  meals. A candidate not yet planned anywhere is preferred, so a released
-  meal changes.
+  meals. It never takes an avoided recipe for its day and slot (a Released
+  Meal must change, issue #148). A candidate not yet planned anywhere is
+  preferred.
   """
 
   @behaviour MealPlannerApi.PlanningAgent.Optimizer
@@ -19,6 +20,7 @@ defmodule MealPlannerApi.PlanningAgent.BatteryOptimizer do
     prior = Enum.map(payload["prior_meals"] || [], &meal/1)
     fixed = Enum.map(payload["fixed_meals"] || [], &meal/1)
     fixed_keys = MapSet.new(fixed, &{&1.date, &1.slot})
+    avoided = MapSet.new(payload["avoided_meals"] || [], &meal/1)
 
     free =
       for day <- payload["days"],
@@ -28,7 +30,12 @@ defmodule MealPlannerApi.PlanningAgent.BatteryOptimizer do
 
     planned =
       Enum.reduce(free, fixed, fn {date, slot}, planned ->
-        ids = Enum.map(payload["candidates_by_slot"][slot], & &1["recipe_id"])
+        ids =
+          for candidate <- payload["candidates_by_slot"][slot],
+              id = candidate["recipe_id"],
+              not MapSet.member?(avoided, %{date: date, slot: slot, recipe_id: id}),
+              do: id
+
         placed = prior ++ planned
         allowed = Enum.filter(ids, &allowed?(&1, date, slot, placed, cap))
         unused = Enum.reject(allowed, fn id -> Enum.any?(placed, &(&1.recipe_id == id)) end)

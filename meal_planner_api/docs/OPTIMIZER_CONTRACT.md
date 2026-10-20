@@ -27,6 +27,7 @@ contract between the planning code and the solver (spec #93, issues #97, #98 and
 | `prior_meals` | Optional fixed context: the confirmed `{day, slot, recipe_id}` Planned Meals of the 6 days before the range, built by code (`MealPlannerApi.Optimization.Variety`). Never returned and never moved |
 | `excluded_recipe_ids` | Optional Excluded Recipes |
 | `fixed_meals` | Optional `{day, slot, recipe_id}` range meals that never move: Pins and, on a re-optimization, every meal of the previous Proposal that was not released. Each names a range day and slot and a candidate of that slot, at most once per day and slot (otherwise `invalid_fixed_meals`) |
+| `avoided_meals` | Optional `{day, slot, recipe_id}` range meals that must not take that recipe (otherwise `invalid_avoided_meals`): a Released Meal the Member asked to change avoids its previous recipe, and a recipe excluded for one run that a fixed meal keeps is avoided on every free meal instead of excluded everywhere. The recipe stays open on every other day and slot; a fixed meal is never avoided |
 | `time_limit_ms` | Solver deadline. Python defaults to 120 000, but `OptimizerServer` always sends one below its own timeout (`optimizer_timeout_ms` minus up to 1.5 s) and clamps larger caller values, so slow solves end as `inconclusive` or a feasible incumbent instead of an Elixir timeout |
 
 ## Goal policy
@@ -88,7 +89,7 @@ Errors (`{"type": "error", "error": …, "details": …}`):
 
 | `error` | Meaning |
 |---|---|
-| `infeasible` | A hard rule leaves a slot empty, and `details.causes` names each one: `{"cause": "coverage" \| "restriction" \| "excluded_recipe", "slot": …}` (with `day` when a fixed meal caused it); or the variety rules cannot be met: `[{"cause": "variety"}]` |
+| `infeasible` | A hard rule leaves a slot empty, and `details.causes` names each one: `{"cause": "coverage" \| "restriction" \| "excluded_recipe", "slot": …}` (with `day` when a fixed meal caused it), or `{"cause": "avoided_meal", "slot": …, "day": …}` when an avoided meal has no other candidate; or the variety rules cannot be met: `[{"cause": "variety"}]` |
 | `inconclusive` | The deadline passed before any plan was found (`details.reason = "time_limit"`). Never reported as infeasible |
 | `invalid_*`, `missing_payload` | Malformed request (including `invalid_variety_cap`, `invalid_prior_meals`, `invalid_fixed_meals`) |
 | `solver_unavailable`, `abnormal` | Solver fault |

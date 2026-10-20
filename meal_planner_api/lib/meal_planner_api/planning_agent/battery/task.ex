@@ -25,7 +25,8 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Task do
       `{:uses_ingredient, ingredient}` (a planned recipe uses it),
       `{:purchases_when_planned, ingredient}` (a planned recipe using the
       ingredient must buy it) and `{:changed_meal, date, slot}` (the final
-      Proposal changed that meal from the first one)
+      Proposal changed that meal from the first one and kept every other
+      meal)
     * `:tools` — prepared tool responses: `:scraper` (query to answer, see
       `MealPlannerApi.PlanningAgent.Battery.PreparedScraper`),
       `:recipe_search` (`:failing`) and `:optimizer` (`:unavailable`)

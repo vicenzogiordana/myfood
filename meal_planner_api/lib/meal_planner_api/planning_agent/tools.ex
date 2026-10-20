@@ -205,9 +205,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
         name: "run_optimizer",
         description:
           "Build a plan for every day and slot of the Planning Range with the optimizer. " <>
-            "Pins and every meal of the last Proposal that was not released stay fixed. " <>
-            "Optionally exclude more recipes for this run. Returns the plan with its " <>
-            "Deviations or a typed error.",
+            "Pins and every meal of the last Proposal that was not released stay fixed; a " <>
+            "meal released with release always gets a different recipe. Optionally exclude " <>
+            "more recipes for this run: they never replace a fixed meal, only the meals the " <>
+            "run may change. Returns the plan with its Deviations or a typed error.",
         parameters: %{
           "type" => "object",
           "properties" => %{
@@ -385,7 +386,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     with true <-
            map_size(drafts) < RecipeDraft.max_drafts() ||
              {:error, %{"error" => "draft_limit_reached"}},
-         {:ok, draft} <- RecipeDraft.build(args, ctx.household) do
+         {:ok, draft} <- RecipeDraft.build(args, ctx.household),
+         :ok <- not_escaping_budget(draft, ctx.workspace) do
       data = RecipeDraft.to_data(draft)
       emit(ctx, Map.put(data, "type", "recipe_draft"))
       workspace = Map.put(ctx.workspace, :recipe_drafts, Map.put(drafts, draft.id, draft))
@@ -438,12 +440,14 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       |> Enum.uniq()
 
     fixed = Workspace.fixed_meals(ctx.workspace)
+    {exclude_everywhere, avoided} = avoided_meals(ctx, exclude, fixed)
 
     with {:ok, candidates_by_slot} <- candidates(ctx, exclude),
          {:ok, candidates_by_slot} <- with_fixed_candidates(ctx, candidates_by_slot, fixed),
-         {:ok, payload} <- payload(ctx, candidates_by_slot, exclude, fixed),
+         {:ok, payload} <- payload(ctx, candidates_by_slot, exclude_everywhere, fixed, avoided),
          {:ok, solution} <- solve(ctx, payload),
-         :ok <- keeps_fixed(solution.meals, fixed) do
+         :ok <- keeps_fixed(solution.meals, fixed),
+         :ok <- changes_avoided(solution.meals, avoided) do
       names =
         candidates_by_slot
         |> Map.values()
@@ -518,7 +522,15 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             if(deviations == [], do: [], else: Purchase.brand_alternatives(purchase))
         }
 
-        {result, Workspace.present(ctx.workspace, proposal, meals), :continue}
+        conflict = budget_conflict(deviations, purchase, ctx.household.budget_cents)
+        result = if conflict, do: Map.put(result, "budget_conflict", conflict), else: result
+
+        workspace =
+          ctx.workspace
+          |> Workspace.present(proposal, meals)
+          |> Map.put(:budget_conflict, conflict)
+
+        {result, workspace, :continue}
 
       {:invalid, violations} ->
         {%{"status" => "invalid", "violations" => violations}, ctx.workspace, :continue}
@@ -644,6 +656,60 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
   defp run(_name, _arguments, ctx),
     do: {%{"error" => "unknown_tool"}, ctx.workspace, :continue}
+
+  # ---------------------------------------------------------------------------
+  # Infeasible budget (issue #148)
+  # ---------------------------------------------------------------------------
+
+  @budget_guidance "This Proposal breaks the budget. Try other existing recipes first " <>
+                     "(exclude the expensive ones and run the optimizer again). If no plan " <>
+                     "fits, tell the household it cannot be done within the budget, name the " <>
+                     "real cause (packages_over_budget lists every package that alone costs " <>
+                     "more than the whole budget) and ask with ask_human whether they want " <>
+                     "new recipes created. Never create recipes before they say yes."
+
+  # A budget Deviation is answered with its real cause and the guidance the
+  # agent must relay; nil when the Purchase fits the budget.
+  defp budget_conflict(deviations, purchase, budget_cents) do
+    case Enum.find(deviations, &(&1["type"] == "budget")) do
+      nil ->
+        nil
+
+      deviation ->
+        %{
+          "budget_cents" => budget_cents,
+          "purchase_total_cents" => purchase.total_cents,
+          "over_by_cents" => deviation["difference_cents"],
+          "packages_over_budget" =>
+            for line <- purchase.lines, line.offer.price_cents > budget_cents do
+              %{
+                "ingredient" => line.offer.ingredient,
+                "product" => line.offer.product,
+                "package_price_cents" => line.offer.price_cents
+              }
+            end,
+          "guidance" => @budget_guidance
+        }
+    end
+  end
+
+  # An AI-created Recipe Draft never escapes a budget Deviation the household
+  # has not answered yet: until their next message, only a recipe a Member
+  # dictates is built.
+  defp not_escaping_budget(draft, workspace) do
+    if RecipeDraft.plannable?(draft) and Map.get(workspace, :budget_conflict) != nil do
+      {:error,
+       %{
+         "error" => "new_recipes_not_requested",
+         "reason" =>
+           "The household has not asked for new recipes. Tell them the plan cannot fit the " <>
+             "budget with the existing recipes, name the cause and ask with ask_human " <>
+             "whether they want new recipes created."
+       }}
+    else
+      :ok
+    end
+  end
 
   # ---------------------------------------------------------------------------
   # Brands
@@ -841,7 +907,36 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   defp with_missing(result, missing),
     do: Map.merge(result, %{"outcome" => "partial", "missing" => missing})
 
-  defp payload(ctx, candidates_by_slot, exclude, fixed) do
+  # A Released Meal the household asked to change avoids its previous recipe
+  # (issue #148). A recipe excluded for this run that a fixed meal keeps is
+  # not excluded everywhere, which would make the fixed meal infeasible: it is
+  # avoided on every meal the run may change instead.
+  defp avoided_meals(ctx, exclude, fixed) do
+    fixed_keys = MapSet.new(fixed, &{&1.date, &1.slot})
+    kept_recipes = MapSet.new(fixed, & &1.recipe_id)
+    {kept_excluded, exclude_everywhere} = Enum.split_with(exclude, &(&1 in kept_recipes))
+    {from_date, to_date} = ctx.range
+
+    free_keys =
+      for date <- Date.range(from_date, to_date),
+          slot <- ctx.slots,
+          not MapSet.member?(fixed_keys, {date, slot}),
+          do: {date, slot}
+
+    run_avoided =
+      for {date, slot} <- free_keys, recipe_id <- kept_excluded do
+        %{date: date, slot: slot, recipe_id: recipe_id}
+      end
+
+    avoided =
+      (Workspace.avoided_meals(ctx.workspace) ++ run_avoided)
+      |> Enum.uniq()
+      |> Enum.sort_by(&{Date.to_iso8601(&1.date), &1.slot, &1.recipe_id})
+
+    {exclude_everywhere, avoided}
+  end
+
+  defp payload(ctx, candidates_by_slot, exclude, fixed, avoided) do
     {from_date, to_date} = ctx.range
 
     payload = %{
@@ -858,7 +953,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       },
       "candidates_by_slot" => candidates_by_slot,
       "excluded_recipe_ids" => exclude,
-      "fixed_meals" => Enum.map(fixed, &meal_key_data/1)
+      "fixed_meals" => Enum.map(fixed, &meal_key_data/1),
+      "avoided_meals" => Enum.map(avoided, &meal_key_data/1)
     }
 
     prior = Variety.prior_meals(ctx.account_id, from_date)
@@ -877,6 +973,16 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     if Enum.all?(fixed, &(Map.get(planned, {&1.date, &1.slot}) == &1.recipe_id)),
       do: :ok,
       else: {:error, :fixed_meal_moved, %{}}
+  end
+
+  # Code also guarantees that a Released Meal the household asked to change
+  # does not come back with the recipe it had.
+  defp changes_avoided(meals, avoided) do
+    planned = MapSet.new(meals, &{&1.date, &1.slot, &1.recipe_id})
+
+    if Enum.any?(avoided, &MapSet.member?(planned, {&1.date, &1.slot, &1.recipe_id})),
+      do: {:error, :released_meal_unchanged, %{}},
+      else: :ok
   end
 
   # The solver is never retried: a timeout is inconclusive, and every other

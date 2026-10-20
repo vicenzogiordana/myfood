@@ -418,4 +418,39 @@ defmodule MealPlannerApi.PlanningAgent.PurchaseToolsTest do
              }
     end
   end
+
+  describe "stock committed to earlier Planned Meals (issue #148, battery A6)" do
+    test "the plan is presented and buys the missing stock, without asking first",
+         %{household: h} do
+      rice = ingredient!("Fictitious rice")
+      rice_pot = recipe!("Fictitious rice pot", [rice])
+      product!(rice, name: "Fictitious rice 1 kg", package: {1_000_000, :g}, price_cents: 1_200)
+
+      # 100 g at home, already committed to a pending dinner before the range.
+      pantry!(h, rice, 100_000)
+      scheduled_meal!(h, ~D[2026-11-01], :dinner, rice_pot)
+
+      script = [
+        {:tool_calls, [{"get_pantry", %{}}]},
+        {:tool_calls, [{"run_optimizer", %{}}]},
+        {:tool_calls, [{"present_proposal", %{}}]},
+        {:text, "Your rice is already committed to Sunday's dinner, so the plan buys more."}
+      ]
+
+      {session_id, pid} = start!(h, script, range: {@monday, @monday})
+      :ok = Session.send_message(pid, "Use up the rice we have at home and plan Monday")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "proposal", "status" => "valid"} = proposal}
+
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "question"}}
+
+      # Nothing is left at home: the two Monday meals buy all 200 g.
+      assert [%{"ingredient" => name, "quantity_milli" => 200_000}] =
+               proposal["purchase"]["lines"]
+
+      assert name == rice.name
+    end
+  end
 end

@@ -12,6 +12,10 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
     * `excluded` — Excluded Recipes, never offered again in this session
     * `released` — `{date, slot}` meals of the last Proposal that the next
       `run_optimizer` may change; every other meal stays fixed
+    * `must_change` — the Released Meals released one by one: the household
+      asked to change them, so the next `run_optimizer` avoids their previous
+      recipe on that day and slot (issue #148). "Redo the whole week"
+      (`release_all`) releases without forcing a change
     * `variety_cap` — the session's variety cap
     * `recipe_drafts` — Recipe Drafts by id (`MealPlannerApi.PlanningAgent.RecipeDraft`)
     * `deviation_approval` / `absence_exceptions` — human-owned approvals,
@@ -23,6 +27,9 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
       (`%{ingredient: name, brand: brand}`), set with `set_session_brand`:
       they override the Household's Brand Preference for this session only
       and are discarded with it
+    * `budget_conflict` — the cause of the budget Deviation of the last
+      Proposal, while the household has not answered it: AI-created Recipe
+      Drafts are refused until their next message (issue #148)
 
   `edit/3` applies one edit or refuses it with a reason; approvals are human
   actions and can never be set here.
@@ -44,12 +51,14 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
             pins: %{},
             excluded: MapSet.new(),
             released: MapSet.new(),
+            must_change: MapSet.new(),
             variety_cap: 2,
             recipe_drafts: %{},
             deviation_approval: nil,
             absence_exceptions: [],
             price_refreshes: %{},
-            session_brands: %{}
+            session_brands: %{},
+            budget_conflict: nil
 
   @type key :: {Date.t(), String.t()}
   @type t :: %__MODULE__{
@@ -59,12 +68,14 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
           pins: %{key() => %{recipe_id: Ecto.UUID.t(), name: String.t()}},
           excluded: MapSet.t(Ecto.UUID.t()),
           released: MapSet.t(key()),
+          must_change: MapSet.t(key()),
           variety_cap: pos_integer(),
           recipe_drafts: %{Ecto.UUID.t() => term()},
           deviation_approval: map() | nil,
           absence_exceptions: [map()],
           price_refreshes: MealPlannerApi.PlanningAgent.Prices.refresh_memo(),
-          session_brands: %{Ecto.UUID.t() => %{ingredient: String.t(), brand: String.t()}}
+          session_brands: %{Ecto.UUID.t() => %{ingredient: String.t(), brand: String.t()}},
+          budget_conflict: map() | nil
         }
 
   @type ctx :: %{
@@ -129,7 +140,8 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
   def reason("restriction_conflict"),
     do:
       "This recipe conflicts with a household Restriction and cannot be pinned. " <>
-        "Offer one of the safe replacements instead."
+        "Pick one of the safe replacements yourself, plan and present the Proposal, then " <>
+        "tell the household what changed and why. Do not ask before presenting."
 
   def reason("recipe_excluded"), do: "The recipe is excluded in this session; include it first."
   def reason("recipe_pinned"), do: "The recipe is pinned; unpin it first."
@@ -168,12 +180,36 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
   end
 
   @doc """
+  The Released Meals the household asked to change, each with the recipe of
+  the last Proposal it must not keep: the next `run_optimizer` avoids that
+  recipe on that day and slot only.
+  """
+  @spec avoided_meals(t()) :: [%{date: Date.t(), slot: String.t(), recipe_id: Ecto.UUID.t()}]
+  def avoided_meals(%__MODULE__{} = ws) do
+    must_change = Map.get(ws, :must_change, MapSet.new())
+
+    for meal <- ws.proposed,
+        key = {meal.date, meal.slot},
+        MapSet.member?(must_change, key),
+        MapSet.member?(ws.released, key),
+        not Map.has_key?(ws.pins, key) do
+      %{date: meal.date, slot: meal.slot, recipe_id: meal.recipe_id}
+    end
+    |> Enum.sort_by(&{Date.to_iso8601(&1.date), &1.slot})
+  end
+
+  @doc """
   Voids the shown Proposal (it failed revalidation): its meals stop being
   the base of the next re-optimization, so nothing but the Pins stays fixed.
   """
   @spec void_proposal(t()) :: t()
   def void_proposal(%__MODULE__{} = ws),
-    do: %{ws | proposal: nil, proposed: [], released: MapSet.new()}
+    do:
+      Map.put(
+        %{ws | proposal: nil, proposed: [], released: MapSet.new()},
+        :must_change,
+        MapSet.new()
+      )
 
   @doc """
   Records a valid Proposal: its meals become the base of the next
@@ -182,7 +218,9 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
   @spec present(t(), map(), [map()]) :: t()
   def present(%__MODULE__{} = ws, proposal, meals) do
     proposed = Enum.map(meals, &Map.take(&1, [:date, :slot, :recipe_id, :name]))
-    %{ws | proposal: proposal, proposed: proposed, released: MapSet.new()}
+    # Snapshots stored before #148 lack `must_change`, hence `Map.put`.
+    ws = %{ws | proposal: proposal, proposed: proposed, released: MapSet.new()}
+    Map.put(ws, :must_change, MapSet.new())
   end
 
   @doc "The Workspace as `get_workspace` returns it to the agent."
@@ -280,7 +318,10 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
           {:error, "no_proposed_meal", %{}}
 
         true ->
-          {:ok, %{ws | released: MapSet.put(ws.released, key)}, %{"status" => "ok"}}
+          must_change = ws |> Map.get(:must_change, MapSet.new()) |> MapSet.put(key)
+          ws = Map.put(%{ws | released: MapSet.put(ws.released, key)}, :must_change, must_change)
+
+          {:ok, ws, %{"status" => "ok", "must_change" => true}}
       end
     end
   end

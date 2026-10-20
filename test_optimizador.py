@@ -660,6 +660,43 @@ class FixedMealTests(unittest.TestCase):
                 self.assertEqual(frame["error"], "invalid_fixed_meals")
 
 
+class AvoidedMealTests(unittest.TestCase):
+    """Avoided meals: a free meal that must not take one recipe (issue #148).
+
+    A Released Meal must change, so its previous recipe is avoided on that day
+    and slot only; the recipe stays open everywhere else.
+    """
+
+    def test_an_avoided_meal_takes_another_recipe_even_when_it_costs_more(self):
+        frame = solve_over_port(payload([recipe("cheap", cost=1), recipe("dear", cost=900)],
+                                        avoided_meals=[fixed("2026-09-07", "cheap")]))
+
+        self.assertEqual(frame["type"], "solution")
+        self.assertEqual(recipe_ids(frame["result"]), ["dear"])
+
+    def test_an_avoided_recipe_stays_open_on_every_other_meal(self):
+        result, error = _solve(payload([recipe("cheap", cost=1), recipe("dear", cost=900)],
+                                       days=["2026-09-07", "2026-09-09"],
+                                       avoided_meals=[fixed("2026-09-07", "cheap")]))
+
+        self.assertIsNone(error)
+        self.assertEqual(recipe_ids(result), ["dear", "cheap"])
+
+    def test_an_avoided_meal_without_another_candidate_is_infeasible_and_named(self):
+        frame = solve_over_port(payload([recipe("only")], avoided_meals=[fixed("2026-09-07", "only")]))
+
+        self.assertEqual(frame["error"], "infeasible")
+        self.assertEqual(frame["details"]["causes"],
+                         [{"cause": "avoided_meal", "slot": "lunch", "day": "2026-09-07"}])
+
+    def test_avoided_meals_must_name_a_range_meal(self):
+        for entries in ["x", [{"day": "2026-09-07", "slot": "lunch"}], [fixed("2026-09-08", "a")],
+                        [fixed("2026-09-07", "a", slot="dinner")]]:
+            with self.subTest(entries=entries):
+                frame = solve_over_port(payload([recipe("a"), recipe("b")], avoided_meals=entries))
+                self.assertEqual(frame["error"], "invalid_avoided_meals")
+
+
 class ScaleTests(unittest.TestCase):
     def test_a_ninety_meal_range_solves_well_within_the_deadline(self):
         days = [f"2026-10-{day:02d}" for day in range(1, 31)]

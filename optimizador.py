@@ -39,6 +39,13 @@ Payload:
                                released. Each names a range day and slot and a
                                candidate of that slot, at most once per day
                                and slot
+  avoided_meals                optional {"day","slot","recipe_id"} range meals
+                               that must not take that recipe: a Released
+                               Meal changes, so its previous recipe is avoided
+                               on that day and slot only and stays open
+                               everywhere else. When an avoided meal leaves its
+                               day and slot without a candidate the error is
+                               "infeasible" with the cause "avoided_meal"
   time_limit_ms                optional solver deadline (default 120 s)
 
 Result:
@@ -234,6 +241,12 @@ def _validate_payload(payload):
     if not _valid_fixed_meals(payload.get("fixed_meals", []), days, slots, candidates_by_slot):
         return "invalid_fixed_meals"
 
+    avoided = payload.get("avoided_meals", [])
+    if not isinstance(avoided, list) or not all(
+        _is_prior_meal(entry) and entry["day"] in days and entry["slot"] in slots for entry in avoided
+    ):
+        return "invalid_avoided_meals"
+
     return None
 
 
@@ -271,6 +284,27 @@ def _fixed_causes(payload):
             causes.append({"cause": "restriction", "slot": entry["slot"], "day": entry["day"]})
         elif entry["recipe_id"] in excluded:
             causes.append({"cause": "excluded_recipe", "slot": entry["slot"], "day": entry["day"]})
+    return causes
+
+
+def _avoided_meals(payload):
+    """{(day, slot): {recipe_id}} of the recipes a free meal must not take."""
+    avoided = {}
+    for entry in payload.get("avoided_meals", []):
+        avoided.setdefault((entry["day"], entry["slot"]), set()).add(entry["recipe_id"])
+    return avoided
+
+
+def _avoided_causes(payload, allowed_by_slot):
+    """An avoided meal never relaxes: without another candidate it is infeasible.
+
+    A fixed meal is never avoided: it keeps its recipe.
+    """
+    fixed = _fixed_meals(payload)
+    causes = []
+    for (day, slot), recipe_ids in sorted(_avoided_meals(payload).items()):
+        if (day, slot) not in fixed and all(candidate["recipe_id"] in recipe_ids for candidate in allowed_by_slot.get(slot, [])):
+            causes.append({"cause": "avoided_meal", "slot": slot, "day": day})
     return causes
 
 
@@ -322,6 +356,8 @@ def _solve(payload, create_solver=None):
     """Returns (result, None) or (None, (reason, details))."""
     allowed_by_slot, causes = _allowed_candidates(payload)
     causes = causes + _fixed_causes(payload)
+    if not causes:
+        causes = _avoided_causes(payload, allowed_by_slot)
     if causes:
         return None, ("infeasible", causes)
 
@@ -337,6 +373,7 @@ def _solve(payload, create_solver=None):
     deadline = time.monotonic() + float(payload.get("time_limit_ms", DEFAULT_TIME_LIMIT_MS)) / 1000.0
 
     fixed = _fixed_meals(payload)
+    avoided = _avoided_meals(payload)
 
     x = {}
     for day in days:
@@ -348,6 +385,9 @@ def _solve(payload, create_solver=None):
                 slot_vars.append(var)
                 # A fixed meal leaves only its own recipe open in its slot.
                 if (day, slot) in fixed and candidate["recipe_id"] != fixed[(day, slot)]:
+                    var.SetUb(0)
+                # An avoided meal closes only that recipe on that day and slot.
+                if (day, slot) not in fixed and candidate["recipe_id"] in avoided.get((day, slot), ()):
                     var.SetUb(0)
             # Full coverage is hard: exactly one recipe per (day, slot).
             solver.Add(solver.Sum(slot_vars) == 1)
