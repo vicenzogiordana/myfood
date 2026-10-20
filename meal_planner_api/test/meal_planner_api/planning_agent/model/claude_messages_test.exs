@@ -497,8 +497,9 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
       assert usage == %{input_tokens: 3_100, output_tokens: 50}
 
       # 100 at 1 + 1_000 at 1.25 + 2_000 at 0.1 + 50 at 4 USD/Mtok
-      # = 100 + 1_250 + 200 + 200 micro-USD.
-      assert %{spent_micros: 1_750, spent_tokens: 3_150, reserved_micros: 0} =
+      # = 100 + 1_250 + 200 + 200 micro-USD. Cache reads are paid but never
+      # count toward the token cap (issue #154): 100 + 1_000 + 50 tokens.
+      assert %{spent_micros: 1_750, spent_tokens: 1_150, reserved_micros: 0} =
                ClaudeMessages.spend(state)
     end
 
@@ -563,7 +564,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
 
       # 2_134 at 4 + 9_872 at 5 + 31_408 at 0.2 (rounded up) + 412 at 20
       # USD/MTok = 8_536 + 49_360 + 6_282 + 8_240 micro-USD.
-      assert %{spent_micros: 72_418, spent_tokens: 43_826, reserved_micros: 0} =
+      assert %{spent_micros: 72_418, spent_tokens: 12_418, reserved_micros: 0} =
                ClaudeMessages.spend(state)
     end
 
@@ -835,11 +836,51 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
       assert ClaudeMessages.spend(reserved).reserved_micros == bytes * 10 + 4_000
     end
 
+    test "the token reservation of a realistic ~40 KB request is far below the old estimate" do
+      test = self()
+
+      Req.Test.stub(@stub, fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(test, {:request_bytes, byte_size(raw)})
+        Req.Test.json(conn, text_response("ok"))
+      end)
+
+      # A long session: about 40 KB of tool results in the transcript.
+      recipes = for n <- 1..700, do: %{"id" => "recipe-#{n}", "name" => "Fictitious dish #{n}"}
+      result = %{role: :tool_result, id: "toolu_2", name: "search_recipes", content: recipes}
+      request = %{@request | messages: List.replace_at(@request.messages, -1, result)}
+
+      {:ok, state} = ClaudeMessages.init(opts(max_tokens: 16_000))
+      checkpoint = fn model_state -> send(test, {:checkpoint, model_state}) end
+
+      assert {:ok, _, _} =
+               ClaudeMessages.respond(state, Map.put(request, :checkpoint, checkpoint))
+
+      assert_received {:request_bytes, bytes}
+      assert_received {:checkpoint, reserved}
+      assert bytes in 35_000..50_000
+
+      # Old estimate: every byte as a token plus max_tokens, doubled for the
+      # fallback attempt. Now: bytes / 3 plus max_tokens, once.
+      old = 2 * (bytes + 16_000)
+      reserved_tokens = ClaudeMessages.spend(reserved).reserved_tokens
+
+      assert reserved_tokens == div(bytes + 2, 3) + 16_000
+      assert reserved_tokens * 3 < old
+
+      # The money reservation stays conservative: every byte as a token at
+      # the highest input-side price (cache write: 1.25 USD/Mtok, fallback
+      # 2.5), plus max_tokens, for the call and its fallback attempt.
+      primary = div(bytes * 1_250_000 + 999_999, 1_000_000) + 16_000 * 4
+      fallback = div(bytes * 2_500_000 + 999_999, 1_000_000) + 16_000 * 8
+      assert ClaudeMessages.spend(reserved).reserved_micros == primary + fallback
+    end
+
     test "the cumulative token cap stops further calls" do
       stub_response(text_response("ok", %{"input_tokens" => 900, "output_tokens" => 600}))
-      # Worst case per call: every request byte as a token plus 1_000 output
-      # tokens; after 1_500 spent tokens the next worst case no longer fits.
-      {:ok, state} = ClaudeMessages.init(opts(token_cap: 3_000, fallbacks: false))
+      # Reservation per call: the request bytes / 3 plus 1_000 output tokens
+      # (about 1_700); after 1_500 spent tokens the next one no longer fits.
+      {:ok, state} = ClaudeMessages.init(opts(token_cap: 2_400, fallbacks: false))
 
       assert {:ok, _, state} = ClaudeMessages.respond(state, @request)
       assert_received {:provider_called, _, _}

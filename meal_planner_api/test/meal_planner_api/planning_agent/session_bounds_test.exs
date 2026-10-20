@@ -146,9 +146,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
     for reason <- [
           :provider_unauthorized,
           :provider_rejected_request,
-          :provider_conflict,
-          :spend_cap_reached,
-          :token_cap_reached
+          :provider_conflict
         ] do
       test "a #{reason} error is not retried", %{household: h} do
         reason = unquote(reason)
@@ -159,6 +157,22 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
 
         assert_receive {:planning_agent_event, ^session_id,
                         %{"type" => "agent_unavailable", "reason" => ^expected}},
+                       1_000
+
+        assert model_requests() == 1
+        refute_received {:planning_agent_event, ^session_id, %{"step" => "retrying"}}
+      end
+    end
+
+    for {reason, limit} <- [spend_cap_reached: "spend_cap", token_cap_reached: "token_cap"] do
+      test "a #{reason} refusal is not retried and exhausts the session", %{household: h} do
+        {session_id, pid} = start!(h, [{:error, unquote(reason)}, {:text, "never"}])
+        limit = unquote(limit)
+
+        :ok = Session.send_message(pid, "Plan")
+
+        assert_receive {:planning_agent_event, ^session_id,
+                        %{"type" => "session_budget_exhausted", "limit" => ^limit}},
                        1_000
 
         assert model_requests() == 1
@@ -306,7 +320,37 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
     defp search_forever(query),
       do: fn _request -> {:tool_calls, [{"search_recipes", %{"query" => query}}]} end
 
-    test "iterations are counted per Planning Session, not per message", %{household: h} do
+    test "every Member message gets its own iterations (issue #154)", %{household: h} do
+      script = [
+        {:tool_calls, [{"search_recipes", %{"query" => "rice"}}]},
+        {:tool_calls, [{"search_recipes", %{"query" => "bowl"}}]},
+        {:text, "First answer."},
+        {:tool_calls, [{"search_recipes", %{"query" => "Fictitious"}}]},
+        {:tool_calls, [{"search_recipes", %{"query" => "rice bowl"}}]},
+        {:text, "Second answer."}
+      ]
+
+      # Every search finds a new recipe, so only the iteration limits apply.
+      steps = FakeRecipeSearch.steps!(Enum.map(1..4, &{:ok, [fake_recipe(&1)]}))
+
+      {session_id, pid} =
+        start!(h, script, max_iterations: 3, recipe_search: {FakeRecipeSearch, steps: steps})
+
+      :ok = Session.send_message(pid, "Plan")
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}, 1_000
+
+      # All three iterations were used; the new message gets three again.
+      :ok = Session.send_message(pid, "Plan more")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "assistant_message", "text" => "Second answer."}},
+                     1_000
+
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}, 1_000
+      assert model_requests() == 6
+    end
+
+    test "the session ceiling ends the Planning Session gracefully", %{household: h} do
       script = [
         {:tool_calls, [{"search_recipes", %{"query" => "rice"}}]},
         {:text, "First answer."},
@@ -314,23 +358,59 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
         {:text, "never"}
       ]
 
-      {session_id, pid} = start!(h, script, max_iterations: 3)
+      {session_id, pid} = start!(h, script, max_iterations: 3, max_session_iterations: 3)
+      ref = Process.monitor(pid)
 
       :ok = Session.send_message(pid, "Plan")
       assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}, 1_000
 
-      # Two of three iterations are used; the new message gets only one.
       :ok = Session.send_message(pid, "Plan more")
 
       assert_receive {:planning_agent_event, ^session_id,
-                      %{
-                        "type" => "limit_reached",
-                        "limit" => "iterations",
-                        "requires_authorization" => true
-                      }},
+                      %{"type" => "session_budget_exhausted", "limit" => "session_iterations"} =
+                        event},
                      1_000
 
+      assert event["message"] =~ "new planning session"
+      assert event["proposal"] == nil
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "run_finished"}}, 1_000
+
+      # Without a Proposal to confirm nothing is left to do: the session ends
+      # and releases the Household, so a new one can start.
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "session_ended"}}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
       assert model_requests() == 3
+    end
+
+    test "a call refused before reaching the provider is not counted", %{household: h} do
+      script = [
+        {:error, :provider_busy},
+        {:tool_calls, [{"search_recipes", %{"query" => "rice"}}]},
+        {:text, "Done."}
+      ]
+
+      no_retry = Map.put(@fast, :model, %{timeout_ms: 100, backoff_ms: 1, retries: 0})
+
+      {session_id, pid} =
+        start!(h, script, max_session_iterations: 2, call_policies: no_retry)
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "agent_unavailable", "reason" => "provider_busy"}},
+                     1_000
+
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "run_finished"}}, 1_000
+
+      # The refused call used none of the two iterations of the session.
+      :ok = Session.send_message(pid, "Plan again")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "assistant_message", "text" => "Done."}},
+                     1_000
+
+      refute_received {:planning_agent_event, ^session_id,
+                       %{"type" => "session_budget_exhausted"}}
     end
 
     test "after a limit, nothing runs until the Member authorizes continuing", %{household: h} do

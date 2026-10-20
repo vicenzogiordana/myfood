@@ -75,7 +75,7 @@ The working state of a Planning Session: the current Proposal, pinned, excluded 
 _Avoid_: Draft, scratchpad
 
 **Pin**:
-A Member's choice to fix a recipe to a day and meal slot for the rest of a Planning Session, whether it was already proposed or newly requested. It beats the variety cap but never a Restriction.
+A Member's choice to fix a recipe to a day and meal slot for the rest of a Planning Session, whether it was already proposed or newly requested; an AI-created Recipe Draft can be pinned too. It beats the variety cap but never a Restriction.
 _Avoid_: Protected meal, locked meal
 
 **Excluded Recipe**:
@@ -93,6 +93,10 @@ _Avoid_: Pause, abort
 **Cancel**:
 Ending a Planning Session without confirming: its Workspace is discarded and the Household can start a new Planning Session.
 _Avoid_: Stop, leave, close
+
+**Session Budget**:
+What the culinary agent may use in one Planning Session: a money cap (the real limit), a token cap (a safety net), up to 15 model calls per Member message and at most 60 per Planning Session. It is never extended. When it is exhausted the agent stops gracefully: the Member sees why and the latest Proposal, which can still be confirmed, and starts a new Planning Session to keep planning.
+_Avoid_: Quota, credits
 
 **Absence Grace**:
 The 15 minutes a Planning Session, its Workspace, its last Proposal and the Household's slot are kept after its Member leaves or disconnects, also across a server restart. Nothing runs or is saved while the Member is absent; only that Member, still active in the Household, can return. When it expires the Workspace is discarded and the slot released. A restart never resets it.
@@ -117,7 +121,7 @@ A recipe private to one Household, either AI-created (saved when a confirmed Pro
 _Avoid_: Custom recipe, my recipe
 
 **Recipe Draft**:
-A recipe the culinary agent built during a Planning Session that exists only in its Workspace until a confirmation saves it.
+A recipe the culinary agent built during a Planning Session that exists only in its Workspace until a confirmation saves it. Re-creating it revises the same Draft; a Draft missing only nutrition or prices is still usable.
 _Avoid_: Temporary recipe, generated recipe
 
 **Recipe Origin**:

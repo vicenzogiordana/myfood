@@ -68,7 +68,8 @@ end
 # Planning agent model adapter and aggregate limits. Every cap, price and
 # limit stays nil unless set, and paid execution is refused while any of them
 # is missing. The spend cap (micro-USD) and token cap apply per Planning
-# Session; the concurrency caps are global and the start rate limit applies
+# Session: the spend cap is the real limit, the token cap only a safety net
+# (issue #154); the concurrency caps are global and the start rate limit applies
 # per Household (issue #118). A malformed value (not a whole integer) reads
 # as unset instead of crashing boot, so the refusal applies.
 #

@@ -51,6 +51,15 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
   @max_step_length 1_000
   @max_quantity 100_000
   @known_slots ~w(breakfast lunch snack dinner)
+  @max_close_matches 5
+  @max_catalog_scan 200
+  @accented "áàâäéèêëíìîïóòôöúùûüñç"
+  @plain "aaaaeeeeiiiioooouuuunc"
+  @plain_by_accented @accented
+                     |> String.to_charlist()
+                     |> Enum.zip(String.to_charlist(@plain))
+                     |> Map.new()
+  @filler_words ~w(con para del los las sin and the with)
   @units %{"g" => :g, "ml" => :ml, "unit" => :unit}
   @nutrients [
     {"calories", :calories_per_100},
@@ -99,6 +108,11 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
           "type" => "string",
           "enum" => ["ai_created", "user_created"],
           "description" => "user_created only when a Member dictated this recipe"
+        },
+        "replaces_recipe_id" => %{
+          "type" => "string",
+          "description" =>
+            "Recipe id of a Draft of this chat to revise instead of adding a new Draft"
         },
         "ingredients" => %{
           "type" => "array",
@@ -177,7 +191,8 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
 
   @doc """
   The tool outcome of a Draft: `complete`, or `partial` naming whether
-  `nutrition` or `prices` are missing.
+  `nutrition` or `prices` are missing. A partial Draft is still usable: the
+  agent is told not to re-create it only for missing data (issue #154).
   """
   @spec outcome(t()) :: map()
   def outcome(draft) do
@@ -188,8 +203,37 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
 
     if missing == [],
       do: %{"outcome" => "complete"},
-      else: %{"outcome" => "partial", "missing" => missing}
+      else: %{
+        "outcome" => "partial",
+        "missing" => missing,
+        "usable" => true,
+        "note" =>
+          "The Draft is usable as is: plan it and present it. Missing nutrition or prices " <>
+            "come from the catalog, so do not re-create the Draft only for them."
+      }
   end
+
+  @doc """
+  The Draft of `drafts` the new Draft `draft` re-creates: the same name
+  (ignoring case and surrounding spaces) and the same Recipe Origin, or `nil`.
+  """
+  @spec same_recipe(%{Ecto.UUID.t() => t()}, t()) :: t() | nil
+  def same_recipe(drafts, draft) do
+    key = String.downcase(draft.name)
+
+    drafts
+    |> Map.values()
+    |> Enum.find(&(String.downcase(&1.name) == key and &1.source == draft.source))
+  end
+
+  @doc """
+  `draft` as a revision of `replaced`: it keeps the replaced Draft's id, so
+  Pins and Proposals that name it now use the revision. With `nil` the Draft
+  is new.
+  """
+  @spec revision(t(), t() | nil) :: t()
+  def revision(draft, nil), do: draft
+  def revision(draft, replaced), do: %{draft | id: replaced.id}
 
   @doc """
   The Drafts of a session or tool context, by id: `ctx.recipe_drafts`, else
@@ -402,13 +446,99 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
         {:ok, ingredients, Map.new(catalog, fn {_, i} -> {i.id, i} end)}
 
       unknown ->
+        names = unknown |> Enum.map(& &1.name) |> Enum.uniq()
+
         {:error,
          %{
            "error" => "unknown_ingredients",
-           "ingredients" => unknown |> Enum.map(& &1.name) |> Enum.uniq()
+           "ingredients" => names,
+           "close_matches" => close_matches(names),
+           "hint" =>
+             "Retry with catalog names from close_matches, or drop the Ingredient. " <>
+               "search_recipes finds recipes, not Ingredients."
          }}
     end
   end
+
+  # Close catalog matches of unknown Ingredient names (issue #154): catalog
+  # names sharing a word with the request (accents, case and a plural ending
+  # ignored), best first.
+  defp close_matches(names) do
+    words_by_name = Map.new(names, &{&1, words(&1)})
+    words = words_by_name |> Map.values() |> List.flatten() |> Enum.uniq()
+    catalog = catalog_with_words(words)
+
+    Enum.map(names, fn name ->
+      %{"ingredient" => name, "matches" => rank(name, words_by_name[name], catalog)}
+    end)
+  end
+
+  defp catalog_with_words([]), do: []
+
+  defp catalog_with_words(words) do
+    condition =
+      Enum.reduce(words, dynamic(false), fn word, acc ->
+        dynamic(
+          [i],
+          ^acc or
+            fragment("translate(lower(?), ?, ?) LIKE ?", i.name, @accented, @plain, ^"%#{word}%")
+        )
+      end)
+
+    from(i in Ingredient, where: ^condition, select: i.name, limit: @max_catalog_scan)
+    |> Repo.all()
+  end
+
+  defp rank(_name, [], _catalog), do: []
+
+  defp rank(name, words, catalog) do
+    wanted = normalize(name)
+
+    catalog
+    |> Enum.map(fn candidate ->
+      plain = normalize(candidate)
+      shared = Enum.count(words, &String.contains?(plain, &1))
+      {candidate, shared, String.jaro_distance(wanted, plain)}
+    end)
+    |> Enum.filter(fn {_candidate, shared, _similarity} -> shared > 0 end)
+    |> Enum.sort_by(fn {candidate, shared, similarity} -> {-shared, -similarity, candidate} end)
+    |> Enum.take(@max_close_matches)
+    |> Enum.map(&elem(&1, 0))
+  end
+
+  # Words of three letters or more, without a plural ending.
+  defp words(name) do
+    name
+    |> normalize()
+    |> String.split(~r/[^a-z0-9]+/, trim: true)
+    |> Enum.filter(&(String.length(&1) >= 3 and &1 not in @filler_words))
+    |> Enum.map(&singular/1)
+    |> Enum.uniq()
+  end
+
+  defp singular(word) do
+    cond do
+      String.length(word) > 4 and String.ends_with?(word, "es") -> String.slice(word, 0..-3//1)
+      String.length(word) > 3 and String.ends_with?(word, "s") -> String.slice(word, 0..-2//1)
+      true -> word
+    end
+  end
+
+  defp normalize(name) do
+    name
+    |> String.downcase()
+    |> String.to_charlist()
+    |> Enum.map(fn char -> Map.get(@plain_by_accented, char, char) end)
+    |> List.to_string()
+  end
+
+  @doc """
+  Whether the Draft's Ingredients break a Restriction of the Household
+  context `household` (an allergy, or a reviewed tag it forbids), read now.
+  """
+  @spec restricted?(t(), map()) :: boolean()
+  def restricted?(draft, household),
+    do: restriction_check(:ai_generated, draft.ingredients, household) != :ok
 
   defp restriction_check(:user_created, _ingredients, _household), do: :ok
 

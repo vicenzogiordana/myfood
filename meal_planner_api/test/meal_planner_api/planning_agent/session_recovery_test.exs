@@ -227,7 +227,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionRecoveryTest do
 
     test "limits are not reset by a restart", %{household: h, member: member} do
       {session_id, pid} =
-        start!(h, member, [{:text, "One"}], subscriber: self(), max_iterations: 1)
+        start!(h, member, [{:text, "One"}], subscriber: self(), max_session_iterations: 1)
 
       :ok = Session.send_message(pid, "Plan")
       assert_receive {:scripted_model_request, _}, 2_000
@@ -235,11 +235,14 @@ defmodule MealPlannerApi.PlanningAgent.SessionRecoveryTest do
 
       restart!(pid)
 
-      assert {:ok, %{pid: recovered}} = resume(h, member, [{:text, "Two"}], max_iterations: 10)
+      assert {:ok, %{pid: recovered}} =
+               resume(h, member, [{:text, "Two"}], max_session_iterations: 1)
+
       :ok = Session.send_message(recovered, "More")
 
+      # The iteration counted before the restart still counts.
       assert_receive {:planning_agent_event, ^session_id,
-                      %{"type" => "limit_reached", "limit" => "iterations"}},
+                      %{"type" => "session_budget_exhausted", "limit" => "session_iterations"}},
                      2_000
 
       refute_received {:scripted_model_request, _}

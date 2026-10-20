@@ -52,16 +52,19 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
 
   ## Spend
 
-  Exactly as `MealPlannerApi.PlanningAgent.Model.OpenAIResponses`: `init/1`
-  refuses without caps (`:spend_caps_unconfigured`), prices
-  (`:pricing_unconfigured`) or API key (`:provider_unconfigured`). Before
-  each call the worst case is reserved and reported through the request's
-  `:checkpoint`: every request byte counted as one input token at the
-  highest of the input, cache-write and cache-read prices, plus
-  `max_tokens` output, for the requested model and for each of
-  `max_fallback_attempts` fallback attempts at the fallback prices.
-  Afterwards it is settled from `usage`: input, cache write, cache read and
-  output tokens, summed over every attempt of `usage.iterations`. The
+  `init/1` refuses without caps (`:spend_caps_unconfigured`), prices
+  (`:pricing_unconfigured`) or API key (`:provider_unconfigured`). The
+  money cap is the real limit; the token cap is a safety net (issue #154).
+  Before each call a reservation is made and reported through the
+  request's `:checkpoint`. Money is the worst case: every request byte
+  counted as one input token at the highest of the input, cache-write and
+  cache-read prices, plus `max_tokens` output, for the requested model and
+  for each of `max_fallback_attempts` fallback attempts at the fallback
+  prices. Tokens are a realistic estimate: the request bytes divided by
+  three, plus `max_tokens` once. Afterwards both are settled from `usage`:
+  input, cache write, cache read and output tokens, summed over every
+  attempt of `usage.iterations`. Cache reads are paid at their price but
+  never count toward the token cap. The
   iteration `type` says which model ran it: a `fallback_message` iteration
   is priced at the fallback prices, any other iteration at the requested
   model's prices. The `model` string of the response or of an iteration is
@@ -122,6 +125,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
   @efforts ~w(low medium high xhigh max)
   @finished ~w(end_turn tool_use stop_sequence)
   @ephemeral %{"type" => "ephemeral"}
+  @bytes_per_token 3
 
   @defaults [
     model: "claude-opus-5-5",
@@ -416,7 +420,15 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
         PaidCall.micros(input, prices.input) + PaidCall.micros(write, prices.cache_write) +
           PaidCall.micros(read, prices.cache_read) + PaidCall.micros(output, prices.output)
 
-      {:ok, %{prompt: input + write + read, output: output, micros: micros}}
+      # Cache reads are paid (at their price) but never count toward the
+      # token cap, a safety net beside the money cap (issue #154).
+      {:ok,
+       %{
+         prompt: input + write + read,
+         capped: input + write + output,
+         output: output,
+         micros: micros
+       }}
     else
       :unknown
     end
@@ -428,9 +440,9 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
       prompt = attempts |> Enum.map(& &1.prompt) |> Enum.sum()
       output = attempts |> Enum.map(& &1.output) |> Enum.sum()
       micros = attempts |> Enum.map(& &1.micros) |> Enum.sum()
+      tokens = attempts |> Enum.map(& &1.capped) |> Enum.sum()
 
-      {:ok, %{input_tokens: prompt, output_tokens: output},
-       %{micros: micros, tokens: prompt + output}}
+      {:ok, %{input_tokens: prompt, output_tokens: output}, %{micros: micros, tokens: tokens}}
     else
       :unknown
     end
@@ -468,27 +480,32 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
   # Spend
   # ---------------------------------------------------------------------------
 
+  # The money reservation is the conservative worst case. The token
+  # reservation is a realistic estimate (issue #154): the token cap is only a
+  # safety net, so it reserves the request at three bytes per token plus
+  # `max_tokens` once, never doubled for a fallback attempt.
   defp worst_case(config, body) do
     input = body |> Jason.encode!() |> byte_size()
-    first = attempt_worst_case(primary_prices(config), input, config.max_tokens)
+    first = attempt_worst_micros(primary_prices(config), input, config.max_tokens)
 
-    if config.fallbacks do
-      fallback = attempt_worst_case(fallback_prices(config), input, config.max_tokens)
-      n = config.max_fallback_attempts
-      %{micros: first.micros + n * fallback.micros, tokens: first.tokens + n * fallback.tokens}
-    else
-      first
-    end
-  end
+    micros =
+      if config.fallbacks do
+        fallback = attempt_worst_micros(fallback_prices(config), input, config.max_tokens)
+        first + config.max_fallback_attempts * fallback
+      else
+        first
+      end
 
-  defp attempt_worst_case(prices, input, output) do
     %{
-      micros:
-        PaidCall.micros(input, Enum.max([prices.input, prices.cache_write, prices.cache_read])) +
-          PaidCall.micros(output, prices.output),
-      tokens: input + output
+      micros: micros,
+      tokens: div(input + @bytes_per_token - 1, @bytes_per_token) + config.max_tokens
     }
   end
+
+  defp attempt_worst_micros(prices, input, output),
+    do:
+      PaidCall.micros(input, Enum.max([prices.input, prices.cache_write, prices.cache_read])) +
+        PaidCall.micros(output, prices.output)
 
   defp with_cache_prices(config) do
     input = config[:input_price_micros_per_mtok]

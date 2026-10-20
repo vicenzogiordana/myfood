@@ -23,7 +23,7 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
     * `give_consent` — records the Member's consent to external AI use.
     * `send_message` — `%{"text"}`; replies `:ok` or
       `%{reason: "consent_required" | "busy" | "invalid_message" | "message_too_long" |
-      "authorization_required"}`.
+      "authorization_required" | "session_budget_exhausted"}`.
     * `authorize_continuation` — the session Member authorizes continuing
       after a `limit_reached` event; replies `:ok` or
       `%{reason: "forbidden" | "no_limit_reached"}`.

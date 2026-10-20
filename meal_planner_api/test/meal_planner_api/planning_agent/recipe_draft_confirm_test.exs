@@ -182,4 +182,127 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraftConfirmTest do
     assert_receive {:scripted_model_request, %{messages: messages}}
     assert %{role: :tool_result, content: %{"error" => "recipe_not_found"}} = List.last(messages)
   end
+
+  describe "pinning a Draft (issue #154)" do
+    # Pins the Draft the previous tool result created to Monday's dinner.
+    defp pin_created_draft(slot) do
+      fn %{messages: messages} ->
+        %{role: :tool_result, content: %{"recipe_id" => id}} = List.last(messages)
+
+        {:tool_calls,
+         [
+           {"edit_workspace",
+            %{
+              "action" => "pin",
+              "date" => Date.to_iso8601(@monday),
+              "slot" => slot,
+              "recipe_id" => id
+            }}
+         ]}
+      end
+    end
+
+    defp run_pin_script(household, script) do
+      attrs = session_attrs(household, household.owner, {@monday, @monday})
+
+      {:ok, %{session_id: session_id, pid: pid}} =
+        Session.start(attrs,
+          model: {Scripted, script: script, notify: self()},
+          optimizer: {FakeOptimizer, []},
+          subscriber: self()
+        )
+
+      :ok = Session.send_message(pid, "Plan Monday with the new recipe for dinner")
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "run_finished"}}
+      session_id
+    end
+
+    defp tool_results do
+      receive do
+        {:scripted_model_request, %{messages: messages}} ->
+          later = tool_results()
+          if later == [], do: for(%{role: :tool_result} = m <- messages, do: m), else: later
+      after
+        0 -> []
+      end
+    end
+
+    test "create_recipe -> pin the Draft -> run_optimizer -> present_proposal succeeds",
+         %{household: h} = ctx do
+      script = [
+        {:tool_calls, [{"create_recipe", draft_args(ctx)}]},
+        pin_created_draft("dinner"),
+        {:tool_calls, [{"run_optimizer", %{}}]},
+        {:tool_calls, [{"present_proposal", %{}}]},
+        {:text, "Here is the plan."}
+      ]
+
+      session_id = run_pin_script(h, script)
+
+      assert_received {:planning_agent_event, ^session_id,
+                       %{"type" => "recipe_draft", "recipe_id" => draft_id}}
+
+      assert_received {:planning_agent_event, ^session_id,
+                       %{"type" => "proposal", "status" => "valid"} = proposal}
+
+      dinner = Enum.find(proposal["meals"], &(&1["slot"] == "dinner"))
+      assert dinner["recipe_id"] == draft_id
+      assert dinner["draft"] == true
+
+      [_created, %{content: pinned} | _] = tool_results()
+      assert pinned["status"] == "ok"
+      assert pinned["pinned"]["recipe_id"] == draft_id
+      assert pinned["pinned"]["name"] == @draft_name
+    end
+
+    test "a Draft cannot be pinned to a slot it is not for", %{household: h} = ctx do
+      args = Map.put(draft_args(ctx), "slots", ["lunch"])
+
+      script = [
+        {:tool_calls, [{"create_recipe", args}]},
+        pin_created_draft("dinner"),
+        {:text, "done"}
+      ]
+
+      _session_id = run_pin_script(h, script)
+      [_created, %{content: refused}] = tool_results()
+      assert refused["error"] == "recipe_not_for_slot"
+    end
+
+    test "a dictated Draft cannot be pinned until the Member saves it", %{household: h} = ctx do
+      args = Map.put(draft_args(ctx), "origin", "user_created")
+
+      script = [
+        {:tool_calls, [{"create_recipe", args}]},
+        pin_created_draft("dinner"),
+        {:text, "done"}
+      ]
+
+      _session_id = run_pin_script(h, script)
+      [_created, %{content: refused}] = tool_results()
+      assert refused["error"] == "recipe_not_plannable"
+    end
+
+    test "a Draft breaking a guest's Restriction cannot be pinned to that meal",
+         %{household: h} = ctx do
+      guests = %{
+        "action" => "set_guests",
+        "date" => Date.to_iso8601(@monday),
+        "slot" => "dinner",
+        "guests" => 2,
+        "guest_restrictions" => ["vegetarian"]
+      }
+
+      script = [
+        {:tool_calls, [{"edit_workspace", guests}]},
+        {:tool_calls, [{"create_recipe", draft_args(ctx)}]},
+        pin_created_draft("dinner"),
+        {:text, "done"}
+      ]
+
+      _session_id = run_pin_script(h, script)
+      [_guests, _created, %{content: refused}] = tool_results()
+      assert refused["error"] == "restriction_conflict"
+    end
+  end
 end

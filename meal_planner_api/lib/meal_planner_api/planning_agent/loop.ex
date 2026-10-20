@@ -43,6 +43,7 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
           | {:limit_reached, String.t()}
           | {:failed, term()}
           | {:interrupted, :member_absent}
+          | {:exhausted, String.t()}
 
   @doc "Runs a turn and returns its outcome with the updated conversation state."
   @spec run(turn()) :: %{
@@ -64,6 +65,9 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
 
         {:limit, limit} ->
           finish(turn, {:limit_reached, limit})
+
+        {:exhausted, limit} ->
+          finish(turn, {:exhausted, limit})
       end
     else
       finish(turn, {:interrupted, :member_absent})
@@ -98,7 +102,7 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
 
     {_status, _result, model_state} = response
     checkpoint.(model_state)
-    turn = %{turn | model_state: model_state}
+    turn = %{turn | model_state: model_state} |> refund_refused(response)
 
     case response do
       {:ok, %{tool_calls: [_ | _] = calls}, _model_state} ->
@@ -118,10 +122,32 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
       {:error, :timeout, _model_state} ->
         finish(turn, {:failed, :provider_timeout})
 
+      # The Planning Session's spend caps are never extended (issue #154).
+      {:error, :spend_cap_reached, _model_state} ->
+        finish(turn, {:exhausted, "spend_cap"})
+
+      {:error, :token_cap_reached, _model_state} ->
+        finish(turn, {:exhausted, "token_cap"})
+
       {:error, reason, _model_state} ->
         finish(turn, {:failed, reason})
     end
   end
+
+  # A call refused before it reached the provider (no spend, no provider
+  # work) is not an iteration (issue #154).
+  @refused_before_provider [
+    :spend_cap_reached,
+    :token_cap_reached,
+    :provider_busy,
+    :spend_caps_unconfigured
+  ]
+
+  defp refund_refused(turn, {:error, reason, _model_state})
+       when reason in @refused_before_provider,
+       do: put_allowance(turn, Allowance.refund_iteration(turn.allowance))
+
+  defp refund_refused(turn, _response), do: turn
 
   defp after_attempt(turn, fingerprints) do
     case Allowance.record_attempt(turn.allowance, fingerprints) do
