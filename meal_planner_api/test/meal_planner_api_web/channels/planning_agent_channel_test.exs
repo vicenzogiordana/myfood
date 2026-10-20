@@ -269,13 +269,33 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
       "requires_authorization" => true
     })
 
-    ref = push(socket, "send_message", %{"text" => "Go on"})
-    assert_reply(ref, :error, %{reason: "authorization_required"})
-
     ref = push(socket, "authorize_continuation", %{})
     assert_reply(ref, :ok, _)
 
     assert_push("agent_event", %{"type" => "assistant_message", "text" => "Continued."})
+    cancel!(socket)
+  end
+
+  # Issue #158: a new message after a limit authorizes continuing by itself.
+  test "after a limit a new message starts a new run through the channel", %{household: h} do
+    search = {:tool_calls, [{"search_recipes", %{"query" => "soup"}}]}
+    configure_agent(List.duplicate(search, 4) ++ [{:text, "Planned without soup."}])
+
+    socket = join!(h, h.owner)
+    ref = push(socket, "start_session", @range)
+    assert_reply(ref, :ok, _)
+    ref = push(socket, "give_consent", %{})
+    assert_reply(ref, :ok, _)
+
+    ref = push(socket, "send_message", %{"text" => "Plan dinner"})
+    assert_reply(ref, :ok, _)
+    assert_push("agent_event", %{"type" => "limit_reached", "limit" => "no_progress"})
+
+    ref = push(socket, "send_message", %{"text" => "Forget the soup"})
+    assert_reply(ref, :ok, _)
+
+    assert_push("agent_event", %{"type" => "assistant_message", "text" => "Planned without soup."})
+
     cancel!(socket)
   end
 

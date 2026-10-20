@@ -114,10 +114,54 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContextTest do
       assert conflicts =~ "present_proposal"
     end
 
+    test "a plan limited to what no recipe has still presents nothing and asks (issue #156)",
+         %{conflicts: conflicts} do
+      assert conflicts =~ "only recipes with X"
+      assert conflicts =~ "present no Proposal"
+      assert conflicts =~ "ask whether they want new recipes created"
+    end
+
     test "no rule tells the agent to ask before proposing a safe replacement",
          %{instructions: instructions} do
       refute instructions =~ "offer one of the safe replacements"
       refute instructions =~ "may be away, ask with ask_human"
+    end
+  end
+
+  describe "requested dishes (issue #158)" do
+    setup do
+      instructions = HouseholdContext.instructions(context(), @range, ["lunch", "dinner"])
+      %{instructions: instructions, dishes: section(instructions, "Requested dishes:")}
+    end
+
+    test "a requested dish no recipe provides is created directly and disclosed as AI-made",
+         %{dishes: dishes} do
+      assert dishes =~ "no recipe provides"
+      assert dishes =~ "create it directly with create_recipe (origin ai_created)"
+      assert dishes =~ "without asking first"
+      assert dishes =~ "pin it to that meal"
+      assert dishes =~ "created with AI and may contain errors"
+    end
+
+    test "creating a requested dish never overrides the budget or a plan-wide limit",
+         %{dishes: dishes} do
+      assert dishes =~ "never to escape the budget"
+      assert dishes =~ "\"only recipes with X\" limit"
+    end
+
+    test "an Ingredient missing from the catalog is reported, never guessed",
+         %{dishes: dishes} do
+      assert dishes =~ "missing_from_catalog"
+      assert dishes =~ "do not retry it under other names"
+      assert dishes =~ "there is no flour in the catalog, so I can't make the pizza"
+      assert dishes =~ "plan the rest"
+      assert dishes =~ "leave that meal for the household to decide"
+      assert dishes =~ "Ask nothing else"
+    end
+
+    test "no rule tells the agent to plan a requested dish with another recipe",
+         %{instructions: instructions} do
+      refute instructions =~ "plan with the closest recipe and say so"
     end
   end
 end
