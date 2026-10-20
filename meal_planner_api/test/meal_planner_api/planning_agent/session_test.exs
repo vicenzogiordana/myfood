@@ -242,7 +242,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
       :ok = Session.authorize_continuation(pid, owner.membership_id)
 
       assert_receive {:planning_agent_event, ^session_id,
-                      %{"type" => "agent_unavailable", "reason" => "spend_cap_reached"}},
+                      %{"type" => "session_budget_exhausted", "limit" => "spend_cap"}},
                      1_000
     end
 
@@ -280,12 +280,14 @@ defmodule MealPlannerApi.PlanningAgent.SessionTest do
 
       assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
 
+      ref = Process.monitor(pid)
       :ok = Session.send_message(pid, "Plan again")
 
       assert_receive {:planning_agent_event, ^session_id,
-                      %{"type" => "agent_unavailable", "reason" => "token_cap_reached"}}
+                      %{"type" => "session_budget_exhausted", "limit" => "token_cap"}}
 
-      :ok = Session.cancel(pid, %{membership_id: owner.membership_id, owner?: true})
+      # Without a Proposal the exhausted session ends and frees the Household.
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
 
       {next_session_id, next_pid} = start!(h, owner, [], model: {OpenAIResponses, model_opts})
       :ok = Session.send_message(next_pid, "Plan")

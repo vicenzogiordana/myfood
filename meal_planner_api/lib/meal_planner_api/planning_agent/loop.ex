@@ -122,6 +122,13 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
       {:error, :timeout, _model_state} ->
         finish(turn, {:failed, :provider_timeout})
 
+      # The Planning Session's spend caps are never extended (issue #154).
+      {:error, :spend_cap_reached, _model_state} ->
+        finish(turn, {:exhausted, "spend_cap"})
+
+      {:error, :token_cap_reached, _model_state} ->
+        finish(turn, {:exhausted, "token_cap"})
+
       {:error, reason, _model_state} ->
         finish(turn, {:failed, reason})
     end

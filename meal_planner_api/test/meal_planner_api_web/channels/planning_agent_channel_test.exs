@@ -279,6 +279,41 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     cancel!(socket)
   end
 
+  test "an exhausted budget is forwarded with its message and the latest Proposal",
+       %{household: h} do
+    configure_agent([
+      {:tool_calls, [{"run_optimizer", %{}}]},
+      {:tool_calls, [{"present_proposal", %{}}]},
+      {:error, :spend_cap_reached}
+    ])
+
+    socket = join!(h, h.owner)
+    ref = push(socket, "start_session", @range)
+    assert_reply(ref, :ok, %{session_id: session_id})
+    ref = push(socket, "give_consent", %{})
+    assert_reply(ref, :ok, _)
+
+    ref = push(socket, "send_message", %{"text" => "Plan dinner"})
+    assert_reply(ref, :ok, _)
+
+    assert_push("agent_event", %{"type" => "proposal", "proposal_id" => proposal_id})
+
+    assert_push("agent_event", %{
+      "type" => "session_budget_exhausted",
+      "session_id" => ^session_id,
+      "limit" => "spend_cap",
+      "message" => message,
+      "proposal" => %{"proposal_id" => ^proposal_id}
+    })
+
+    assert message =~ "new planning session"
+    refute_push("agent_event", %{"type" => "agent_unavailable"}, 100)
+
+    ref = push(socket, "send_message", %{"text" => "Again"})
+    assert_reply(ref, :error, %{reason: "session_budget_exhausted"})
+    cancel!(socket)
+  end
+
   test "after consent a message produces a validated Proposal event", %{household: h} do
     socket = join!(h, h.owner)
     ref = push(socket, "start_session", @range)

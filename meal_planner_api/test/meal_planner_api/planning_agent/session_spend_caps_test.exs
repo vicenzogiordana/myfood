@@ -74,7 +74,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionSpendCapsTest do
     :ok = Session.send_message(pid, "Plan again")
 
     assert_receive {:planning_agent_event, ^session_id,
-                    %{"type" => "agent_unavailable", "reason" => "spend_cap_reached"}},
+                    %{"type" => "session_budget_exhausted", "limit" => "spend_cap"}},
                    2_000
 
     refute_received :provider_called
@@ -91,7 +91,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionSpendCapsTest do
     :ok = Session.send_message(pid, "Plan again")
 
     assert_receive {:planning_agent_event, ^session_id,
-                    %{"type" => "agent_unavailable", "reason" => "token_cap_reached"}},
+                    %{"type" => "session_budget_exhausted", "limit" => "token_cap"}},
                    2_000
 
     refute_received :provider_called

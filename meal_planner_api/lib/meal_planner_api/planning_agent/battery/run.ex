@@ -43,8 +43,8 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Run do
   `:session_opts` and `:ceiling_capped` (whether the run's spend cap is the
   battery's remaining ceiling).
 
-  A run whose model call the ceiling refused (`:ceiling_capped` and an
-  `agent_unavailable` event with reason `spend_cap_reached`) never reached
+  A run whose model call the ceiling refused (`:ceiling_capped` and a
+  `session_budget_exhausted` event with limit `spend_cap`) never reached
   the model in full: it is recorded with the outcome `:not_run`, never
   graded.
   """
@@ -68,7 +68,7 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Run do
   end
 
   defp grade(task, evidence, ctx) do
-    if Map.get(ctx, :ceiling_capped, false) and "spend_cap_reached" in evidence.unavailable do
+    if Map.get(ctx, :ceiling_capped, false) and "spend_cap" in evidence.exhausted do
       %{
         outcome: :not_run,
         violations: [],
@@ -197,7 +197,28 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Run do
     case Session.send_message(run.pid, text) do
       :ok ->
         state = collect(state, run)
-        %{state | current: Session.current_proposal(run.pid) || state.current}
+
+        case Enum.find(state.events, &(&1["type"] == "session_budget_exhausted")) do
+          nil ->
+            %{state | current: Session.current_proposal(run.pid) || state.current}
+
+          # The session may already have ended: its last Proposal comes with
+          # the event, and no later message is sent.
+          exhausted ->
+            %{
+              state
+              | current: exhausted["proposal"] || state.current,
+                halted: true,
+                notes: ["session budget exhausted: #{exhausted["limit"]}" | state.notes]
+            }
+        end
+
+      {:error, :session_budget_exhausted} ->
+        %{
+          state
+          | halted: true,
+            notes: ["message not sent: session budget exhausted" | state.notes]
+        }
 
       {:error, :authorization_required} ->
         # A limit stopped the run and the Member never authorizes more.
@@ -291,6 +312,7 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Run do
       limits: [],
       run_outcomes: [],
       unavailable: [],
+      exhausted: [],
       event_types: [],
       confirmations: [],
       saved: %{planned_meals: 0, shopping_lines: 0, household_recipes: 0},
@@ -310,6 +332,7 @@ defmodule MealPlannerApi.PlanningAgent.Battery.Run do
       limits: Enum.map(of.("limit_reached"), & &1["limit"]),
       run_outcomes: Enum.map(of.("run_finished"), & &1["outcome"]),
       unavailable: Enum.map(of.("agent_unavailable"), & &1["reason"]),
+      exhausted: Enum.map(of.("session_budget_exhausted"), & &1["limit"]),
       event_types: Enum.map(events, & &1["type"])
     }
   end

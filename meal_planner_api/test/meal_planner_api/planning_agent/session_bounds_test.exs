@@ -146,9 +146,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
     for reason <- [
           :provider_unauthorized,
           :provider_rejected_request,
-          :provider_conflict,
-          :spend_cap_reached,
-          :token_cap_reached
+          :provider_conflict
         ] do
       test "a #{reason} error is not retried", %{household: h} do
         reason = unquote(reason)
@@ -159,6 +157,22 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
 
         assert_receive {:planning_agent_event, ^session_id,
                         %{"type" => "agent_unavailable", "reason" => ^expected}},
+                       1_000
+
+        assert model_requests() == 1
+        refute_received {:planning_agent_event, ^session_id, %{"step" => "retrying"}}
+      end
+    end
+
+    for {reason, limit} <- [spend_cap_reached: "spend_cap", token_cap_reached: "token_cap"] do
+      test "a #{reason} refusal is not retried and exhausts the session", %{household: h} do
+        {session_id, pid} = start!(h, [{:error, unquote(reason)}, {:text, "never"}])
+        limit = unquote(limit)
+
+        :ok = Session.send_message(pid, "Plan")
+
+        assert_receive {:planning_agent_event, ^session_id,
+                        %{"type" => "session_budget_exhausted", "limit" => ^limit}},
                        1_000
 
         assert model_requests() == 1
