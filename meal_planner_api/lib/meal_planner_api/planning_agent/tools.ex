@@ -9,9 +9,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       excluded by code
     * `get_workspace` — the current Workspace: Proposal, draft, Pins,
       Excluded Recipes, Released Meals and variety cap
-    * `edit_workspace` — Pin, unpin, exclude, include, release meals and set
-      the variety cap; invalid edits are refused with a reason and approvals
-      can never be set
+    * `edit_workspace` — Pin, unpin, exclude, include, release meals, set
+      the variety cap and set a meal's guests (`MealPlannerApi.PlanningAgent.Diners`);
+      invalid edits are refused with a reason and approvals can never be set
     * `get_plan` — the Household's Planned Meals by date or range (planned,
       not eaten)
     * `reuse_plan` — a past stretch of the Meal Plan as the new draft; it
@@ -59,6 +59,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
   alias MealPlannerApi.PlanningAgent.{
     CallBounds,
+    Diners,
     MealPlan,
     Prices,
     PriceScraper,
@@ -123,18 +124,36 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "meal of the last Proposal (release only the meals the household mentioned; ask " <>
             "before releasing more). release_all: redo every meal that is not pinned (Pins last for the session). " <>
             "set_variety_cap: how many times a recipe may appear in any 7 days. " <>
+            "set_guests: the guests of one date and slot as the household states them (e.g. " <>
+            "\"6 friends Tuesday lunch\"); every meal is scaled to its diners by code, guests " <>
+            "included, so never refuse a meal for its size. guests 0 clears them. Add " <>
+            "guest_restrictions only when the household says a guest has an allergy or diet; " <>
+            "never ask whether guests have any. " <>
             "Approvals and confirmations are never possible here. Refused edits return a reason.",
         parameters: %{
           "type" => "object",
           "properties" => %{
             "action" => %{
               "type" => "string",
-              "enum" => ~w(pin unpin exclude include release release_all set_variety_cap)
+              "enum" =>
+                ~w(pin unpin exclude include release release_all set_variety_cap set_guests)
             },
             "date" => %{"type" => "string", "description" => "ISO date inside the range"},
             "slot" => %{"type" => "string"},
             "recipe_id" => %{"type" => "string"},
-            "variety_cap" => %{"type" => "integer", "minimum" => 1}
+            "variety_cap" => %{"type" => "integer", "minimum" => 1},
+            "guests" => %{
+              "type" => "integer",
+              "minimum" => 0,
+              "maximum" => Diners.max_guests(),
+              "description" => "Guests at that meal, besides the household"
+            },
+            "guest_restrictions" => %{
+              "type" => "array",
+              "items" => %{"type" => "string", "enum" => Diners.restriction_names()},
+              "description" =>
+                "Only the allergies or diets the household volunteered for its guests"
+            }
           },
           "required" => ["action"],
           "additionalProperties" => false
@@ -444,6 +463,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
     with {:ok, candidates_by_slot} <- candidates(ctx, exclude),
          {:ok, candidates_by_slot} <- with_fixed_candidates(ctx, candidates_by_slot, fixed),
+         avoided = Enum.uniq(avoided ++ guest_avoided(ctx, candidates_by_slot, fixed)),
          {:ok, payload} <- payload(ctx, candidates_by_slot, exclude_everywhere, fixed, avoided),
          {:ok, solution} <- solve(ctx, payload),
          :ok <- keeps_fixed(solution.meals, fixed),
@@ -934,6 +954,23 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       |> Enum.sort_by(&{Date.to_iso8601(&1.date), &1.slot, &1.recipe_id})
 
     {exclude_everywhere, avoided}
+  end
+
+  # A guest restriction binds its meal only (issue #152): every candidate it
+  # forbids is avoided at that day and slot, through the same contract as a
+  # Released Meal's previous recipe. Fixed meals stay; the validator checks them.
+  defp guest_avoided(ctx, candidates_by_slot, fixed) do
+    fixed_keys = MapSet.new(fixed, &{&1.date, &1.slot})
+
+    meals =
+      for {{date, slot} = key, %{restrictions: [_ | _]}} <- Diners.guests(ctx),
+          not MapSet.member?(fixed_keys, key),
+          candidate <- Map.get(candidates_by_slot, slot, []),
+          do: %{date: date, slot: slot, recipe_id: candidate["recipe_id"]}
+
+    meals
+    |> Diners.conflicts(ctx)
+    |> Enum.sort_by(&{Date.to_iso8601(&1.date), &1.slot, &1.recipe_id})
   end
 
   defp payload(ctx, candidates_by_slot, exclude, fixed, avoided) do

@@ -164,6 +164,12 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
     - When no plan fits the budget with the existing recipes, say it cannot be done within the budget, name the real cause (present_proposal returns it under budget_conflict, e.g. a package that alone costs more than the budget) and ask whether they want new recipes created. Never create recipes to escape the budget before the household says yes.
     - When the household asks to change one meal and keep the rest, release only that meal, run_optimizer (it gives that meal a different recipe and keeps every other meal) and present the replaced Proposal with present_proposal.
 
+    Diners and guests:
+    - Household Members: #{length(context.members)}. Every meal is scaled by code to its diners: the Members present (an approved Absence Exception removes that Member from its meals) plus that meal's guests. Code computes the portions, the Purchase and the cost; never refuse or shrink a meal because of how many people eat it.
+    - When the household mentions guests for a meal (e.g. "6 friends Tuesday lunch"), set them with edit_workspace set_guests for that date and slot, then plan and present as usual. Guest cost counts against the same budget; going over it is an ordinary budget Deviation.
+    - Never ask whether guests have allergies or restrictions, and never ask how many people eat unless the household left it unclear. Only when the household says a guest has an allergy or diet, pass it as guest_restrictions: it binds that meal only and never changes the household.
+    - The Nutrition Goal ignores guests: it stays per standard portion.
+
     Household facts (enforced by code):
     - Forbidden Ingredient Tags (Restrictions of household members): #{list(context.forbidden_tags)}
     - Ingredients forbidden by allergies: #{forbidden_ingredient_count(context)}

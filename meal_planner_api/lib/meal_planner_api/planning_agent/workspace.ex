@@ -27,6 +27,10 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
       (`%{ingredient: name, brand: brand}`), set with `set_session_brand`:
       they override the Household's Brand Preference for this session only
       and are discarded with it
+    * `guests` — `{date, slot} => %{count, restrictions}`, set with
+      `set_guests` (`MealPlannerApi.PlanningAgent.Diners`): every meal is
+      scaled to its diners, and a guest restriction the household
+      volunteered binds that meal only
     * `budget_conflict` — the cause of the budget Deviation of the last
       Proposal, while the household has not answered it: AI-created Recipe
       Drafts are refused until their next message (issue #148)
@@ -36,7 +40,7 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
   """
 
   alias MealPlannerApi.Optimization.Variety
-  alias MealPlannerApi.PlanningAgent.RecipeSearch
+  alias MealPlannerApi.PlanningAgent.{Diners, RecipeSearch}
 
   # Highest meaningful cap: every meal of a 7-day window with all four slots.
   @max_variety_cap 28
@@ -58,6 +62,7 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
             absence_exceptions: [],
             price_refreshes: %{},
             session_brands: %{},
+            guests: %{},
             budget_conflict: nil
 
   @type key :: {Date.t(), String.t()}
@@ -75,6 +80,7 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
           absence_exceptions: [map()],
           price_refreshes: MealPlannerApi.PlanningAgent.Prices.refresh_memo(),
           session_brands: %{Ecto.UUID.t() => %{ingredient: String.t(), brand: String.t()}},
+          guests: %{key() => Diners.guests()},
           budget_conflict: map() | nil
         }
 
@@ -118,6 +124,7 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
       action == "release" -> release(ws, args, ctx)
       action == "release_all" -> release_all(ws)
       action == "set_variety_cap" -> set_variety_cap(ws, args)
+      action == "set_guests" -> set_guests(ws, args, ctx)
       true -> {:error, "unknown_action", %{}}
     end
   end
@@ -128,7 +135,7 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
     do: "Approvals and confirmations are made only by the household in the app."
 
   def reason("unknown_action"),
-    do: "Use pin, unpin, exclude, include, release, release_all or set_variety_cap."
+    do: "Use pin, unpin, exclude, include, release, release_all, set_variety_cap or set_guests."
 
   def reason("invalid_date"), do: "The date must be an ISO date (YYYY-MM-DD)."
   def reason("date_outside_range"), do: "The date is outside the Planning Range."
@@ -151,6 +158,15 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
   def reason("no_proposed_meal"), do: "The last Proposal has no meal for that day and slot."
   def reason("meal_pinned"), do: "That meal is pinned; unpin it before releasing it."
   def reason("search_failed"), do: "The recipe lookup failed; try again."
+
+  def reason("invalid_guests"),
+    do: "guests must be an integer from 0 to #{Diners.max_guests()} (0 clears them)."
+
+  def reason("invalid_guest_restriction"),
+    do: "guest_restrictions accepts only: #{Enum.join(Diners.restriction_names(), ", ")}."
+
+  def reason("guest_restrictions_need_guests"),
+    do: "Guest restrictions need at least one guest at that meal."
 
   def reason("invalid_variety_cap"),
     do: "The variety cap must be an integer from 1 to #{@max_variety_cap}."
@@ -249,7 +265,12 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
         ws.released
         |> Enum.sort_by(&sort_key(&1, order))
         |> Enum.map(fn {date, slot} -> %{"date" => Date.to_iso8601(date), "slot" => slot} end),
-      "variety_cap" => ws.variety_cap
+      "variety_cap" => ws.variety_cap,
+      "guests" =>
+        ws
+        |> Map.get(:guests, %{})
+        |> Enum.sort_by(fn {key, _guests} -> sort_key(key, order) end)
+        |> Enum.map(fn {key, guests} -> Diners.data(key, guests) end)
     }
   end
 
@@ -355,6 +376,40 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
 
   defp set_variety_cap(_ws, _args), do: {:error, "invalid_variety_cap", %{}}
 
+  # Guests of one meal (issue #152). A change of guest restrictions releases
+  # the proposed meal there, so the next `run_optimizer` may replace a recipe
+  # they forbid; a Pin stays and is checked by `present_proposal`.
+  defp set_guests(ws, args, ctx) do
+    with {:ok, key} <- meal_key(args, ctx),
+         {:ok, guests} <- guests_arg(args) do
+      all = Map.get(ws, :guests, %{})
+      before = all |> Map.get(key, %{restrictions: []}) |> Map.fetch!(:restrictions)
+      now = if guests, do: guests.restrictions, else: []
+
+      released =
+        if before != now and not Map.has_key?(ws.pins, key) and
+             Enum.any?(ws.proposed, &({&1.date, &1.slot} == key)),
+           do: MapSet.put(ws.released, key),
+           else: ws.released
+
+      all = if guests, do: Map.put(all, key, guests), else: Map.delete(all, key)
+      ws = Map.put(%{ws | released: released}, :guests, all)
+
+      {:ok, ws,
+       %{
+         "status" => "ok",
+         "guests" => Diners.data(key, guests || %{count: 0, restrictions: []})
+       }}
+    end
+  end
+
+  defp guests_arg(args) do
+    case Diners.parse(args) do
+      {:ok, guests} -> {:ok, guests}
+      {:error, code} -> {:error, code, %{}}
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Validation helpers
   # ---------------------------------------------------------------------------
@@ -423,13 +478,23 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
       else: :ok
   end
 
-  defp pinnable_recipe(ctx, ws, recipe_id, {_date, slot}) do
+  defp pinnable_recipe(ctx, ws, recipe_id, {date, slot}) do
     case RecipeSearch.lookup(ctx.household, [recipe_id]) do
       {:ok, %{^recipe_id => {:safe, recipe}}} ->
-        if slot in recipe.slots, do: {:ok, recipe}, else: {:error, "recipe_not_for_slot", %{}}
+        cond do
+          slot not in recipe.slots ->
+            {:error, "recipe_not_for_slot", %{}}
+
+          guest_conflict?(ctx, ws, %{date: date, slot: slot, recipe_id: recipe_id}) ->
+            {:error, "restriction_conflict",
+             %{"replacements" => replacements(ctx, ws, date, slot)}}
+
+          true ->
+            {:ok, recipe}
+        end
 
       {:ok, %{^recipe_id => {:restricted, _recipe}}} ->
-        {:error, "restriction_conflict", %{"replacements" => replacements(ctx, ws, slot)}}
+        {:error, "restriction_conflict", %{"replacements" => replacements(ctx, ws, date, slot)}}
 
       {:ok, _none} ->
         {:error, "recipe_not_found", %{}}
@@ -439,18 +504,27 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
     end
   end
 
+  defp guest_conflict?(ctx, ws, meal),
+    do: Diners.conflicts([meal], Map.put(ctx, :workspace, ws)) != []
+
   # Safe recipes of the same slot the agent can offer instead; Restrictions
-  # are already excluded by the search.
-  defp replacements(ctx, ws, slot) do
+  # are already excluded by the search, guest restrictions of the meal here.
+  defp replacements(ctx, ws, date, slot) do
     filters = %{
       slot: slot,
       exclude_recipe_ids: MapSet.to_list(ws.excluded),
-      limit: @replacement_limit
+      limit: @replacement_limit * 2
     }
 
     case RecipeSearch.search(ctx.household, filters) do
-      {:ok, recipes} -> Enum.map(recipes, &%{"recipe_id" => &1.id, "name" => &1.name})
-      {:error, :search_failed} -> []
+      {:ok, recipes} ->
+        recipes
+        |> Enum.reject(&guest_conflict?(ctx, ws, %{date: date, slot: slot, recipe_id: &1.id}))
+        |> Enum.take(@replacement_limit)
+        |> Enum.map(&%{"recipe_id" => &1.id, "name" => &1.name})
+
+      {:error, :search_failed} ->
+        []
     end
   end
 

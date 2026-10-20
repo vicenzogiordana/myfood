@@ -20,6 +20,9 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
   Member's allergic ingredients carrying that tag; an allergy to an
   ingredient without a reviewed allergen tag cannot be lifted.
 
+  Guest restrictions the household volunteered (`MealPlannerApi.PlanningAgent.Diners`)
+  are checked for their meal only and never change the Household's.
+
   The budget is not a violation: `present_proposal` compares the Purchase
   (`MealPlannerApi.PlanningAgent.Purchase`) against it and reports overspend
   as a budget Deviation. Violations are generic and never name a Member.
@@ -29,14 +32,14 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
 
   alias MealPlannerApi.Persistence.Catalog.{Recipe, RecipeIngredient}
   alias MealPlannerApi.Planning.{RecipeOrigin, RestrictionValidator}
-  alias MealPlannerApi.PlanningAgent.RecipeDraft
+  alias MealPlannerApi.PlanningAgent.{Diners, RecipeDraft}
   alias MealPlannerApi.Repo
 
   @type meal :: %{date: Date.t(), slot: String.t(), recipe_id: String.t()}
 
   @doc """
   Validates `meals`. Returns `{:valid, meals}` with each recipe's `:name`,
-  `:origin` (Recipe Origin label) and `:draft` attached, or
+  `:origin` (Recipe Origin label), `:draft` and `:servings` attached, or
   `{:invalid, violations}`.
   """
   @spec validate([meal()], map()) :: {:valid, [map()]} | {:invalid, [map()]}
@@ -52,12 +55,15 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
     violations =
       coverage_violations(meals, expected) ++
         availability_violations(meals, recipes) ++
-        restriction_violations(
-          meals,
-          recipes,
-          drafts,
-          ctx.household,
-          Map.get(ctx, :absence_exceptions, [])
+        Enum.uniq_by(
+          restriction_violations(
+            meals,
+            recipes,
+            drafts,
+            ctx.household,
+            Map.get(ctx, :absence_exceptions, [])
+          ) ++ guest_violations(meals, recipes, ctx),
+          &{&1["date"], &1["slot"]}
         )
 
     case violations do
@@ -65,7 +71,13 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
         {:valid,
          Enum.map(meals, fn meal ->
            recipe = Map.fetch!(recipes, meal.recipe_id)
-           Map.merge(meal, %{name: recipe.name, origin: recipe.origin, draft: recipe.draft})
+
+           Map.merge(meal, %{
+             name: recipe.name,
+             origin: recipe.origin,
+             draft: recipe.draft,
+             servings: recipe.servings
+           })
          end)}
 
       _ ->
@@ -164,6 +176,14 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
     end)
   end
 
+  # Guest restrictions bind their meal only (issue #152).
+  defp guest_violations(meals, recipes, ctx) do
+    meals
+    |> Enum.filter(&Map.has_key?(recipes, &1.recipe_id))
+    |> Diners.conflicts(ctx)
+    |> Enum.map(&violation("restriction_conflict", &1.date, &1.slot, Diners.conflict_message()))
+  end
+
   # Allergic ingredient ids per Recipe Draft of `drafts`.
   defp allergic_by_draft(drafts, household) do
     for draft <- drafts,
@@ -189,6 +209,7 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
              name: draft.name,
              suitable_for_slots: draft.slots,
              origin: RecipeOrigin.label(draft.source),
+             servings: draft.servings,
              draft: true
            }}
   end
@@ -244,6 +265,7 @@ defmodule MealPlannerApi.PlanningAgent.ProposalValidator do
         id: r.id,
         name: r.name,
         suitable_for_slots: r.suitable_for_slots,
+        servings: r.servings,
         source: r.source
       }
     )

@@ -6,8 +6,10 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
 
   For a Proposal's meals:
 
-    1. needs are aggregated once per `{ingredient, unit}` across every meal,
-       so each purchase is counted once
+    1. each meal needs its recipe once per batch: the batches its diners
+       need (`MealPlannerApi.PlanningAgent.Diners`, one when not given); needs
+       are aggregated once per `{ingredient, unit}` across every meal, so
+       each purchase is counted once
     2. the Projected Pantry's available stock is subtracted
     3. what remains is rounded up to whole packages of a stored Product in
        the same unit, choosing the lowest package total (ties: lowest
@@ -85,7 +87,8 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
   def currency, do: @currency
 
   @doc """
-  Calculates the Purchase of `meals` (each with a `recipe_id`) for the
+  Calculates the Purchase of `meals` (each with a `recipe_id` and optional
+  `batches`) for the
   Household `account_id`, net of its Projected Pantry. A meal whose recipe
   is one of the Recipe Drafts `drafts` (by id) needs the Draft's
   ingredients.
@@ -378,8 +381,14 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
 
   defp ceil_div(a, b), do: div(a + b - 1, b)
 
+  # Each meal needs its recipe's quantities once per batch (`:batches`, set
+  # by `MealPlannerApi.PlanningAgent.Diners`; one batch when absent).
   defp needs(meals, drafts) do
-    counts = Enum.frequencies_by(meals, & &1.recipe_id)
+    counts =
+      Enum.reduce(meals, %{}, fn meal, acc ->
+        Map.update(acc, meal.recipe_id, batches(meal), &(&1 + batches(meal)))
+      end)
+
     {draft_ids, stored_ids} = counts |> Map.keys() |> Enum.split_with(&Map.has_key?(drafts, &1))
     ids = Enum.flat_map(stored_ids, &cast_uuid/1)
 
@@ -399,6 +408,9 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
       Map.update(acc, {ingredient_id, unit}, total, &(&1 + total))
     end)
   end
+
+  defp batches(%{batches: batches}) when is_integer(batches) and batches > 0, do: batches
+  defp batches(_meal), do: 1
 
   defp names([]), do: %{}
 
