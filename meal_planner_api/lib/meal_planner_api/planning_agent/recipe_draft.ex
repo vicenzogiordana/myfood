@@ -100,6 +100,11 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
           "enum" => ["ai_created", "user_created"],
           "description" => "user_created only when a Member dictated this recipe"
         },
+        "replaces_recipe_id" => %{
+          "type" => "string",
+          "description" =>
+            "Recipe id of a Draft of this chat to revise instead of adding a new Draft"
+        },
         "ingredients" => %{
           "type" => "array",
           "minItems" => 1,
@@ -177,7 +182,8 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
 
   @doc """
   The tool outcome of a Draft: `complete`, or `partial` naming whether
-  `nutrition` or `prices` are missing.
+  `nutrition` or `prices` are missing. A partial Draft is still usable: the
+  agent is told not to re-create it only for missing data (issue #154).
   """
   @spec outcome(t()) :: map()
   def outcome(draft) do
@@ -188,8 +194,37 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
 
     if missing == [],
       do: %{"outcome" => "complete"},
-      else: %{"outcome" => "partial", "missing" => missing}
+      else: %{
+        "outcome" => "partial",
+        "missing" => missing,
+        "usable" => true,
+        "note" =>
+          "The Draft is usable as is: plan it and present it. Missing nutrition or prices " <>
+            "come from the catalog, so do not re-create the Draft only for them."
+      }
   end
+
+  @doc """
+  The Draft of `drafts` the new Draft `draft` re-creates: the same name
+  (ignoring case and surrounding spaces) and the same Recipe Origin, or `nil`.
+  """
+  @spec same_recipe(%{Ecto.UUID.t() => t()}, t()) :: t() | nil
+  def same_recipe(drafts, draft) do
+    key = String.downcase(draft.name)
+
+    drafts
+    |> Map.values()
+    |> Enum.find(&(String.downcase(&1.name) == key and &1.source == draft.source))
+  end
+
+  @doc """
+  `draft` as a revision of `replaced`: it keeps the replaced Draft's id, so
+  Pins and Proposals that name it now use the revision. With `nil` the Draft
+  is new.
+  """
+  @spec revision(t(), t() | nil) :: t()
+  def revision(draft, nil), do: draft
+  def revision(draft, replaced), do: %{draft | id: replaced.id}
 
   @doc """
   The Drafts of a session or tool context, by id: `ctx.recipe_drafts`, else

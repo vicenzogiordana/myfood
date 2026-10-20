@@ -29,8 +29,8 @@ ingredient discovery).
 
 ## Tasks
 
-- [ ] T1 Pin Recipe Drafts (`Workspace` pin checks the Workspace's Drafts).
-- [ ] T2 Revise a Draft instead of duplicating; partial Drafts are usable.
+- [x] T1 Pin Recipe Drafts (`Workspace` pin checks the Workspace's Drafts). Commit 1dbf6ec; RED 4 failing, GREEN recipe_draft_confirm_test 8/8.
+- [x] T2 Revise a Draft instead of duplicating; partial Drafts are usable. RED 5 failing, GREEN recipe_tools_test 16/16 (commit: see git log "revise Recipe Drafts").
 - [ ] T3 `unknown_ingredients` returns close catalog matches.
 - [ ] T4 Per-message iterations (15) with a session ceiling (60); refused
       calls are not counted.

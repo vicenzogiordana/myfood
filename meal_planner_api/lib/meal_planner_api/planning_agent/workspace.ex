@@ -242,6 +242,18 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
     Map.put(ws, :must_change, MapSet.new())
   end
 
+  @doc "Renames the Pins of `recipe_id`, after its Recipe Draft was revised."
+  @spec rename_pins(t(), Ecto.UUID.t(), String.t()) :: t()
+  def rename_pins(%__MODULE__{} = ws, recipe_id, name) do
+    pins =
+      Map.new(ws.pins, fn
+        {key, %{recipe_id: ^recipe_id} = pin} -> {key, %{pin | name: name}}
+        other -> other
+      end)
+
+    %{ws | pins: pins}
+  end
+
   @doc "The Workspace as `get_workspace` returns it to the agent."
   @spec to_data(t(), ctx()) :: map()
   def to_data(%__MODULE__{} = ws, ctx) do

@@ -177,8 +177,11 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
         description:
           "Draft a new recipe when existing recipes do not fit, or build the recipe a Member " <>
             "dictates (origin user_created). Use catalog Ingredient names only: unknown " <>
-            "Ingredients reject the Draft. Nutrition and cost are computed by code and " <>
-            "reported partial when data is missing. The Draft lives only in this chat; it is " <>
+            "Ingredients reject the Draft and list close catalog matches to use instead. " <>
+            "Nutrition and cost are computed by code and reported partial when data is " <>
+            "missing; a partial Draft is usable, never re-create it only for that. To fix a " <>
+            "Draft, call again with replaces_recipe_id (the same name and origin also " <>
+            "revise it): it never adds a duplicate. The Draft lives only in this chat; it is " <>
             "never saved by you. AI-created Drafts can be planned; a dictated recipe is saved " <>
             "only when the Member presses save.",
         parameters: RecipeDraft.parameters()
@@ -402,17 +405,25 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     emit(ctx, %{"type" => "progress", "step" => "drafting_recipe"})
     drafts = drafts(ctx)
 
-    with true <-
-           map_size(drafts) < RecipeDraft.max_drafts() ||
+    with {:ok, replaced} <- replaced_draft(args, drafts),
+         {:ok, built} <- RecipeDraft.build(args, ctx.household),
+         draft = RecipeDraft.revision(built, replaced || RecipeDraft.same_recipe(drafts, built)),
+         revised? = Map.has_key?(drafts, draft.id),
+         true <-
+           (revised? or map_size(drafts) < RecipeDraft.max_drafts()) ||
              {:error, %{"error" => "draft_limit_reached"}},
-         {:ok, draft} <- RecipeDraft.build(args, ctx.household),
          :ok <- not_escaping_budget(draft, ctx.workspace) do
       data = RecipeDraft.to_data(draft)
       emit(ctx, Map.put(data, "type", "recipe_draft"))
-      workspace = Map.put(ctx.workspace, :recipe_drafts, Map.put(drafts, draft.id, draft))
 
-      {data |> Map.put("status", "drafted") |> Map.merge(RecipeDraft.outcome(draft)), workspace,
-       :continue}
+      workspace =
+        ctx.workspace
+        |> Map.put(:recipe_drafts, Map.put(drafts, draft.id, draft))
+        |> Workspace.rename_pins(draft.id, draft.name)
+
+      {data
+       |> Map.put("status", if(revised?, do: "revised", else: "drafted"))
+       |> Map.merge(RecipeDraft.outcome(draft)), workspace, :continue}
     else
       {:error, error} -> {error, ctx.workspace, :continue}
     end
@@ -1129,6 +1140,21 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
+
+  # `replaces_recipe_id` names the Draft of this Workspace that a
+  # create_recipe call revises (issue #154).
+  defp replaced_draft(args, drafts) do
+    case Map.get(args, "replaces_recipe_id") do
+      nil ->
+        {:ok, nil}
+
+      id ->
+        case Map.fetch(drafts, id) do
+          {:ok, draft} -> {:ok, draft}
+          :error -> {:error, %{"error" => "draft_not_found"}}
+        end
+    end
+  end
 
   defp drafts(ctx), do: RecipeDraft.in_context(ctx)
 
