@@ -29,17 +29,23 @@ was too literal ("no mozzarella" while the catalog has "Muzzarella").
 
 ## Tasks
 
-- [ ] T1 Similarity matching: migration (extensions, immutable search key,
+- [x] T1 Similarity matching: migration (extensions, immutable search key,
       GIN trigram index) and `IngredientMatch`; `create_recipe` close matches
-      ranked by similarity, unambiguous variants auto-resolved.
-- [ ] T2 Similarity in `lookup_prices`, `set_session_brand` and the
-      `search_recipes` ingredient filter.
-- [ ] T3 Code-formatted money in every model-facing tool result and the
-      budget line of the instructions; instructions say to quote it.
-- [ ] T4 Skipped meals: Workspace `skip`/`unskip`, optimizer payload
+      ranked by similarity, unambiguous variants auto-resolved. RED 6/6
+      failing (ingredient_match_test), GREEN 27/27. Commit 22f3be0.
+- [x] T2 Similarity in `lookup_prices`, `set_session_brand` and the
+      `search_recipes` ingredient filter. RED 5 failing with lib stashed,
+      GREEN 79/79. Commit 1fe44de.
+- [x] T3 Code-formatted money in every model-facing tool result and the
+      budget line of the instructions; instructions say to quote it. RED 5
+      failing, GREEN planning_agent suite 556/556. Commit 22e73ed.
+- [x] T4 Skipped meals: Workspace `skip`/`unskip`, optimizer payload
       `skipped_meals` (Elixir + `optimizador.py`), validator, Proposal
-      `skipped`, Purchase and confirmation exclude them.
-- [ ] T5 Docs: CHANNELS.md, OPTIMIZER_CONTRACT.md, CONTEXT.md glossary.
+      `skipped`, Purchase and confirmation exclude them. RED Python 9
+      failing / Elixir 5/5 failing; GREEN Python 63/63, Elixir 6/6.
+      Commit 3bfd8a5.
+- [x] T5 Docs: CHANNELS.md, OPTIMIZER_CONTRACT.md, CONTEXT.md glossary
+      (in commit 3bfd8a5). Passive docs: structural readback.
 
 Route: single bounded worker, inline per task (this worker is the delegated
 writer of the pipeline; it must not spawn subagents).
@@ -65,4 +71,12 @@ writer of the pipeline; it must not spawn subagents).
 
 ## Progress
 
-(updated per task)
+All tasks done. Full suite `mix test` (MYFOOD_TEST_DATABASE=meal_planner_api_test160):
+1362 passed, 24 skipped. `mix precommit` clean. Optimizer: 63 tests OK.
+Migration ran on test and dev databases.
+
+Decision: auto-resolution only for case, accent, punctuation and plural
+variants. Trigram similarity alone is unsafe to auto-resolve ("queso crema"
+vs "Queso cremoso" scores 0.67), so merely similar names stay close matches.
+
+Next step: review gate (Jorge el Curioso), then merge.
