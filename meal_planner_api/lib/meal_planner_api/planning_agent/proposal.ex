@@ -11,7 +11,7 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
   """
 
   alias MealPlannerApi.Planning.ProposalStatus
-  alias MealPlannerApi.PlanningAgent.{Purchase, RecipeDraft}
+  alias MealPlannerApi.PlanningAgent.{Diners, Purchase, RecipeDraft}
 
   @type t :: map()
 
@@ -20,8 +20,10 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
 
   @doc """
   Builds a Proposal for `meals` (validated, each with `:date`, `:slot`,
-  `:recipe_id`, `:name`, `:origin` and `:draft`) in the session context
-  `ctx`. Every meal shows its Recipe Origin, and a Recipe Draft is marked as
+  `:recipe_id`, `:name`, `:origin`, `:draft` and `:servings`) in the
+  session context `ctx`. Every meal is scaled to its diners
+  (`MealPlannerApi.PlanningAgent.Diners`) and shows them with its guests and
+  the batches of its recipe they need. Every meal shows its Recipe Origin, and a Recipe Draft is marked as
   one so the Member sees it is AI-created and not yet saved. Prices are
   aged at the context's `:clock` (default: the current time), and the
   Purchase follows the context's chosen brands (`brand_choices/1`). Returns
@@ -29,6 +31,8 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
   """
   @spec build([map()], map()) :: {t(), Purchase.t()}
   def build(meals, ctx) do
+    meals = Diners.annotate(meals, ctx)
+
     purchase =
       Purchase.for_meals(meals, ctx.account_id, RecipeDraft.in_context(ctx),
         now: now(ctx),
@@ -49,7 +53,10 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
             "recipe_id" => meal.recipe_id,
             "name" => meal.name,
             "origin" => meal.origin,
-            "draft" => meal.draft
+            "draft" => meal.draft,
+            "diners" => meal.diners,
+            "guests" => meal.guests,
+            "batches" => meal.batches
           }
         end),
       "purchase" => Purchase.to_data(purchase),
@@ -85,13 +92,22 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
   defp session_brands(%{workspace: workspace}), do: Map.get(workspace, :session_brands, %{})
   defp session_brands(_ctx), do: %{}
 
-  @doc "The meals of a Proposal, as validator input."
+  @doc """
+  The meals of a Proposal, as validator input, with the diners, guests and
+  batches it showed (when it shows them).
+  """
   @spec meals(t()) :: [%{date: Date.t(), slot: String.t(), recipe_id: String.t()}]
   def meals(%{"meals" => meals}) do
     Enum.map(meals, fn meal ->
       %{date: Date.from_iso8601!(meal["date"]), slot: meal["slot"], recipe_id: meal["recipe_id"]}
+      |> Map.merge(scale(meal))
     end)
   end
+
+  defp scale(%{"diners" => diners, "guests" => guests, "batches" => batches}),
+    do: %{diners: diners, guests: guests, batches: batches}
+
+  defp scale(_meal), do: %{}
 
   @doc """
   Whether two Proposals show the Member the same content, whatever their

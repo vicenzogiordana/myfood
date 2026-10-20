@@ -11,7 +11,8 @@ defmodule MealPlannerApi.PlanningAgent.Confirmation do
        identity (the Proposal id), so the same confirmation never saves twice
     3. the Recipe Drafts the Proposal uses are saved as private AI-created
        Household Recipes, keeping their ids (never as Catalog Recipes)
-    4. the Proposal's Planned Meals are saved
+    4. the Proposal's Planned Meals are saved with their diners, guests and
+       the batches of their recipe (`selected_quantity`)
     5. each Purchase line is appended to the Shopping List as a new pending
        line, attributed to the earliest Planned Meal needing its ingredient.
        Existing lines, pending and in-cart included, are never touched.
@@ -59,7 +60,16 @@ defmodule MealPlannerApi.PlanningAgent.Confirmation do
           membership_id: Ecto.UUID.t(),
           user_id: Ecto.UUID.t() | nil,
           range: {Date.t(), Date.t()},
-          meals: [%{date: Date.t(), slot: String.t(), recipe_id: Ecto.UUID.t()}],
+          meals: [
+            %{
+              required(:date) => Date.t(),
+              required(:slot) => String.t(),
+              required(:recipe_id) => Ecto.UUID.t(),
+              optional(:diners) => non_neg_integer(),
+              optional(:guests) => non_neg_integer(),
+              optional(:batches) => pos_integer()
+            }
+          ],
           recipes: [RecipeDraft.t()],
           purchase: MealPlannerApi.PlanningAgent.Purchase.t()
         }
@@ -232,7 +242,10 @@ defmodule MealPlannerApi.PlanningAgent.Confirmation do
         slot: meal.slot,
         recipe_id: meal.recipe_id,
         is_cooked: false,
-        selected_quantity: 1
+        # The batches its diners need: the Projected Pantry commits them.
+        selected_quantity: Map.get(meal, :batches, 1),
+        diners: Map.get(meal, :diners),
+        guests: Map.get(meal, :guests, 0)
       })
       |> repo.insert()
       |> case do
