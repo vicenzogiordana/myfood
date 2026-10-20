@@ -575,4 +575,127 @@ defmodule MealPlannerApi.PlanningAgent.SessionWorkspaceTest do
       end
     end
   end
+
+  describe "single-meal change (issue #148)" do
+    # Like the real optimizer: keeps fixed meals, never takes an excluded
+    # recipe or an avoided one, and otherwise picks the first candidate, so a
+    # Released Meal stays the same unless code tells the optimizer to change it.
+    defp first_allowed(payload) do
+      fixed = Map.new(payload["fixed_meals"] || [], &{{&1["day"], &1["slot"]}, &1["recipe_id"]})
+      excluded = MapSet.new(payload["excluded_recipe_ids"] || [])
+
+      avoided =
+        MapSet.new(payload["avoided_meals"] || [], &{&1["day"], &1["slot"], &1["recipe_id"]})
+
+      meals =
+        for day <- payload["days"], slot <- payload["slots"] do
+          recipe_id =
+            Map.get_lazy(fixed, {day, slot}, fn ->
+              payload["candidates_by_slot"][slot]
+              |> Enum.map(& &1["recipe_id"])
+              |> Enum.find(&(not MapSet.member?(excluded, &1) and {day, slot, &1} not in avoided))
+            end)
+
+          %{"day" => day, "slot" => slot, "recipe_id" => recipe_id}
+        end
+
+      if Enum.any?(meals, &is_nil(&1["recipe_id"])),
+        do: {:error, :infeasible, %{"causes" => [%{"cause" => "avoided_meal"}]}},
+        else: {:ok, %{"meals" => meals}}
+    end
+
+    defp change_tuesday_dinner!(h, change_steps) do
+      script =
+        plan_and_present() ++
+          [{:text, "Here is your plan."}] ++
+          change_steps ++ [present(), {:text, "I changed Tuesday dinner."}]
+
+      {session_id, pid} =
+        start!(h, script, range: {@monday, @wednesday}, result: &first_allowed/1)
+
+      _ = run_turn!(session_id, pid, "Plan Monday to Wednesday")
+
+      assert_received {:planning_agent_event, ^session_id,
+                       %{"type" => "proposal", "status" => "valid", "meals" => first}}
+
+      flush_payloads()
+      results = run_turn!(session_id, pid, "Change Tuesday dinner and keep every other meal")
+      assert_received {:optimizer_payload, payload}
+
+      assert_received {:planning_agent_event, ^session_id,
+                       %{"type" => "proposal", "status" => "valid", "meals" => second}}
+
+      {plan_by_slot(first), plan_by_slot(second), payload, results}
+    end
+
+    test "a released meal must change: the next run avoids its previous recipe there only",
+         %{household: h, recipes: r} do
+      {before, replaced, payload, _results} =
+        change_tuesday_dinner!(h, [
+          edit(%{"action" => "release", "date" => "2026-11-03", "slot" => "dinner"}),
+          {:tool_calls, [{"run_optimizer", %{}}]}
+        ])
+
+      assert payload["avoided_meals"] == [
+               %{"day" => "2026-11-03", "slot" => "dinner", "recipe_id" => r.lentil_stew.id}
+             ]
+
+      key = {"2026-11-03", "dinner"}
+      assert map_size(replaced) == 6
+      refute replaced[key] == before[key]
+      assert Map.delete(replaced, key) == Map.delete(before, key)
+    end
+
+    test "excluding the released meal's recipe for one run keeps the meals that use it",
+         %{household: h, recipes: r} do
+      # Every kept meal uses the lentil stew too; excluding it for the run
+      # must not make the kept meals infeasible (battery A10).
+      {before, replaced, payload, results} =
+        change_tuesday_dinner!(h, [
+          edit(%{"action" => "release", "date" => "2026-11-03", "slot" => "dinner"}),
+          {:tool_calls,
+           [{"run_optimizer", %{"exclude_recipe_ids" => [r.lentil_stew.id, r.bean_bowl.id]}}]}
+        ])
+
+      assert %{"status" => "ok"} = last_result(results, "run_optimizer")
+      assert payload["excluded_recipe_ids"] == [r.bean_bowl.id]
+      free = payload["avoided_meals"] |> Enum.map(&{&1["day"], &1["slot"], &1["recipe_id"]})
+      assert free == [{"2026-11-03", "dinner", r.lentil_stew.id}]
+
+      key = {"2026-11-03", "dinner"}
+      refute replaced[key] in [before[key], r.bean_bowl.id]
+      assert Map.delete(replaced, key) == Map.delete(before, key)
+    end
+
+    test "redo the whole week does not force every meal to change", %{household: h} do
+      script =
+        plan_and_present() ++
+          [edit(%{"action" => "release_all"}), {:tool_calls, [{"run_optimizer", %{}}]}] ++
+          [{:text, "ok"}]
+
+      {session_id, pid} = start!(h, script)
+      _ = run_turn!(session_id, pid, "Plan, then redo the whole week")
+
+      assert_received {:optimizer_payload, _first}
+      assert_received {:optimizer_payload, second}
+      assert second["avoided_meals"] == []
+    end
+
+    test "an optimizer reply that keeps an avoided recipe is rejected",
+         %{household: h, recipes: r} do
+      script =
+        plan_and_present() ++
+          [
+            edit(%{"action" => "release", "date" => "2026-11-02", "slot" => "lunch"}),
+            {:tool_calls, [{"run_optimizer", %{}}]},
+            {:text, "ok"}
+          ]
+
+      {session_id, pid} = start!(h, script, result: FakeOptimizer.everywhere(r.lentil_stew.id))
+      results = run_turn!(session_id, pid, "Plan, then change Monday lunch")
+
+      assert %{"error" => "optimizer_failed", "reason" => "released_meal_unchanged"} =
+               last_result(results, "run_optimizer")
+    end
+  end
 end

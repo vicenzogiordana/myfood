@@ -205,9 +205,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
         name: "run_optimizer",
         description:
           "Build a plan for every day and slot of the Planning Range with the optimizer. " <>
-            "Pins and every meal of the last Proposal that was not released stay fixed. " <>
-            "Optionally exclude more recipes for this run. Returns the plan with its " <>
-            "Deviations or a typed error.",
+            "Pins and every meal of the last Proposal that was not released stay fixed; a " <>
+            "meal released with release always gets a different recipe. Optionally exclude " <>
+            "more recipes for this run: they never replace a fixed meal, only the meals the " <>
+            "run may change. Returns the plan with its Deviations or a typed error.",
         parameters: %{
           "type" => "object",
           "properties" => %{
@@ -438,12 +439,14 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       |> Enum.uniq()
 
     fixed = Workspace.fixed_meals(ctx.workspace)
+    {exclude_everywhere, avoided} = avoided_meals(ctx, exclude, fixed)
 
     with {:ok, candidates_by_slot} <- candidates(ctx, exclude),
          {:ok, candidates_by_slot} <- with_fixed_candidates(ctx, candidates_by_slot, fixed),
-         {:ok, payload} <- payload(ctx, candidates_by_slot, exclude, fixed),
+         {:ok, payload} <- payload(ctx, candidates_by_slot, exclude_everywhere, fixed, avoided),
          {:ok, solution} <- solve(ctx, payload),
-         :ok <- keeps_fixed(solution.meals, fixed) do
+         :ok <- keeps_fixed(solution.meals, fixed),
+         :ok <- changes_avoided(solution.meals, avoided) do
       names =
         candidates_by_slot
         |> Map.values()
@@ -841,7 +844,36 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   defp with_missing(result, missing),
     do: Map.merge(result, %{"outcome" => "partial", "missing" => missing})
 
-  defp payload(ctx, candidates_by_slot, exclude, fixed) do
+  # A Released Meal the household asked to change avoids its previous recipe
+  # (issue #148). A recipe excluded for this run that a fixed meal keeps is
+  # not excluded everywhere, which would make the fixed meal infeasible: it is
+  # avoided on every meal the run may change instead.
+  defp avoided_meals(ctx, exclude, fixed) do
+    fixed_keys = MapSet.new(fixed, &{&1.date, &1.slot})
+    kept_recipes = MapSet.new(fixed, & &1.recipe_id)
+    {kept_excluded, exclude_everywhere} = Enum.split_with(exclude, &(&1 in kept_recipes))
+    {from_date, to_date} = ctx.range
+
+    free_keys =
+      for date <- Date.range(from_date, to_date),
+          slot <- ctx.slots,
+          not MapSet.member?(fixed_keys, {date, slot}),
+          do: {date, slot}
+
+    run_avoided =
+      for {date, slot} <- free_keys, recipe_id <- kept_excluded do
+        %{date: date, slot: slot, recipe_id: recipe_id}
+      end
+
+    avoided =
+      (Workspace.avoided_meals(ctx.workspace) ++ run_avoided)
+      |> Enum.uniq()
+      |> Enum.sort_by(&{Date.to_iso8601(&1.date), &1.slot, &1.recipe_id})
+
+    {exclude_everywhere, avoided}
+  end
+
+  defp payload(ctx, candidates_by_slot, exclude, fixed, avoided) do
     {from_date, to_date} = ctx.range
 
     payload = %{
@@ -858,7 +890,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       },
       "candidates_by_slot" => candidates_by_slot,
       "excluded_recipe_ids" => exclude,
-      "fixed_meals" => Enum.map(fixed, &meal_key_data/1)
+      "fixed_meals" => Enum.map(fixed, &meal_key_data/1),
+      "avoided_meals" => Enum.map(avoided, &meal_key_data/1)
     }
 
     prior = Variety.prior_meals(ctx.account_id, from_date)
@@ -877,6 +910,16 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     if Enum.all?(fixed, &(Map.get(planned, {&1.date, &1.slot}) == &1.recipe_id)),
       do: :ok,
       else: {:error, :fixed_meal_moved, %{}}
+  end
+
+  # Code also guarantees that a Released Meal the household asked to change
+  # does not come back with the recipe it had.
+  defp changes_avoided(meals, avoided) do
+    planned = MapSet.new(meals, &{&1.date, &1.slot, &1.recipe_id})
+
+    if Enum.any?(avoided, &MapSet.member?(planned, {&1.date, &1.slot, &1.recipe_id})),
+      do: {:error, :released_meal_unchanged, %{}},
+      else: :ok
   end
 
   # The solver is never retried: a timeout is inconclusive, and every other
