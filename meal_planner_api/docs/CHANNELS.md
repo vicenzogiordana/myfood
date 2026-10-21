@@ -333,7 +333,9 @@ match and reported under `merged_ingredients`
 (`[{"requested": ["Tomate", "Tomate perita"], "ingredient": "Tomate perita",
 "quantity_milli": 500000, "unit": "g"}]`); in different units the Draft is
 rejected with `duplicate_ingredient`, whose `duplicates` name the requested
-names, the Ingredient and the units. When the Member asks for a dish no recipe provides, the
+names, the Ingredient and the units. Names that differ only in case count as one
+name, and a merged line above the per-line quantity cap rejects the Draft with
+`quantity_too_large`. When the Member asks for a dish no recipe provides, the
 agent creates it directly as an AI-created Draft, without asking first, and says
 it was created with AI and may contain errors; it still asks first before
 creating recipes to fit an infeasible budget or a plan limited to "only recipes

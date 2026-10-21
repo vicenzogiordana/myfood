@@ -299,6 +299,74 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       assert result["hint"] =~ "once, in one unit"
     end
 
+    # Issue #151: each line is capped, and so is the line they merge into.
+    test "merged lines above the quantity cap reject the Draft", %{household: h} = ctx do
+      {:ok, plum} = Catalog.create_ingredient(%{name: "Tomate perita", category: :otros})
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [
+            %{"ingredient" => "Tomate", "quantity" => 60_000, "unit" => "g"},
+            %{"ingredient" => "Tomate perita", "quantity" => 50_000, "unit" => "g"}
+          ]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["error"] == "invalid_recipe"
+      assert result["reason"] == "quantity_too_large"
+      assert result["ingredient"] == plum.name
+      assert result["hint"] =~ plum.name
+    end
+
+    # Issue #151: names that differ only in case are one requested name.
+    test "case-only variants of a name are reported once", %{household: h} = ctx do
+      {:ok, plum} = Catalog.create_ingredient(%{name: "Tomate perita", category: :otros})
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [
+            %{"ingredient" => "Tomate", "quantity" => 300, "unit" => "g"},
+            %{"ingredient" => "tomate", "quantity" => 2, "unit" => "unit"},
+            %{"ingredient" => "Tomate perita", "quantity" => 200, "unit" => "g"}
+          ]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["reason"] == "duplicate_ingredient"
+
+      assert result["duplicates"] == [
+               %{
+                 "requested" => ["Tomate", "Tomate perita"],
+                 "ingredient" => plum.name,
+                 "units" => ["g", "unit"]
+               }
+             ]
+    end
+
+    test "case-only variants in two units stay two lines, like one name", %{household: h} = ctx do
+      {:ok, plum} = Catalog.create_ingredient(%{name: "Tomate perita", category: :otros})
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [
+            %{"ingredient" => "Tomate", "quantity" => 300, "unit" => "g"},
+            %{"ingredient" => "TOMATE", "quantity" => 2, "unit" => "unit"}
+          ]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["status"] == "drafted"
+      refute Map.has_key?(result, "merged_ingredients")
+
+      assert result["ingredients"] == [
+               %{"ingredient" => plum.name, "quantity_milli" => 300_000, "unit" => "g"},
+               %{"ingredient" => plum.name, "quantity_milli" => 2_000, "unit" => "unit"}
+             ]
+    end
+
     test "rejects unknown Ingredients instead of inventing them", %{household: h} = ctx do
       args =
         draft_args(ctx, %{

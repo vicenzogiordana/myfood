@@ -17,7 +17,10 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
     * two different requested names that resolve to one Ingredient (issue
       #166) are merged into one line when their units match, reported
       under `merged`; in different units they reject the Draft with
-      `duplicate_ingredient`, naming the requested names and the Ingredient
+      `duplicate_ingredient`, naming the requested names and the Ingredient.
+      Names that differ only in case are one name, and a merged line above
+      the per-line quantity cap rejects the Draft with `quantity_too_large`
+      (issue #151)
     * nutrition per serving is computed by code from the Ingredients'
       nutrition per 100 g or ml. A nutrient is only reported when every
       Ingredient has it in a weight or volume unit; otherwise it is `nil`
@@ -527,7 +530,9 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
   # "Tomate perita". In one unit their quantities are added up into one
   # line, at the first one's place, and reported; in different units the
   # Draft is rejected naming the requested names and the Ingredient. One
-  # name listed in two units stays two lines.
+  # name listed in two units stays two lines; names that differ only in case
+  # are one name (issue #151). A merged line is held to the same quantity
+  # cap as any line.
   defp merge_same_ingredient(requested, ingredients) do
     collisions =
       requested
@@ -537,7 +542,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
       |> Enum.map(fn pairs ->
         %{
           lines: Enum.map(pairs, &elem(&1, 1)),
-          names: pairs |> Enum.map(&elem(&1, 0).name) |> Enum.uniq(),
+          names: pairs |> Enum.map(&elem(&1, 0).name) |> Enum.uniq_by(&String.downcase/1),
           units: pairs |> Enum.map(&elem(&1, 1).unit) |> Enum.uniq()
         }
       end)
@@ -547,9 +552,30 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
       end)
 
     case Enum.reject(collisions, &match?([_], &1.units)) do
-      [] -> {:ok, merge_lines(ingredients, collisions), Enum.map(collisions, &merged_data/1)}
+      [] -> merged(ingredients, collisions)
       conflicting -> duplicate_ingredients(conflicting)
     end
+  end
+
+  defp merged(ingredients, collisions) do
+    lines = merge_lines(ingredients, collisions)
+
+    case Enum.find(lines, &(&1.quantity_milli > @max_quantity * 1000)) do
+      nil -> {:ok, lines, Enum.map(collisions, &merged_data/1)}
+      line -> quantity_too_large(line)
+    end
+  end
+
+  defp quantity_too_large(line) do
+    {:error,
+     %{
+       "error" => "invalid_recipe",
+       "reason" => "quantity_too_large",
+       "ingredient" => line.ingredient,
+       "hint" =>
+         "The lines for #{line.ingredient} add up to more than #{@max_quantity} " <>
+           "#{line.unit}. List it once, with the quantity the recipe needs."
+     }}
   end
 
   defp merge_lines(ingredients, collisions) do
