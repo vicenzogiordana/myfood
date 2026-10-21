@@ -60,9 +60,13 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
 
   @thinking %{"type" => "thinking", "thinking" => "", "signature" => "fictitious-signature-1"}
 
+  # Most tests exercise Claude Opus 5.5 with refusal fallbacks on; the
+  # defaults (Claude Haiku 5.5, fallbacks off) have their own test.
   defp opts(overrides \\ []) do
     Keyword.merge(
       [
+        model: "claude-opus-5-5",
+        fallbacks: true,
         api_key: "test-key",
         spend_cap_micros: 1_000_000,
         token_cap: 1_000_000,
@@ -206,10 +210,11 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
       assert {:error, :provider_unconfigured} = ClaudeMessages.init(opts(effort: "huge"))
     end
 
-    test "defaults to Claude Opus 5.5 at medium effort" do
-      {:ok, state} = ClaudeMessages.init(opts())
-      assert state.config.model == "claude-opus-5-5"
+    test "defaults to Claude Haiku 5.5 at medium effort without refusal fallbacks" do
+      {:ok, state} = ClaudeMessages.init(Keyword.drop(opts(), [:model, :fallbacks]))
+      assert state.config.model == "claude-haiku-5-5"
       assert state.config.effort == "medium"
+      assert state.config.fallbacks == false
     end
   end
 

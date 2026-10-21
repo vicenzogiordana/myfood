@@ -14,10 +14,11 @@ builder):
 
 - 3 Members; the third is allergic to peanuts (two peanut recipes exist and
   must never be planned)
-- weekly grocery budget ARS 45,000
+- weekly grocery budget ARS 45000.00 (as the chat prints it)
 - Planning Range Monday 2 to Sunday 8 November 2026, lunch and dinner
-- 18 recipes over 16 priced Ingredients, with two pasta brands
-  (Don Trigo, La Molienda)
+- 18 recipes over 21 Ingredients, every one priced by at least one of 23
+  products; spaghetti and penne come in two brands (Don Trigo,
+  La Molienda)
 - Pantry: rice, onion and eggs
 
 Prices are observed on the battery clock (1 November 2026), so they are

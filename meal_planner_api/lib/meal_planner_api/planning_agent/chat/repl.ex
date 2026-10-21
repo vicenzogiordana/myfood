@@ -86,6 +86,9 @@ defmodule MealPlannerApi.PlanningAgent.Chat.Repl do
           try do
             loop(state)
           after
+            # The reader may still be blocked in IO.gets; unlink first, or
+            # its :killed exit would take this process down with it.
+            Process.unlink(reader)
             Process.exit(reader, :kill)
             end_session(pid, household)
           end

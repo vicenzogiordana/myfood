@@ -79,4 +79,44 @@ defmodule Mix.Tasks.PlanningAgent.ChatTest do
     assert result.outcome == :quit
     assert text =~ "No Proposal has been shown yet."
   end
+
+  test "/quit from standard input survives the still-blocked reader and cancels the session" do
+    test_pid = self()
+
+    {chat, ref} =
+      spawn_monitor(fn ->
+        Process.group_leader(self(), spawn_link(fn -> blocking_stdin(["/quit\n"]) end))
+        result = Chat.run(["--scripted"], sandboxed: true, input: :stdio)
+        send(test_pid, {:chat_done, result, output()})
+      end)
+
+    assert_receive {:chat_done, result, lines}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^chat, :normal}
+
+    assert result.outcome == :quit
+    assert Enum.any?(lines, &String.starts_with?(&1, "Session spend: "))
+
+    {:existing, household} = Household.ensure()
+    assert Session.whereis(household.account_id) == nil
+  end
+
+  # A group leader whose reads answer `lines` and then block forever, like a
+  # terminal nobody types into.
+  defp blocking_stdin(lines) do
+    receive do
+      {:io_request, from, reply_as, {:get_line, _encoding, _prompt}} ->
+        case lines do
+          [line | rest] ->
+            send(from, {:io_reply, reply_as, line})
+            blocking_stdin(rest)
+
+          [] ->
+            blocking_stdin([])
+        end
+
+      {:io_request, from, reply_as, _request} ->
+        send(from, {:io_reply, reply_as, :ok})
+        blocking_stdin(lines)
+    end
+  end
 end

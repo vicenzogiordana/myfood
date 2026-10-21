@@ -128,9 +128,10 @@ if config_env() != :test do
              [
                model: optional_string.("PLANNING_AGENT_CLAUDE_MODEL"),
                effort: optional_string.("PLANNING_AGENT_CLAUDE_EFFORT"),
-               # Server-side refusal fallbacks are on by default; models that
-               # reject the `fallbacks` parameter (e.g. claude-haiku-5-5) need
-               # PLANNING_AGENT_CLAUDE_FALLBACKS=false. Anything else reads as unset.
+               # Server-side refusal fallbacks are off by default, because the
+               # default model (claude-haiku-5-5) rejects the `fallbacks`
+               # parameter; models that accept it (e.g. claude-opus-5-5) can
+               # set PLANNING_AGENT_CLAUDE_FALLBACKS=true. Anything else reads as unset.
                fallbacks:
                  Map.get(
                    %{"true" => true, "false" => false},
