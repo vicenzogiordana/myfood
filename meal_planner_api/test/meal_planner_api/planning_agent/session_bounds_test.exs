@@ -123,7 +123,20 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
     end
 
     test "backoff between retries increases", %{household: h} do
-      script = List.duplicate({:error, :provider_unavailable}, 3) ++ [{:text, "ok"}]
+      # Each call records when it was made: the time the test process happens
+      # to receive a notification is later by a scheduling delay, which made
+      # the measured gap shorter than the backoff (issue #151).
+      test = self()
+
+      called = fn step ->
+        fn _request ->
+          send(test, {:model_called_at, System.monotonic_time(:millisecond)})
+          step
+        end
+      end
+
+      script =
+        Enum.map(List.duplicate({:error, :provider_unavailable}, 3) ++ [{:text, "ok"}], called)
 
       {session_id, pid} =
         start!(h, script, call_policies: %{model: %{timeout_ms: 1_000, backoff_ms: 60}})
@@ -132,8 +145,8 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
 
       times =
         for _ <- 1..4 do
-          assert_receive {:scripted_model_request, _}, 2_000
-          System.monotonic_time(:millisecond)
+          assert_receive {:model_called_at, at}, 2_000
+          at
         end
 
       [first, second, third] =
