@@ -408,6 +408,32 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       assert herb_name == ctx.herb.name
     end
 
+    # Issue #164: "Cebolla, 1 unit" while onions are sold by weight.
+    test "a missing price in an unsold unit names the units it is sold in",
+         %{household: h} = ctx do
+      onion = ingredient!("Fictitious onion")
+      product!(onion, package: {1_000_000, :g}, price_cents: 900)
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [%{"ingredient" => onion.name, "quantity" => 1, "unit" => "unit"}]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert [missing] = result["cost"]["missing_prices"]
+      assert missing["reason"] == "no_matching_presentation"
+      assert missing["sold_in"] == ["g"]
+      assert missing["hint"] =~ "restate the quantity in g"
+      assert missing["hint"] =~ "never converts units"
+    end
+
+    test "a missing price without any stored price names no units", %{household: h} = ctx do
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", draft_args(ctx)}]}])
+
+      assert Enum.all?(result["cost"]["missing_prices"], &(not Map.has_key?(&1, "sold_in")))
+    end
+
     test "rejects an AI-created Draft that breaks a household Restriction", %{household: h} do
       beef = ingredient!("Fictitious beef", [:contains_meat])
       diet!(h.owner, :vegetarian)

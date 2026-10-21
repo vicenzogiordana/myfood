@@ -196,7 +196,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "omit them) without a catalog entry; they are never bought or priced and never " <>
             "block a recipe. " <>
             "Nutrition and cost are computed by code and reported partial when data is " <>
-            "missing; a partial Draft is usable, never re-create it only for that. To fix a " <>
+            "missing; a partial Draft is usable, never re-create it only for that, except " <>
+            "that a missing price with sold_in names the units the Ingredient is sold in: " <>
+            "restate its quantity in one of them to price it. To fix a " <>
             "Draft, call again with replaces_recipe_id (the same name and origin also " <>
             "revise it): it never adds a duplicate. The Draft lives only in this chat; it is " <>
             "never saved by you. AI-created Drafts can be planned; a dictated recipe is saved " <>

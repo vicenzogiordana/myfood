@@ -241,7 +241,9 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
         "usable" => true,
         "note" =>
           "The Draft is usable as is: plan it and present it. Missing nutrition or prices " <>
-            "come from the catalog, so do not re-create the Draft only for them."
+            "come from the catalog, so do not re-create the Draft only for them. The one " <>
+            "exception is a missing price with sold_in: restating that quantity in a unit " <>
+            "it is sold in prices it."
       }
   end
 

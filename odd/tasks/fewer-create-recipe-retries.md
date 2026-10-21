@@ -22,8 +22,8 @@ catalog matches rejected, and unit mismatches the model cannot fix.
 
 ## Checklist
 
-- [ ] T1 Optional blank string arguments are absent (route: inline, one module `tools.ex` + tests)
-- [ ] T2 Auto-resolve a clear single candidate in `create_recipe` (route: inline, `ingredient_match.ex`, `recipe_draft.ex`, `tools.ex` + tests)
+- [x] T1 Optional blank string arguments are absent (route: inline, one module `tools.ex` + tests)
+- [x] T2 Auto-resolve a clear single candidate in `create_recipe` (route: inline, `ingredient_match.ex`, `recipe_draft.ex`, `tools.ex` + tests)
 - [ ] T3 `sold_in` + hint on `no_matching_presentation` (route: inline, `purchase.ex` + tests)
 - [ ] T4 Tool descriptions, agent instructions, CHANNELS.md and CONTEXT.md updated
 
@@ -48,4 +48,6 @@ worker is not an orchestrator, so every task runs inline in that worker.
 
 ## Progress / evidence
 
-Filled per task with commit identities.
+- T1: commit 22498a3; RED observed (2 failing), GREEN `mix test test/meal_planner_api/planning_agent/` 598 passed.
+- T2: commit 45a3261; RED observed (resolve test failing without lib change), GREEN planning_agent suite 601 passed. Lead margin 0.2 chosen from probed scores: "Tomate"/"Tomate perita" 1.0 vs "Tomate cherry" 1.0 (ambiguous), "Queso mozzarella"/"Muzzarella" 0.41 alone (clear), "harina 000" two flours at 0.64 (ambiguous).
+- T3: RED observed (sold_in nil), GREEN planning_agent suite 603 passed.

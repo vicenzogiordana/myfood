@@ -443,7 +443,11 @@ defmodule MealPlannerApi.PlanningAgent.PurchaseToolsTest do
                  "ingredient" => eggs.name,
                  "quantity_milli" => 100_000,
                  "unit" => "g",
-                 "reason" => "no_matching_presentation"
+                 "reason" => "no_matching_presentation",
+                 "sold_in" => ["unit"],
+                 "hint" =>
+                   "Sold only in unit. For a Recipe Draft, restate the quantity in unit " <>
+                     "with create_recipe to price it. Code never converts units."
                },
                %{
                  "ingredient" => saffron.name,

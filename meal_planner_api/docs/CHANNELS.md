@@ -349,6 +349,11 @@ nutrition and cost look like:
   `missing` names the Ingredients without data ("partial nutrition").
 - `cost` is the consumed-ingredient cost at stored prices; missing prices are
   named and left out of the total (`complete: false`), never zero.
+- A missing price with reason `no_matching_presentation` (the Ingredient is
+  sold, but not in the unit asked) names the units it is sold in, e.g.
+  `"sold_in": ["g"]`, with a hint to restate the quantity in that unit
+  (issue #164); Proposal `missing_prices` carry the same. Code never converts
+  units by guessing weights.
 
 Paid execution requires `PLANNING_AGENT_SPEND_CAP_MICROS`,
 `PLANNING_AGENT_TOKEN_CAP`, `PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS` and the
