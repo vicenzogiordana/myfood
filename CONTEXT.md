@@ -125,8 +125,12 @@ A recipe private to one Household, either AI-created (saved when a confirmed Pro
 _Avoid_: Custom recipe, my recipe
 
 **Recipe Draft**:
-A recipe the culinary agent built during a Planning Session that exists only in its Workspace until a confirmation saves it. Re-creating it revises the same Draft; a Draft missing only nutrition or prices is still usable.
+A recipe the culinary agent built during a Planning Session that exists only in its Workspace until a confirmation saves it. Re-creating it revises the same Draft; a Draft missing only nutrition or prices is still usable. A Draft pinned to a meal the household asked for stays on the meals it is pinned to, unless the household asks to repeat it.
 _Avoid_: Temporary recipe, generated recipe
+
+**Staple**:
+Water, salt or pepper: assumed always at home, never bought, priced or counted in cost, and never a reason a recipe cannot be made.
+_Avoid_: Pantry basic, free ingredient
 
 **Recipe Origin**:
 Whether a recipe is traditional, AI-created or user-created; always shown to Members.
