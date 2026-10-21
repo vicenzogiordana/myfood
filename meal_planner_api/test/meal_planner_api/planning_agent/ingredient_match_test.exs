@@ -79,4 +79,28 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatchTest do
       refute Map.has_key?(IngredientMatch.resolve(["tomate."]), "tomate.")
     end
   end
+
+  # Issue #164: create_recipe uses an unknown name's one clear candidate.
+  describe "clear_matches/1" do
+    test "takes the only close candidate, or one well ahead of the rest", %{
+      ingredients: ingredients
+    } do
+      {:ok, plum} = Catalog.create_ingredient(%{name: "Tomate perita", category: :otros})
+
+      assert IngredientMatch.close_matches(["tomate peritas"])["tomate peritas"] ==
+               ["Tomate perita", "Tomate"]
+
+      clear = IngredientMatch.clear_matches(["Queso mozzarella", "mozzarella", "tomate peritas"])
+
+      assert clear["Queso mozzarella"].id == ingredients["Muzzarella"].id
+      assert clear["mozzarella"].id == ingredients["Muzzarella"].id
+      assert clear["tomate peritas"].id == plum.id
+    end
+
+    test "leaves out close candidates that score alike and names without any" do
+      {:ok, _} = Catalog.create_ingredient(%{name: "Harina leudante", category: :otros})
+
+      assert IngredientMatch.clear_matches(["harina 000", "Imaginary truffle"]) == %{}
+    end
+  end
 end

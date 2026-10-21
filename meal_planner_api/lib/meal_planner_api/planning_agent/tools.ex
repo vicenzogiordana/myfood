@@ -187,9 +187,11 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
         name: "create_recipe",
         description:
           "Draft a new recipe when existing recipes do not fit, or build the recipe a Member " <>
-            "dictates (origin user_created). Use catalog Ingredient names only: unknown " <>
-            "Ingredients reject the Draft and list close catalog matches to use instead; one " <>
-            "under missing_from_catalog has none, so never retry it under another name. " <>
+            "dictates (origin user_created). Use catalog Ingredient names only. An unknown " <>
+            "Ingredient with one clear close match is used as that match and listed under " <>
+            "resolved (requested, used); other unknown Ingredients reject the Draft and list " <>
+            "close catalog matches to use instead; one under missing_from_catalog has none, " <>
+            "so never retry it under another name. " <>
             "Water, salt and pepper are staples, always at home: list them by name (or " <>
             "omit them) without a catalog entry; they are never bought or priced and never " <>
             "block a recipe. " <>
@@ -466,6 +468,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       {data
        |> Map.put("status", if(revised?, do: "revised", else: "drafted"))
        |> with_renamed(Map.get(draft, :renamed, []))
+       |> with_resolved(Map.get(draft, :resolved, []))
        |> Map.merge(RecipeDraft.outcome(draft)), workspace, :continue}
     else
       {:error, error} -> {error, ctx.workspace, :continue}
@@ -1297,6 +1300,20 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       "renamed_ingredients" => renamed,
       "renamed_note" =>
         "These Ingredients were matched to the catalog names shown; call them by those names."
+    })
+  end
+
+  # Requested Ingredients the catalog does not have, resolved to their one
+  # clear close match (issue #164) instead of failing the call.
+  defp with_resolved(result, []), do: result
+
+  defp with_resolved(result, resolved) do
+    Map.merge(result, %{
+      "resolved" => resolved,
+      "resolved_note" =>
+        "These Ingredients were not in the catalog and were replaced by the closest one " <>
+          "shown under used. Tell the household only when the meaning could differ (e.g. " <>
+          "a different cut or variety that changes the dish); otherwise just use the name."
     })
   end
 

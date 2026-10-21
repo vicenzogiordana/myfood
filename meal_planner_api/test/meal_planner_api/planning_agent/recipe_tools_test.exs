@@ -254,14 +254,14 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
 
     test "lists close catalog matches for unknown Ingredients (issue #154)",
          %{household: h} = ctx do
-      bun = ingredient!("Fictitious pan para hamburguesas")
+      {:ok, wheat} = Catalog.create_ingredient(%{name: "Harina de trigo", category: :otros})
+      {:ok, raising} = Catalog.create_ingredient(%{name: "Harina leudante", category: :otros})
       _unrelated = ingredient!("Fictitious lemon")
 
       args =
         draft_args(ctx, %{
           "ingredients" => [
-            %{"ingredient" => "Fictitious tomatoes", "quantity" => 200, "unit" => "g"},
-            %{"ingredient" => "Pan de hamburguesa", "quantity" => 2, "unit" => "unit"},
+            %{"ingredient" => "harina 000", "quantity" => 500, "unit" => "g"},
             %{"ingredient" => "Imaginary truffle", "quantity" => 10, "unit" => "g"}
           ]
         })
@@ -271,33 +271,61 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       assert result["error"] == "unknown_ingredients"
       matches = Map.new(result["close_matches"], &{&1["ingredient"], &1["matches"]})
 
-      assert hd(matches["Fictitious tomatoes"]) == ctx.tomato.name
-      assert hd(matches["Pan de hamburguesa"]) == bun.name
-      refute "Fictitious lemon" in matches["Pan de hamburguesa"]
+      assert Enum.sort(matches["harina 000"]) == [wheat.name, raising.name]
+      refute "Fictitious lemon" in matches["harina 000"]
       assert matches["Imaginary truffle"] == []
       assert result["hint"] =~ "close_matches"
     end
 
-    # Issue #160: "the catalog has no mozzarella" while it had "Muzzarella".
-    test "close matches are ranked by similarity, spelling variants included",
+    # Issue #164: one clear candidate is used, and the substitution reported.
+    test "an unknown Ingredient with one clear close match resolves to it and is reported",
          %{household: h} = ctx do
+      {:ok, tomato} = Catalog.create_ingredient(%{name: "Tomate perita", category: :otros})
       {:ok, cheese} = Catalog.create_ingredient(%{name: "Muzzarella", category: :otros})
-      {:ok, flour} = Catalog.create_ingredient(%{name: "Harina de trigo", category: :otros})
 
       args =
         draft_args(ctx, %{
           "ingredients" => [
-            %{"ingredient" => "mozzarella", "quantity" => 200, "unit" => "g"},
-            %{"ingredient" => "harina 000", "quantity" => 500, "unit" => "g"}
+            %{"ingredient" => ctx.pasta.name, "quantity" => 200, "unit" => "g"},
+            %{"ingredient" => "Tomate", "quantity" => 300, "unit" => "g"},
+            %{"ingredient" => "Queso mozzarella", "quantity" => 150, "unit" => "g"}
           ]
         })
 
       [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
 
-      matches = Map.new(result["close_matches"], &{&1["ingredient"], &1["matches"]})
-      assert hd(matches["mozzarella"]) == cheese.name
-      assert hd(matches["harina 000"]) == flour.name
+      assert result["status"] == "drafted"
+
+      assert Enum.map(result["ingredients"], & &1["ingredient"]) ==
+               [ctx.pasta.name, tomato.name, cheese.name]
+
+      assert result["resolved"] == [
+               %{"requested" => "Tomate", "used" => "Tomate perita"},
+               %{"requested" => "Queso mozzarella", "used" => "Muzzarella"}
+             ]
+
+      assert result["resolved_note"] =~ "only when the meaning could differ"
+    end
+
+    # Issue #164: two close candidates are for the agent to choose from.
+    test "two close candidates still reject the Draft, retryable and not missing",
+         %{household: h} = ctx do
+      {:ok, plum} = Catalog.create_ingredient(%{name: "Tomate perita", category: :otros})
+      {:ok, cherry} = Catalog.create_ingredient(%{name: "Tomate cherry", category: :otros})
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [%{"ingredient" => "Tomate", "quantity" => 300, "unit" => "g"}]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["error"] == "unknown_ingredients"
+      [%{"ingredient" => "Tomate", "matches" => matches}] = result["close_matches"]
+      assert plum.name in matches and cherry.name in matches
       assert result["missing_from_catalog"] == []
+      refute result["hint"] =~ "not in the catalog"
+      refute Map.has_key?(result, "resolved")
     end
 
     test "an unambiguous spelling variant resolves to its catalog name and is reported",
@@ -339,21 +367,6 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       assert result["hint"] =~ "Do not retry it with other names"
       assert result["hint"] =~ "tell the household"
       assert result["hint"] =~ "plan the rest"
-    end
-
-    test "every unknown Ingredient with a close match is retryable, none is missing",
-         %{household: h} = ctx do
-      args =
-        draft_args(ctx, %{
-          "ingredients" => [
-            %{"ingredient" => "Fictitious tomatoes", "quantity" => 200, "unit" => "g"}
-          ]
-        })
-
-      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
-
-      assert result["missing_from_catalog"] == []
-      refute result["hint"] =~ "not in the catalog"
     end
 
     test "labels nutrition and cost partial when data is missing, never zero",

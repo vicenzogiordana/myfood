@@ -313,9 +313,14 @@ Ingredients are catalog Ingredients only. Names match the catalog by
 similarity (Postgres `pg_trgm` trigrams over unaccented names, issue #160): a
 spelling variant that is unambiguous (case, accents, a plural ending, e.g.
 "limones" for "Limón") is used under its catalog name and reported to the
-agent; any other unknown one rejects the Draft and the agent gets close
-catalog matches ranked by similarity to retry with ("Muzzarella" for
-"mozzarella", "Harina de trigo" for "harina 000"). `lookup_prices`,
+agent. An unknown name with one clear close match (the only candidate, or a
+top candidate scoring at least 0.2 above the next, issue #164) is used as
+that match and reported under `resolved`, e.g.
+`[{"requested": "Tomate", "used": "Tomate perita"}]`; the agent tells the
+Member only when the meaning could differ. Any other unknown one (two close
+candidates alike, e.g. "harina 000" for "Harina de trigo" and "Harina
+leudante") rejects the Draft and the agent gets close catalog matches ranked
+by similarity to retry with. `lookup_prices`,
 `set_session_brand` and the `search_recipes` ingredient matching use the same
 similarity. One with no close match is
 listed as missing from the catalog, and the agent tells the Member that dish
