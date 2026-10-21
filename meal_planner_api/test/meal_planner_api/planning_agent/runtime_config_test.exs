@@ -149,7 +149,7 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
     refute Keyword.has_key?(adapter, :effort)
 
     assert {:ok, state} = ClaudeMessages.init(adapter)
-    assert state.config.model == "claude-opus-5-5"
+    assert state.config.model == "claude-haiku-5-5"
     assert state.config.effort == "medium"
   end
 
@@ -170,14 +170,16 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
     assert adapter[:cache_read_price_micros_per_mtok] == 200_000
   end
 
-  test "refusal fallbacks can be turned off for models that reject them" do
-    off =
-      read_runtime(
-        Map.merge(@valid, @claude)
-        |> Map.put("PLANNING_AGENT_CLAUDE_FALLBACKS", "false")
-      )
+  test "refusal fallbacks are off by default and can be turned on for models that accept them" do
+    for {value, expected} <- [{"true", true}, {"false", false}] do
+      config =
+        read_runtime(
+          Map.merge(@valid, @claude)
+          |> Map.put("PLANNING_AGENT_CLAUDE_FALLBACKS", value)
+        )
 
-    assert Keyword.fetch!(off, ClaudeMessages)[:fallbacks] == false
+      assert Keyword.fetch!(config, ClaudeMessages)[:fallbacks] == expected
+    end
 
     for unset <- [nil, "maybe"] do
       env = Map.merge(@valid, @claude)
@@ -185,7 +187,7 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
       adapter = Keyword.fetch!(read_runtime(env), ClaudeMessages)
       refute Keyword.has_key?(adapter, :fallbacks)
       assert {:ok, state} = ClaudeMessages.init(adapter)
-      assert state.config.fallbacks == true
+      assert state.config.fallbacks == false
     end
   end
 
@@ -193,6 +195,7 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
     config =
       read_runtime(
         Map.merge(@valid, @claude)
+        |> Map.put("PLANNING_AGENT_CLAUDE_FALLBACKS", "true")
         |> Map.put("ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK", "25e6")
       )
 

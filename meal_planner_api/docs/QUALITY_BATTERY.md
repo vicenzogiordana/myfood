@@ -125,16 +125,17 @@ The battery makes paid provider calls. It needs:
   - OpenAI: `OPENAI_API_KEY`, `OPENAI_INPUT_PRICE_MICROS_PER_MTOK`,
     `OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK`.
   - Claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_INPUT_PRICE_MICROS_PER_MTOK`,
-    `ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK`, and the refusal-fallback prices
-    `ANTHROPIC_FALLBACK_INPUT_PRICE_MICROS_PER_MTOK` and
-    `ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK` (the highest price
-    among the possible fallback models). Optional:
+    `ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK`. Optional:
     `ANTHROPIC_CACHE_WRITE_PRICE_MICROS_PER_MTOK` (default 1.25x input),
     `ANTHROPIC_CACHE_READ_PRICE_MICROS_PER_MTOK` (default 1x input),
-    `PLANNING_AGENT_CLAUDE_MODEL` (default `claude-opus-5-5`) and
+    `PLANNING_AGENT_CLAUDE_MODEL` (default `claude-haiku-5-5`) and
     `PLANNING_AGENT_CLAUDE_EFFORT` (default `medium`) and
-    `PLANNING_AGENT_CLAUDE_FALLBACKS` (default `true`; set `false` for models
-    that reject server-side refusal fallbacks, such as `claude-haiku-5-5`).
+    `PLANNING_AGENT_CLAUDE_FALLBACKS` (default `false`, since
+    `claude-haiku-5-5` rejects server-side refusal fallbacks; set `true` for
+    models that accept them, such as `claude-opus-5-5`, together with the
+    refusal-fallback prices `ANTHROPIC_FALLBACK_INPUT_PRICE_MICROS_PER_MTOK`
+    and `ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK`, the highest price
+    among the possible fallback models).
 - The OR-Tools optimizer: `PLANNING_AGENT_MAX_CONCURRENT_OPTIMIZER_RUNS`,
   plus `OPTIMIZER_PYTHON` pointing at a Python with the version pinned in
   `requirements.txt`.
@@ -161,3 +162,9 @@ until then.
 offline with the scripted model and a fake optimizer. It also covers the
 zero-tolerance verdict, the spend ceiling and the refusals. These tests make
 no provider call.
+
+## Trying the agent by hand
+
+`mix planning_agent.chat` runs one live Planning Session over a fictitious
+Household in the terminal, with the same provider environment as the
+battery. See [PLANNING_CHAT.md](PLANNING_CHAT.md).

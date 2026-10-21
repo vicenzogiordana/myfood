@@ -28,9 +28,11 @@ defmodule MealPlannerApi.PlanningAgent.Battery.MeteredModelTest do
   }
 
   # The prices of the 2026-10-19 battery (issue #144): cache write unset,
-  # so 1.25x input.
+  # so 1.25x input. That battery ran Claude Opus 5.5 with refusal fallbacks on.
   defp claude_opts do
     [
+      model: "claude-opus-5-5",
+      fallbacks: true,
       api_key: "test-key",
       spend_cap_micros: 1_000_000,
       token_cap: 10_000_000,
