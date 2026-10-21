@@ -14,6 +14,10 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
       #164), reported under `resolved`. Any other unknown Ingredient
       rejects the whole Draft with close catalog matches ranked by
       similarity; it is never invented
+    * two different requested names that resolve to one Ingredient (issue
+      #166) are merged into one line when their units match, reported
+      under `merged`; in different units they reject the Draft with
+      `duplicate_ingredient`, naming the requested names and the Ingredient
     * nutrition per serving is computed by code from the Ingredients'
       nutrition per 100 g or ml. A nutrient is only reported when every
       Ingredient has it in a weight or volume unit; otherwise it is `nil`
@@ -110,6 +114,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
           cost: map(),
           renamed: [%{String.t() => String.t()}],
           resolved: [%{String.t() => String.t()}],
+          merged: [map()],
           staples: [%{name: String.t(), quantity_milli: pos_integer(), unit: :g | :ml | :unit}]
         }
 
@@ -198,6 +203,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
          cost: cost(ingredients, servings),
          renamed: matched.renamed,
          resolved: matched.resolved,
+         merged: matched.merged,
          staples: staples
        }}
     end
@@ -490,13 +496,13 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
             }
           end)
 
-        keys = Enum.map(ingredients, &{&1.ingredient_id, &1.unit})
-
-        if Enum.uniq(keys) == keys do
+        with {:ok, ingredients, merged} <- merge_same_ingredient(requested, ingredients) do
           {:ok, ingredients, Map.new(resolved, fn {_, i} -> {i.id, i} end),
-           %{renamed: renamed(requested, named), resolved: substituted(requested, clear)}}
-        else
-          invalid("duplicate_ingredient")
+           %{
+             renamed: renamed(requested, named),
+             resolved: substituted(requested, clear),
+             merged: merged
+           }}
         end
 
       unknown ->
@@ -514,6 +520,93 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
            "hint" => unknown_hint(missing)
          }}
     end
+  end
+
+  # Different requested names that resolve to one Ingredient (issue #166),
+  # e.g. "Tomate" auto-resolved to "Tomate perita" next to an explicit
+  # "Tomate perita". In one unit their quantities are added up into one
+  # line, at the first one's place, and reported; in different units the
+  # Draft is rejected naming the requested names and the Ingredient. One
+  # name listed in two units stays two lines.
+  defp merge_same_ingredient(requested, ingredients) do
+    collisions =
+      requested
+      |> Enum.zip(ingredients)
+      |> Enum.group_by(fn {_item, line} -> line.ingredient_id end)
+      |> Map.values()
+      |> Enum.map(fn pairs ->
+        %{
+          lines: Enum.map(pairs, &elem(&1, 1)),
+          names: pairs |> Enum.map(&elem(&1, 0).name) |> Enum.uniq(),
+          units: pairs |> Enum.map(&elem(&1, 1).unit) |> Enum.uniq()
+        }
+      end)
+      |> Enum.filter(&match?([_, _ | _], &1.names))
+      |> Enum.sort_by(fn %{lines: [first | _]} ->
+        Enum.find_index(ingredients, &(&1 == first))
+      end)
+
+    case Enum.reject(collisions, &match?([_], &1.units)) do
+      [] -> {:ok, merge_lines(ingredients, collisions), Enum.map(collisions, &merged_data/1)}
+      conflicting -> duplicate_ingredients(conflicting)
+    end
+  end
+
+  defp merge_lines(ingredients, collisions) do
+    totals =
+      Map.new(collisions, fn %{lines: [first | _] = lines} ->
+        {first.ingredient_id, lines |> Enum.map(& &1.quantity_milli) |> Enum.sum()}
+      end)
+
+    {lines, _seen} =
+      Enum.reduce(ingredients, {[], MapSet.new()}, fn line, {lines, seen} ->
+        case Map.fetch(totals, line.ingredient_id) do
+          :error ->
+            {[line | lines], seen}
+
+          {:ok, total} ->
+            if MapSet.member?(seen, line.ingredient_id),
+              do: {lines, seen},
+              else:
+                {[%{line | quantity_milli: total} | lines], MapSet.put(seen, line.ingredient_id)}
+        end
+      end)
+
+    Enum.reverse(lines)
+  end
+
+  defp merged_data(%{lines: [first | _] = lines, names: names}) do
+    %{
+      "requested" => names,
+      "ingredient" => first.ingredient,
+      "quantity_milli" => lines |> Enum.map(& &1.quantity_milli) |> Enum.sum(),
+      "unit" => Atom.to_string(first.unit)
+    }
+  end
+
+  defp duplicate_ingredients(conflicting) do
+    duplicates =
+      Enum.map(conflicting, fn %{lines: [first | _], names: names, units: units} ->
+        %{
+          "requested" => names,
+          "ingredient" => first.ingredient,
+          "units" => Enum.map(units, &Atom.to_string/1)
+        }
+      end)
+
+    hint =
+      Enum.map_join(duplicates, " ", fn duplicate ->
+        "#{Enum.join(duplicate["requested"], ", ")} all mean the catalog Ingredient " <>
+          "#{duplicate["ingredient"]}, in different units."
+      end) <> " List each Ingredient once, in one unit, under its catalog name."
+
+    {:error,
+     %{
+       "error" => "invalid_recipe",
+       "reason" => "duplicate_ingredient",
+       "duplicates" => duplicates,
+       "hint" => hint
+     }}
   end
 
   # Requested names that resolved to a catalog Ingredient spelled otherwise

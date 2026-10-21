@@ -325,7 +325,14 @@ by similarity to retry with. `lookup_prices`,
 similarity. One with no close match is
 listed as missing from the catalog, and the agent tells the Member that dish
 cannot be made instead of guessing other names), and its nutrition and cost
-are computed by code. When the Member asks for a dish no recipe provides, the
+are computed by code. Two different requested names that resolve to
+one Ingredient (issue #166, e.g. "Tomate" resolved to "Tomate perita" next to
+an explicit "Tomate perita") are added up into one line when their units
+match and reported under `merged_ingredients`
+(`[{"requested": ["Tomate", "Tomate perita"], "ingredient": "Tomate perita",
+"quantity_milli": 500000, "unit": "g"}]`); in different units the Draft is
+rejected with `duplicate_ingredient`, whose `duplicates` name the requested
+names, the Ingredient and the units. When the Member asks for a dish no recipe provides, the
 agent creates it directly as an AI-created Draft, without asking first, and says
 it was created with AI and may contain errors; it still asks first before
 creating recipes to fit an infeasible budget or a plan limited to "only recipes
