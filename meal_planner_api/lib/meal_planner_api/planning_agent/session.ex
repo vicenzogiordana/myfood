@@ -747,6 +747,8 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       subscribers: %{},
       task: nil,
       deadline_ref: nil,
+      # The notice a limit would add to the running turn (issue #151).
+      limit_notice: nil,
       os_pids: MapSet.new(),
       allowance: allowance(args, saved),
       pending_limit: saved && saved.pending_limit,
@@ -1082,12 +1084,20 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   # outcome stands; otherwise the run reached its time limit.
   defp do_info({:deadline, ref}, %{task: %Task{ref: ref}} = state) do
     case halt_turn(state) do
-      {state, {:ok, result}} -> state |> finish_run(result.outcome) |> after_run()
-      {state, _shutdown} -> {:noreply, finish_run(state, {:limit_reached, "time"})}
+      {state, {:ok, result}} ->
+        state |> finish_run(result.outcome) |> after_run()
+
+      {state, _shutdown} ->
+        {:noreply, state |> deadline_notice() |> finish_run({:limit_reached, "time"})}
     end
   end
 
   defp do_info({:deadline, _stale}, state), do: {:noreply, state}
+
+  defp do_info({:limit_notice, ref, notice}, %{task: %Task{ref: ref}} = state),
+    do: {:noreply, %{state | limit_notice: notice}}
+
+  defp do_info({:limit_notice, _stale_ref, _notice}, state), do: {:noreply, state}
 
   defp do_info({:DOWN, ref, :process, _pid, reason}, %{task: %Task{ref: ref}} = state) do
     Logger.error("planning agent turn crashed: #{inspect(reason)}")
@@ -1502,6 +1512,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         checkpoint = fn model_state -> send(session, {:model_state, ref, seal(model_state)}) end
         on_os_process = fn event -> send(session, {:os_process, ref, event}) end
         report_allowance = fn allowance -> send(session, {:allowance, ref, allowance}) end
+        report_limit_notice = fn notice -> send(session, {:limit_notice, ref, notice}) end
 
         bounds =
           CallBounds.new(
@@ -1535,6 +1546,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
           |> Map.put(:bounds, bounds)
           |> Map.put(:checkpoint, checkpoint)
           |> Map.put(:report_allowance, report_allowance)
+          |> Map.put(:report_limit_notice, report_limit_notice)
           |> Map.put(:on_workspace, fn workspace ->
             send(session, {:workspace, ref, workspace})
           end)
@@ -1545,8 +1557,18 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
     send(task.pid, {holder, task.ref})
     deadline_ref = Process.send_after(self(), {:deadline, task.ref}, state.deadline_ms)
-    %{state | task: task, deadline_ref: deadline_ref}
+    %{state | task: task, deadline_ref: deadline_ref, limit_notice: nil}
   end
+
+  # The deadline killed the turn before `Loop` could add its limit notice:
+  # the notice its latest tool results called for is shown instead, so a run
+  # cut by time after failing tools still names them (issue #151).
+  defp deadline_notice(%{limit_notice: notice} = state) when is_binary(notice) do
+    emit(state, %{"type" => "assistant_message", "text" => notice})
+    %{state | limit_notice: nil}
+  end
+
+  defp deadline_notice(state), do: state
 
   defp stop_turn(state), do: state |> halt_turn() |> elem(0)
 
@@ -1595,6 +1617,9 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
       {:os_process, ^ref, event} ->
         adopt_checkpoints(track_os_process(state, event), ref)
+
+      {:limit_notice, ^ref, notice} ->
+        adopt_checkpoints(%{state | limit_notice: notice}, ref)
 
       {:agent_event, ^ref, _late} ->
         adopt_checkpoints(state, ref)

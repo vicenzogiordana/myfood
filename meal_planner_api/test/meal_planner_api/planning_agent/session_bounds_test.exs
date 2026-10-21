@@ -648,6 +648,53 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
                       %{"type" => "run_finished", "outcome" => "partial"}}
     end
 
+    # Issue #151: the Session's wall-clock deadline kills the turn, so the
+    # notice comes from the tool results the turn had already reported.
+    test "a run cut by the deadline after failing tools tells the Member which failed",
+         %{household: h} do
+      steps = FakeRecipeSearch.steps!(List.duplicate(:fail, 20))
+      slow = fn _request -> Process.sleep(1_000) && {:text, "late"} end
+
+      {session_id, pid} =
+        start!(h, [search_forever("rice"), slow],
+          recipe_search: {FakeRecipeSearch, steps: steps},
+          call_policies: %{model: %{timeout_ms: 5_000}, read: %{timeout_ms: 100, backoff_ms: 1}},
+          deadline_ms: 300
+        )
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "assistant_message", "text" => text}},
+                     2_000
+
+      assert text =~ "recipe search (search failed)"
+      assert text =~ "try again later"
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "time"}},
+                     1_000
+    end
+
+    test "a run cut by the deadline without failing tools adds no notice", %{household: h} do
+      slow = fn _request -> Process.sleep(1_000) && {:text, "late"} end
+
+      {session_id, pid} =
+        start!(h, [search_forever("rice"), slow],
+          recipe_search: same_evidence(),
+          call_policies: %{model: %{timeout_ms: 5_000}},
+          deadline_ms: 300
+        )
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "time"}},
+                     2_000
+
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "assistant_message"}}
+    end
+
     test "the notice names an unavailable optimizer and its reason", %{household: h} do
       script = List.duplicate({:tool_calls, [{"run_optimizer", %{}}]}, 5)
 
