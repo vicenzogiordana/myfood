@@ -149,7 +149,8 @@ defmodule MealPlannerApi.PlanningAgent.Chat.Household do
       %{key: :flour, name: "Harina de trigo", tags: [:contains_gluten]},
       %{key: :yeast, name: "Levadura", tags: []},
       %{key: :mozzarella, name: "Muzzarella", tags: [:milk, :animal_product]},
-      %{key: :bun, name: "Pan de hamburguesa", tags: [:contains_gluten]}
+      %{key: :bun, name: "Pan de hamburguesa", tags: [:contains_gluten]},
+      %{key: :oil, name: "Aceite de oliva", tags: []}
     ]
   end
 
@@ -176,7 +177,8 @@ defmodule MealPlannerApi.PlanningAgent.Chat.Household do
       product(:flour, "Harina de trigo 000 1 kg", "La Molienda", {1_000_000, :g}, 110_000),
       product(:yeast, "Levadura seca 10 g", nil, {10_000, :g}, 60_000),
       product(:mozzarella, "Muzzarella 1 kg", "Tambo Azul", {1_000_000, :g}, 780_000),
-      product(:bun, "Pan de hamburguesa x4", "Panificados Sol", {4_000, :unit}, 210_000)
+      product(:bun, "Pan de hamburguesa x4", "Panificados Sol", {4_000, :unit}, 210_000),
+      product(:oil, "Aceite de oliva 500 ml", "Olivares del Sur", {500_000, :ml}, 650_000)
     ]
   end
 
