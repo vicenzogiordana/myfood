@@ -1089,7 +1089,16 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     case CallBounds.run(Map.get(ctx, :bounds), :solver, nil, attempt) do
       {:ok, %{"meals" => meals} = result, _} when is_list(meals) ->
         with {:ok, parsed} <- parse_meals(meals) do
-          {:ok, %{meals: parsed, extra: Map.take(result, ["deviations", "optimality"])}}
+          extra =
+            case Map.take(result, ["deviations", "optimality"]) do
+              %{"deviations" => deviations} = extra ->
+                %{extra | "deviations" => deviations_data(deviations)}
+
+              extra ->
+                extra
+            end
+
+          {:ok, %{meals: parsed, extra: extra}}
         end
 
       {:ok, _other, _} ->
@@ -1102,6 +1111,30 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
         {:error, :optimizer_timeout, %{}}
     end
   end
+
+  # A budget Deviation of the optimizer counts cents: its amounts are renamed
+  # `*_cents` so the model gets their code-formatted twins (issue #162).
+  # Nutrition Deviations count grams or calories and stay as they are.
+  @deviation_amounts ~w(bound actual amount)
+
+  defp deviations_data(deviations) when is_list(deviations),
+    do: Enum.map(deviations, &deviation_data/1)
+
+  defp deviations_data(other), do: other
+
+  defp deviation_data(%{"goal" => "budget"} = deviation) do
+    Enum.reduce(@deviation_amounts, deviation, fn key, acc ->
+      case Map.pop(acc, key) do
+        {nil, acc} -> acc
+        {value, acc} -> Map.put(acc, key <> "_cents", cents(value))
+      end
+    end)
+  end
+
+  defp deviation_data(deviation), do: deviation
+
+  defp cents(value) when is_float(value), do: round(value)
+  defp cents(value), do: value
 
   # Recipe search is a read tool: bounded and retried on transient failure.
   defp search(ctx, filters) do
