@@ -138,7 +138,8 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
         "replaces_recipe_id" => %{
           "type" => "string",
           "description" =>
-            "Recipe id of a Draft of this chat to revise instead of adding a new Draft"
+            "Recipe id of a Draft of this chat to revise instead of adding a new Draft; " <>
+              "omit it (or leave it empty) for a new Draft"
         },
         "ingredients" => %{
           "type" => "array",
