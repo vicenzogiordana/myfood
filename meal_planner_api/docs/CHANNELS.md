@@ -188,7 +188,7 @@ Every event is pushed as `agent_event` with `type` and `session_id`:
 | `assistant_message` | `{text}` | Agent reply |
 | `question` | `{text}` | The agent asks one question; the turn ended |
 | `proposal` | `{proposal_id, status, meals: [{date, slot, recipe_id, name, origin, draft}], skipped: [{date, slot}], purchase, consumed_cost, budget, deviations}` | A Proposal validated by code; `status` is code-owned (`valid` or `requires_approval`). `skipped` lists the meals the Household does not eat at home: they have no meal, are not bought or costed, and confirming saves nothing for them (see "Skipped meals" below). Every meal shows its Recipe Origin (`traditional`, `ai_created`, `user_created`); `draft: true` marks an unsaved AI-created Recipe Draft, saved as a private Household Recipe only if this Proposal is confirmed. See "Proposal Purchase" below |
-| `recipe_draft` | `{recipe_id, name, origin, draft: true, servings, slots, ingredients: [{ingredient, quantity_milli, unit}], steps, nutrition, cost}` | The agent built a Recipe Draft from catalog Ingredients. `origin` is `ai_created` (disclose as AI-made, possibly imperfect) or `user_created` (a dictated recipe). See "Recipe Drafts" below |
+| `recipe_draft` | `{recipe_id, name, origin, draft: true, servings, slots, ingredients: [{ingredient, quantity_milli, unit}], staples: [{ingredient, quantity_milli, unit}], steps, nutrition, cost}` | The agent built a Recipe Draft from catalog Ingredients; `staples` are water, salt or pepper, never priced or bought. `origin` is `ai_created` (disclose as AI-made, possibly imperfect) or `user_created` (a dictated recipe). See "Recipe Drafts" below |
 | `recipe_saved` | `{recipe_id, name, origin}` | The Member saved a dictated recipe as a Household Recipe |
 | `optimizer_failed` | `{reason}` | The optimizer failed (including `optimizer_busy` / `optimizer_unconfigured` from the global subprocess cap); no fallback plan is produced |
 | `session_brand_changed` | `{ingredient, brand, source, previous_brand, previous_source}` — `source` is `session`, `household` or `null` | The agent set or cleared a Session Brand (this Planning Session only; household settings are unchanged). `brand` is the brand now bought for the ingredient |
@@ -255,13 +255,31 @@ Planned Meal for it. Skipping removes a Pin at that meal. A skip covers the
 whole meal for the Household; it is not an Absence Exception, which lifts one
 Restriction of one Member and is approved only by the Member.
 
+#### Requested dishes and staples
+
+A Recipe Draft the agent creates for a meal the Member asked for ("burgers on
+Tuesday lunch") is pinned there and stays on the meals it is pinned to (issue
+#162): `run_optimizer` never plans it on another meal, even when it is the
+cheapest candidate. Only when the Member asks to have it again does the agent
+pin it to the meal they name or call `edit_workspace` `repeat_recipe`, which
+makes it a candidate for every meal of its slots. A revision
+(`replaces_recipe_id`) keeps this. A Draft that was never pinned is a candidate
+everywhere, as before.
+
+Water, salt and pepper are staples, assumed always at home: a Draft may list
+them without a catalog entry. They are returned under the Draft's `staples`,
+never priced, bought, counted in cost or nutrition, and never block
+`create_recipe`.
+
 #### Money for the agent
 
 Money is integer cents (`*_cents`) in every event and tool result. The agent's
 tool results also carry, next to each `*_cents` integer, the amount formatted
 by code (`"purchase_total": "ARS 49.950,00"` beside `"purchase_total_cents":
 4995000`; `.` between thousands, `,` before the decimals), and the agent is
-told to quote only those and never compute from cents (issue #160). Events
+told to quote only those and never compute from cents (issue #160). The
+budget Deviation of `run_optimizer` carries `bound_cents`, `actual_cents` and
+`amount_cents` with their formatted twins (issue #162). Events
 sent to the client keep only the cents; the client formats them the same way.
 
 #### Brands

@@ -17,6 +17,10 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
       Ingredient has it in a weight or volume unit; otherwise it is `nil`
       and the nutrition is labelled partial, naming the Ingredients
       without data
+    * Staples (water, salt and pepper, issue #162) are assumed always at
+      home: they need no catalog entry, never block a Draft and are kept
+      under `staples`, never priced, bought, counted in cost or nutrition,
+      nor saved as Recipe Ingredients
     * cost is the consumed-ingredient cost of
       `MealPlannerApi.PlanningAgent.Purchase` over stored prices; missing
       prices are named and left out of the total, never zero
@@ -53,6 +57,30 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
   @max_step_length 1_000
   @max_quantity 100_000
   @known_slots ~w(breakfast lunch snack dinner)
+  # Staple names, compared without case, accents or surrounding spaces.
+  @staples MapSet.new([
+             "water",
+             "drinking water",
+             "salt",
+             "table salt",
+             "sea salt",
+             "fine salt",
+             "coarse salt",
+             "pepper",
+             "black pepper",
+             "ground pepper",
+             "ground black pepper",
+             "agua",
+             "agua potable",
+             "sal",
+             "sal fina",
+             "sal gruesa",
+             "sal marina",
+             "pimienta",
+             "pimienta negra",
+             "pimienta molida",
+             "pimienta negra molida"
+           ])
   @units %{"g" => :g, "ml" => :ml, "unit" => :unit}
   @nutrients [
     {"calories", :calories_per_100},
@@ -78,7 +106,8 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
           steps: [String.t()],
           nutrition: map(),
           cost: map(),
-          renamed: [%{String.t() => String.t()}]
+          renamed: [%{String.t() => String.t()}],
+          staples: [%{name: String.t(), quantity_milli: pos_integer(), unit: :g | :ml | :unit}]
         }
 
   @doc "How many Drafts one Planning Session may hold."
@@ -149,6 +178,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
          {:ok, source} <- source(args),
          {:ok, requested} <- requested_ingredients(args),
          {:ok, steps} <- steps(args),
+         {staples, requested} = Enum.split_with(requested, &staple?(&1.name)),
          {:ok, ingredients, catalog, renamed} <- resolve(requested),
          :ok <- restriction_check(source, ingredients, household) do
       {:ok,
@@ -162,7 +192,8 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
          steps: steps,
          nutrition: nutrition(ingredients, catalog, servings),
          cost: cost(ingredients, servings),
-         renamed: renamed
+         renamed: renamed,
+         staples: staples
        }}
     end
   end
@@ -178,6 +209,8 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
       "servings" => draft.servings,
       "slots" => draft.slots,
       "ingredients" => Enum.map(draft.ingredients, &ingredient_data/1),
+      # Drafts kept in a Workspace snapshot from before #162 have no staples.
+      "staples" => draft |> Map.get(:staples, []) |> Enum.map(&staple_data/1),
       "steps" => draft.steps,
       "nutrition" => draft.nutrition,
       "cost" => draft.cost
@@ -238,6 +271,20 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
   def in_context(%{recipe_drafts: drafts}) when is_map(drafts), do: drafts
   def in_context(%{workspace: %{recipe_drafts: drafts}}) when is_map(drafts), do: drafts
   def in_context(_ctx), do: %{}
+
+  @doc "Whether `name` is a staple (water, salt or pepper), assumed always at home."
+  @spec staple?(String.t()) :: boolean()
+  def staple?(name) when is_binary(name) do
+    key =
+      name
+      |> String.trim()
+      |> String.downcase()
+      |> :unicode.characters_to_nfd_binary()
+      |> String.replace(~r/\p{Mn}/u, "")
+      |> String.replace(~r/\s+/, " ")
+
+    MapSet.member?(@staples, key)
+  end
 
   @doc "Whether the Draft may be planned: only AI-created Drafts are, until saved."
   @spec plannable?(t()) :: boolean()
@@ -599,6 +646,14 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
   defp ingredient_data(item) do
     %{
       "ingredient" => item.ingredient,
+      "quantity_milli" => item.quantity_milli,
+      "unit" => Atom.to_string(item.unit)
+    }
+  end
+
+  defp staple_data(item) do
+    %{
+      "ingredient" => item.name,
       "quantity_milli" => item.quantity_milli,
       "unit" => Atom.to_string(item.unit)
     }

@@ -3,6 +3,7 @@
 The behaviour is selected by payload["fake_mode"]:
   solve  - first candidate of every day and slot
   error  - an infeasible error frame with causes
+  code   - an error frame with the code in payload["fake_error"]
   hang   - never answers
   crash  - exits with status 3
   noisy  - prints a non-JSON line before the solution
@@ -36,6 +37,8 @@ def main():
             time.sleep(60)
         elif mode == "crash":
             sys.exit(3)
+        elif mode == "code":
+            send({"type": "error", "id": request_id, "error": payload["fake_error"]})
         elif mode == "error":
             send({"type": "error", "id": request_id, "error": "infeasible",
                   "details": {"causes": ["no_recipe_for_slot"]}})

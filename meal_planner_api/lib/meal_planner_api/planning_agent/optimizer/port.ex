@@ -48,9 +48,13 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.Port do
   alias MealPlannerApi.PlanningAgent.{ConcurrencyLimiter, OsProcess}
 
   @default_timeout_ms 120_000
+  # Every error code optimizador.py returns; the Port test reads the
+  # validation codes from optimizador.py so a new one cannot be missed.
   @known_errors ~w(infeasible unbounded abnormal solver_unavailable invalid_days invalid_slots
                    invalid_constraints invalid_candidates invalid_budget invalid_macro_bounds
-                   missing_slot_candidates invalid_candidate missing_payload)
+                   invalid_excluded_recipes invalid_variety_cap invalid_prior_meals
+                   invalid_time_limit invalid_fixed_meals invalid_avoided_meals
+                   invalid_skipped_meals inconclusive missing_slot_candidates invalid_candidate missing_payload)
                 |> Map.new(&{&1, String.to_atom(&1)})
 
   @impl true
