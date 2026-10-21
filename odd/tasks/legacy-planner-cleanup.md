@@ -26,20 +26,45 @@ Claude Haiku 5.5 the Claude adapter's default model (user request on
 - Claude adapter default: `claude-haiku-5-5`, with refusal fallbacks off
   (Haiku 5.5 rejects the `fallbacks` parameter, #156).
 
-Out of scope: `meal_planner_api/ARCHITECTURE.md` is outside this task's edit
-surface (follow-up if it still names legacy modules).
+Out of scope: `meal_planner_api/ARCHITECTURE.md` (outside this task's edit
+surface) still names `MealPlannerApi.Planning`, `PlanningChat` and
+`PythonOptimizerClient`; `meal_planner_api/openspec/changes/**` are change
+history. Both are follow-ups.
 
 ## Checklist
 
-- [ ] T1 Haiku default for the Claude adapter (tests, docs).
-- [ ] T2 Exhausted guard on revalidation-conflict turns.
-- [ ] T3 Draft revision voids the shown Proposal.
-- [ ] T4 Failure notice on the deadline path.
-- [ ] T5 Merged-line cap and case-only variants.
-- [ ] T6 Remove PythonClient, its Mock and stale config.
-- [ ] T7 Drop legacy tables, schemas and PlanningRepo functions.
-- [ ] T8 Stale docs and legacy root files.
-- [ ] T9 Flaky test root cause.
+Route for every task: inline in this bounded worker (no subagents by the
+pipeline contract); the work was mapped with bounded searches first.
+
+- [x] T1 Haiku default for the Claude adapter (tests, docs). `411bcc0`.
+  RED: 3 failures (default model, fallbacks default, runtime default). GREEN:
+  model, runtime config and battery tests 172 passed.
+- [x] T2 Exhausted guard on revalidation-conflict turns. `6fd1933`.
+  RED: a turn started after the conflict. GREEN: the session emits
+  `session_budget_exhausted` (proposal null) and ends; no model request.
+- [x] T3 Draft revision voids the shown Proposal. `b865ec1`.
+  RED: no `proposal_invalidated`. GREEN: `recipe_draft_revised`, confirm of
+  the old Proposal is `stale_proposal`, nothing saved.
+- [x] T4 Failure notice on the deadline path. `ba6ce1d`.
+  RED: no notice before `limit_reached "time"`. GREEN: the Loop reports the
+  notice after each tool call; the Session shows it when its deadline kills
+  the turn.
+- [x] T5 Merged-line cap and case-only variants. `8024a3e`.
+  RED: 3 failures. GREEN: `quantity_too_large`, names deduped by case.
+- [x] T6 Remove PythonClient, its Mock and stale config. `6b8ca29`.
+  Dev optimizer keys moved out of the Endpoint config, where nothing read them.
+- [x] T7 Legacy tables: closed once by a data migration, schemas and
+  PlanningRepo functions removed. `001c9b4`, plus the dead
+  `PlanningCandidateBuilder` and its repo functions in `f7cd253`.
+  Dropping the tables was attempted and blocked by the session's permission
+  classifier (destructive data change); the issue allows the cleanup path.
+- [x] T8 Stale docs and legacy root files. `d9ff43f`.
+- [x] T9 Flaky tests. `b785215`, `2cc91f1`. 12 full runs on main: 2
+  failures, both no-progress runs (`session_bounds_test.exs:534` and
+  `planning_agent_channel_test.exs:280`); a third timing failure (backoff
+  test) was seen while iterating. Causes: real DB searches under a 100 ms
+  read deadline, the default 100 ms `assert_push` for a multi-step run, and
+  backoff measured at message receipt instead of call time.
 
 ## Acceptance criteria
 
@@ -58,3 +83,9 @@ surface (follow-up if it still names legacy modules).
 ## Progress
 
 Baseline at origin/main 6590112: 1408 passed, 24 skipped.
+`mix precommit` at `d9ff43f`: passed, 1411 passed, 24 skipped.
+
+## Next step
+
+Push, open the PR, Jorge el Curioso review. Decide separately whether to
+drop the legacy tables (now closed and unread).
