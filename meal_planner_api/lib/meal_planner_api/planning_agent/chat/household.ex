@@ -77,18 +77,43 @@ defmodule MealPlannerApi.PlanningAgent.Chat.Household do
     end
   end
 
-  @doc "Builds the Household of `spec(overrides)`."
+  @doc """
+  Builds the Household of `spec(overrides)` in one transaction: a seed that
+  is interrupted leaves nothing behind, so it is never found as an
+  existing Household.
+  """
   @spec seed(keyword()) :: t()
   def seed(overrides \\ []) do
-    overrides |> spec() |> Kitchen.build() |> Map.take([:account_id, :owner, :range, :slots])
+    {:ok, household} =
+      Repo.transaction(
+        fn ->
+          overrides
+          |> spec()
+          |> Kitchen.build()
+          |> Map.take([:account_id, :owner, :range, :slots])
+        end,
+        timeout: :infinity
+      )
+
+    household
   end
 
   @doc """
   Empties every table of the database but the migrations, so the next
-  `ensure/1` seeds again. Only for the chat's own database.
+  `ensure/1` seeds again. Only for the chat's own database: it refuses
+  (`Mix.Error`) any database whose name does not end in `_chat`.
   """
   @spec reset!() :: :ok
   def reset! do
+    database = to_string(Repo.config()[:database])
+
+    unless String.ends_with?(database, "_chat") do
+      Mix.raise(
+        "--reset only empties a database whose name ends in _chat, " <>
+          "for example meal_planner_api_chat; refused #{database}"
+      )
+    end
+
     %{rows: rows} =
       Repo.query!(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public' " <>

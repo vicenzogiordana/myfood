@@ -8,7 +8,7 @@ defmodule Mix.Tasks.PlanningAgent.ChatTest do
   use ExUnit.Case, async: false
 
   alias Ecto.Adapters.SQL.Sandbox
-  alias MealPlannerApi.PlanningAgent.Chat.Household
+  alias MealPlannerApi.PlanningAgent.Chat.{Household, Repl, Scripted}
   alias MealPlannerApi.PlanningAgent.Session
   alias MealPlannerApi.Repo
   alias Mix.Tasks.PlanningAgent.Chat
@@ -98,6 +98,48 @@ defmodule Mix.Tasks.PlanningAgent.ChatTest do
 
     {:existing, household} = Household.ensure()
     assert Session.whereis(household.account_id) == nil
+  end
+
+  test "--reset refuses a database whose name does not end in _chat" do
+    # The sandboxed test database (MYFOOD_TEST_DATABASE) is never emptied.
+    assert_raise Mix.Error, ~r/only empties a database whose name ends in _chat/, fn ->
+      Chat.run(["--reset", "--scripted"], sandboxed: true, input: [])
+    end
+
+    refute "Chat database emptied." in output()
+  end
+
+  test "an interrupted seed leaves no Household behind, so the next run seeds again" do
+    broken_pantry = [%{ingredient: :not_in_the_catalog, quantity_milli: 1_000, unit: :g}]
+
+    assert_raise KeyError, fn -> Household.ensure(pantry: broken_pantry) end
+
+    assert {:seeded, _household} = Household.ensure()
+  end
+
+  test "a session that dies under a bare Session call still prints the spend summary" do
+    {:seeded, household} = Household.ensure()
+    test_pid = self()
+
+    # Kills the session once, the first time the chat waits for input.
+    kill_session = fn ->
+      if pid = Session.whereis(household.account_id) do
+        Process.exit(pid, :kill)
+        send(test_pid, :session_killed)
+      end
+    end
+
+    result =
+      Repl.run(household,
+        model: Scripted.model(),
+        optimizer: {Scripted, []},
+        input: ["/confirm"],
+        prompt: kill_session
+      )
+
+    assert_received :session_killed
+    assert result.outcome == :session_ended
+    assert Enum.any?(output(), &String.starts_with?(&1, "Session spend: "))
   end
 
   # A group leader whose reads answer `lines` and then block forever, like a
