@@ -143,7 +143,7 @@ _Avoid_: Revision, edit
 ### Ingredients, products and prices
 
 **Ingredient**:
-A generic catalog item a recipe calls for, such as dried pasta. Ingredient Tags and nutrition belong to the Ingredient. Names are matched by similarity, since Members and catalogs spell the same Ingredient differently ("mozzarella" / "Muzzarella").
+A generic catalog item a recipe calls for, such as dried pasta. Ingredient Tags and nutrition belong to the Ingredient. Names are matched by similarity, since Members and catalogs spell the same Ingredient differently ("mozzarella" / "Muzzarella"). A Recipe Draft uses a name's one clear match ("Tomate perita" for "Tomate"), and two names that match one Ingredient are that one Ingredient.
 _Avoid_: Product, item
 
 **Product**:

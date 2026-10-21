@@ -235,6 +235,70 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       assert %{"error" => "invalid_recipe", "reason" => "duplicate_ingredient"} = result
     end
 
+    # Issue #166: "Tomate" auto-resolves to "Tomate perita", listed as well.
+    test "two names resolving to one Ingredient in one unit are merged and reported",
+         %{household: h} = ctx do
+      {:ok, plum} = Catalog.create_ingredient(%{name: "Tomate perita", category: :otros})
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [
+            %{"ingredient" => ctx.pasta.name, "quantity" => 200, "unit" => "g"},
+            %{"ingredient" => "Tomate", "quantity" => 300, "unit" => "g"},
+            %{"ingredient" => "Tomate perita", "quantity" => 200, "unit" => "g"}
+          ]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["status"] == "drafted"
+
+      assert result["ingredients"] == [
+               %{"ingredient" => ctx.pasta.name, "quantity_milli" => 200_000, "unit" => "g"},
+               %{"ingredient" => plum.name, "quantity_milli" => 500_000, "unit" => "g"}
+             ]
+
+      assert result["merged_ingredients"] == [
+               %{
+                 "requested" => ["Tomate", "Tomate perita"],
+                 "ingredient" => plum.name,
+                 "quantity_milli" => 500_000,
+                 "unit" => "g"
+               }
+             ]
+
+      assert result["merged_note"] =~ "added up"
+    end
+
+    test "two names resolving to one Ingredient in different units name both and it",
+         %{household: h} = ctx do
+      {:ok, plum} = Catalog.create_ingredient(%{name: "Tomate perita", category: :otros})
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [
+            %{"ingredient" => "Tomate", "quantity" => 300, "unit" => "g"},
+            %{"ingredient" => "Tomate perita", "quantity" => 2, "unit" => "unit"}
+          ]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["error"] == "invalid_recipe"
+      assert result["reason"] == "duplicate_ingredient"
+
+      assert result["duplicates"] == [
+               %{
+                 "requested" => ["Tomate", "Tomate perita"],
+                 "ingredient" => plum.name,
+                 "units" => ["g", "unit"]
+               }
+             ]
+
+      assert result["hint"] =~ "Tomate, Tomate perita"
+      assert result["hint"] =~ "once, in one unit"
+    end
+
     test "rejects unknown Ingredients instead of inventing them", %{household: h} = ctx do
       args =
         draft_args(ctx, %{
@@ -275,6 +339,25 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       refute "Fictitious lemon" in matches["harina 000"]
       assert matches["Imaginary truffle"] == []
       assert result["hint"] =~ "close_matches"
+    end
+
+    # Issue #166: close matches stay ranked best first, not alphabetically.
+    test "close matches of an ambiguous name are ranked by similarity", %{household: h} = ctx do
+      {:ok, _} = Catalog.create_ingredient(%{name: "Queso crema", category: :otros})
+      {:ok, _} = Catalog.create_ingredient(%{name: "Queso cremoso", category: :otros})
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [%{"ingredient" => "queso cremos", "quantity" => 100, "unit" => "g"}]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["error"] == "unknown_ingredients"
+
+      assert result["close_matches"] == [
+               %{"ingredient" => "queso cremos", "matches" => ["Queso cremoso", "Queso crema"]}
+             ]
     end
 
     # Issue #164: one clear candidate is used, and the substitution reported.
@@ -426,6 +509,42 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       assert missing["sold_in"] == ["g"]
       assert missing["hint"] =~ "restate the quantity in g"
       assert missing["hint"] =~ "never converts units"
+    end
+
+    # Issue #166: an offer in another currency cannot price the Draft either.
+    test "sold_in names only units of offers in the household currency",
+         %{household: h} = ctx do
+      onion = ingredient!("Fictitious onion")
+      product!(onion, package: {1_000_000, :g}, price_cents: 900)
+      product!(onion, package: {1_000_000, :ml}, price_cents: 5, currency: "USD")
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [%{"ingredient" => onion.name, "quantity" => 1, "unit" => "unit"}]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert [missing] = result["cost"]["missing_prices"]
+      assert missing["sold_in"] == ["g"]
+      assert missing["hint"] =~ "restate the quantity in g with create_recipe"
+    end
+
+    test "only offers in another currency name no units to restate in", %{household: h} = ctx do
+      onion = ingredient!("Fictitious onion")
+      product!(onion, package: {1_000_000, :g}, price_cents: 5, currency: "USD")
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [%{"ingredient" => onion.name, "quantity" => 1, "unit" => "unit"}]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert [missing] = result["cost"]["missing_prices"]
+      assert missing["reason"] == "no_matching_presentation"
+      refute Map.has_key?(missing, "sold_in")
+      refute Map.has_key?(missing, "hint")
     end
 
     test "a missing price without any stored price names no units", %{household: h} = ctx do

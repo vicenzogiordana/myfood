@@ -191,7 +191,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "Ingredient with one clear close match is used as that match and listed under " <>
             "resolved (requested, used); other unknown Ingredients reject the Draft and list " <>
             "close catalog matches to use instead; one under missing_from_catalog has none, " <>
-            "so never retry it under another name. " <>
+            "so never retry it under another name. Two names for one catalog Ingredient " <>
+            "in one unit are added up (merged_ingredients); in different units they reject " <>
+            "the Draft with duplicate_ingredient. " <>
             "Water, salt and pepper are staples, always at home: list them by name (or " <>
             "omit them) without a catalog entry; they are never bought or priced and never " <>
             "block a recipe. " <>
@@ -471,6 +473,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
        |> Map.put("status", if(revised?, do: "revised", else: "drafted"))
        |> with_renamed(Map.get(draft, :renamed, []))
        |> with_resolved(Map.get(draft, :resolved, []))
+       |> with_merged(Map.get(draft, :merged, []))
        |> Map.merge(RecipeDraft.outcome(draft)), workspace, :continue}
     else
       {:error, error} -> {error, ctx.workspace, :continue}
@@ -1316,6 +1319,19 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
         "These Ingredients were not in the catalog and were replaced by the closest one " <>
           "shown under used. Tell the household only when the meaning could differ (e.g. " <>
           "a different cut or variety that changes the dish); otherwise just use the name."
+    })
+  end
+
+  # Different requested names for one catalog Ingredient in one unit, added
+  # up into one line (issue #166).
+  defp with_merged(result, []), do: result
+
+  defp with_merged(result, merged) do
+    Map.merge(result, %{
+      "merged_ingredients" => merged,
+      "merged_note" =>
+        "These requested names are one catalog Ingredient: their quantities were added up " <>
+          "into one line. If they were meant as different Ingredients, revise the Draft."
     })
   end
 

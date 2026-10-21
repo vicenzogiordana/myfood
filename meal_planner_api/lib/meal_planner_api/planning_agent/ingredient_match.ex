@@ -19,12 +19,16 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
       name (case-insensitive) or, when exactly one close candidate is the
       same name up to case, accents, punctuation and a plural ending, that
       one. A merely similar name ("queso crema" / "Queso cremoso") is never
-      resolved: it stays a close match for the agent and the household to
-      choose
-    * `clear_matches/1` — for `create_recipe` only (issue #164): the one
-      close candidate of each request, when it is the only one or scores at
-      least #{0.2} above the next. Any other request is ambiguous and is
-      left out, for the agent to choose from `close_matches/1`
+      resolved here; `lookup_prices` and `set_session_brand` stop at this
+      step and list it with its close matches
+    * `clear_matches/1` — for `create_recipe` only, on the names `resolve/1`
+      left out (issue #164): the one close candidate of each request, when
+      it is the only one or its lead over the next, rounded to #{4}
+      decimals (issue #166), is at least #{0.2}. So "Queso mozzarella" is
+      used as "Muzzarella", its only candidate, and a merely similar name
+      with no rival is used too. A request whose top candidates score
+      alike ("harina 000" / "Harina de trigo", "Harina leudante") is left
+      out, for the agent to choose from `close_matches/1`
   """
 
   import Ecto.Query
@@ -34,6 +38,7 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
 
   @threshold 0.4
   @clear_lead 0.2
+  @lead_precision 4
   @max_matches 5
   @max_search_matches 20
   @accented "áàâäéèêëíìîïóòôöúùûüñç"
@@ -131,8 +136,8 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
       |> Enum.flat_map(fn {name, found} ->
         case found do
           [only] -> [{name, only.id}]
-          [top, next | _] when top.score - next.score >= @clear_lead -> [{name, top.id}]
-          _none_or_ambiguous -> []
+          [top, next | _] -> if clear_lead?(top, next), do: [{name, top.id}], else: []
+          [] -> []
         end
       end)
 
@@ -141,6 +146,12 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
   end
 
   # ---------------------------------------------------------------------------
+
+  # Scores are float4 similarities read as floats, so a lead of exactly
+  # 0.2 (1.0 against 0.8) subtracts to 0.19999998. The lead is
+  # rounded first so that noise never flips the decision (issue #166).
+  defp clear_lead?(top, next),
+    do: Float.round(top.score - next.score, @lead_precision) >= @clear_lead
 
   defp by_id([]), do: %{}
 
