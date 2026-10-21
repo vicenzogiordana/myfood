@@ -168,7 +168,7 @@ Meal Plans and Shopping Lists are unchanged.
 
 | Event | Payload | Reply |
 |-------|---------|-------|
-| `start_session` | `{range_from, range_to, slots?}` — ISO dates, at most 31 days, none already planned; `slots` from `breakfast`, `lunch`, `snack`, `dinner` (default `["lunch", "dinner"]`) | `{session_id}` or `{reason}`: `session_already_active`, `session_start_rate_limited`, `range_already_planned`, `overlapping_range`, `invalid_range`, `invalid_slots`, `subscription_required`, `spend_caps_unconfigured`, `pricing_unconfigured`, `provider_unconfigured`, `internal_error` |
+| `start_session` | `{range_from, range_to, slots?}` — ISO dates, at most 31 days, none already planned; `slots` from `breakfast`, `lunch`, `snack`, `dinner` (default `["lunch", "dinner"]`) | `{session_id}` or `{reason}`: `session_already_active`, `session_start_rate_limited`, `range_already_planned`, `overlapping_range`, `invalid_range`, `invalid_slots`, `subscription_required`, `spend_caps_unconfigured`, `pricing_unconfigured`, `provider_unconfigured`, `fallbacks_unsupported`, `internal_error` |
 | `resume_session` | `{}` — only the session's Member, within the absence grace (also after a server restart) | `{session_id, proposal}` (the last valid Proposal, same shape as the `proposal` event, or `null`) or `{reason}`: `forbidden` (another Member, or no longer an active Member), `no_session` (none, or its grace expired), `session_busy` (the session did not answer within 5 s; retry), `internal_error` |
 | `give_consent` | `{}` — explicit consent before the first external AI use | `ok` or `{reason}`: `no_active_session`, `internal_error` |
 | `send_message` | `{text}` — a non-blank string of at most 4,000 bytes | `ok` (the turn runs and streams `agent_event`s), or `{reason}`: `invalid_message` (missing, non-string or blank `text`), `message_too_long`, `consent_required`, `busy`, `session_budget_exhausted` (the session's budget is used up: the `session_budget_exhausted` event is pushed again, no turn starts), `no_active_session` |
@@ -327,7 +327,7 @@ Every `reason` a client can receive, with what it means and what the client does
 | `overlapping_range` | The store's last-resort guard against two sessions over the same days | Treat like `session_already_active` |
 | `session_already_active` | The Household already has a Planning Session (one per Household) | Tell the Member who is planning; the Owner may Cancel it |
 | `session_start_rate_limited` | Too many sessions started in the Household's window | Try again later |
-| `spend_caps_unconfigured`, `pricing_unconfigured`, `provider_unconfigured` | The server is not configured for paid AI use | Show that planning is unavailable; an operator must fix the configuration |
+| `spend_caps_unconfigured`, `pricing_unconfigured`, `provider_unconfigured`, `fallbacks_unsupported` | The server is not configured for paid AI use (`fallbacks_unsupported`: refusal fallbacks are on for a model that rejects them) | Show that planning is unavailable; an operator must fix the configuration |
 | `no_active_session` | No Planning Session on this socket (none started or resumed here, or it ended) | Start one, or `resume_session` |
 | `no_session` | Nothing to resume: the session ended or its 15-minute grace expired | Start a new session |
 | `session_busy` | The session did not answer the resume within 5 s; it is still running | Retry `resume_session` |

@@ -70,8 +70,9 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
         output_price_micros_per_mtok: 4_000_000,
         cache_write_price_micros_per_mtok: 1_250_000,
         cache_read_price_micros_per_mtok: 100_000,
-        # Most tests exercise the fallback-on path (Opus-style); the default
-        # (Haiku, fallbacks off) is asserted with this key removed.
+        # Most tests exercise the fallback-on path on Opus; the default
+        # (Haiku, fallbacks off) is asserted with these keys removed.
+        model: "claude-opus-5-5",
         fallbacks: true,
         fallback_input_price_micros_per_mtok: 2_000_000,
         fallback_output_price_micros_per_mtok: 8_000_000,
@@ -205,12 +206,23 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
       assert {:error, :provider_unconfigured} = ClaudeMessages.init(opts(api_key: ""))
     end
 
+    test "refuses refusal fallbacks on a Haiku model, which rejects them" do
+      assert {:error, :fallbacks_unsupported} =
+               ClaudeMessages.init(opts(model: "claude-haiku-5-5", fallbacks: true))
+
+      assert {:error, :fallbacks_unsupported} =
+               ClaudeMessages.init(Keyword.delete(opts(), :model))
+
+      assert {:ok, _state} =
+               ClaudeMessages.init(opts(model: "claude-haiku-5-5", fallbacks: false))
+    end
+
     test "refuses an unknown effort level" do
       assert {:error, :provider_unconfigured} = ClaudeMessages.init(opts(effort: "huge"))
     end
 
     test "defaults to Claude Haiku 5.5 at medium effort with refusal fallbacks off" do
-      {:ok, state} = ClaudeMessages.init(Keyword.delete(opts(), :fallbacks))
+      {:ok, state} = ClaudeMessages.init(Keyword.drop(opts(), [:model, :fallbacks]))
       assert state.config.model == "claude-haiku-5-5"
       assert state.config.effort == "medium"
       assert state.config.fallbacks == false
@@ -218,7 +230,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
 
     test "by default neither the fallbacks parameter nor its beta is sent" do
       stub_response(text_response("ok"))
-      {:ok, state} = ClaudeMessages.init(Keyword.delete(opts(), :fallbacks))
+      {:ok, state} = ClaudeMessages.init(Keyword.drop(opts(), [:model, :fallbacks]))
 
       assert {:ok, _, _} = ClaudeMessages.respond(state, @request)
       assert_received {:provider_called, conn, body}
@@ -298,7 +310,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
                "server-side-fallback-2026-07-01"
              ]
 
-      assert body["model"] == "claude-haiku-5-5"
+      assert body["model"] == "claude-opus-5-5"
       assert body["max_tokens"] == 1_000
       assert body["thinking"] == %{"type" => "adaptive"}
       assert body["output_config"] == %{"effort" => "medium"}
