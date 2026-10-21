@@ -18,7 +18,10 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
   call, so a Stop keeps what deterministic tools already produced
   (including a presented Proposal). The optional `present?` callback is
   asked before every model call: while the Member is absent no new call
-  starts and the turn ends `{:interrupted, :member_absent}`.
+  starts and the turn ends `{:interrupted, :member_absent}`. The optional
+  `report_limit_notice` callback receives, after every tool call, the
+  notice a limit would add at that point (or `nil`), so the owner can show
+  it when its deadline kills the turn (issue #151).
   """
 
   alias MealPlannerApi.PlanningAgent.{Allowance, CallBounds, Tools}
@@ -35,6 +38,7 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
           optional(:report_allowance) => (Allowance.t() -> any()),
           optional(:bounds) => CallBounds.t(),
           optional(:on_workspace) => (map() -> any()),
+          optional(:report_limit_notice) => (String.t() | nil -> any()),
           optional(:present?) => (-> boolean())
         }
 
@@ -197,6 +201,8 @@ defmodule MealPlannerApi.PlanningAgent.Loop do
       acc
       |> Map.update!(:tool_context, &%{&1 | workspace: workspace})
       |> append(%{role: :tool_result, id: call.id, name: call.name, content: content})
+
+    if report = Map.get(acc, :report_limit_notice), do: report.(limit_notice(acc.messages))
 
     {call_control, acc, fingerprint(call.name, content, fingerprints)}
   end

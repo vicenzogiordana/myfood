@@ -181,34 +181,8 @@ defmodule MealPlannerApi.Services.RecipeLifecycleTest do
     assert Repo.aggregate(MealPlannerApi.Persistence.Planning.CookingChatMessage, :count) == 0
   end
 
-  test "published proposals retain their recipe version until recalculation", f do
-    {:ok, run} =
-      Planning.create_generation_run(%{
-        account_id: f.account.id,
-        user_id: f.user.id,
-        status: :completed,
-        input_context: %{},
-        started_at: DateTime.utc_now()
-      })
-
-    {:ok, proposal} =
-      Planning.create_proposal(%{
-        generation_run_id: run.id,
-        proposal_json: %{slots: [%{slot_key: "2026-10-06_dinner", recipe_id: f.recipe.id}]}
-      })
-
-    {:ok, successor} = RecipeVersions.correct(f.recipe.id, %{name: "Successor"})
-
-    assert Repo.reload!(proposal).proposal_json["slots"] |> hd() |> Map.fetch!("recipe_id") ==
-             f.recipe.id
-
-    candidates =
-      MealPlannerApi.Data.PlanningRepo.candidate_recipe_ids_for_slots(f.account.id, [f.user.id], [
-        "dinner"
-      ])
-
-    refute f.recipe.id in candidates
-    assert successor.recipe_id in candidates
+  test "a planned meal keeps its recipe version after a correction", f do
+    {:ok, _successor} = RecipeVersions.correct(f.recipe.id, %{name: "Successor"})
     meal = meal!(f)
     assert meal.recipe_snapshot["name"] == "Original soup"
 

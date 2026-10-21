@@ -160,7 +160,7 @@ defmodule MealPlannerApi.Persistence.Calendar do
              :ok <- validate_unique_slot(seen, date, slot) do
           normalized_meal =
             meal
-            |> Map.take([:recipe_id, :is_cooked, :ai_generation_id, :selected_quantity])
+            |> Map.take([:recipe_id, :is_cooked, :selected_quantity])
             |> Map.put(:date, date)
             |> Map.put(:slot, slot)
 

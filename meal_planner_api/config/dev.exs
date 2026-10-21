@@ -25,22 +25,15 @@ config :meal_planner_api, MealPlannerApiWeb.Endpoint,
   secret_key_base:
     System.get_env("SECRET_KEY_BASE") ||
       "dn65eHJgfhuUbcC/fmebcPK2uTb1QYEaDBc8rC9uhD6BZe7OMCGfy2BX4fnboii1",
-  watchers: [],
+  watchers: []
+
+# The planning agent's OR-Tools optimizer
+# (MealPlannerApi.Optimization.OptimizerPortRunner). These were under the
+# Endpoint config, where nothing read them (issue #151).
+config :meal_planner_api,
   optimizer_python: System.get_env("OPTIMIZER_PYTHON", "python3"),
   optimizer_script_path:
-    System.get_env(
-      "OPTIMIZER_SCRIPT_PATH",
-      Path.expand("../../optimizador.py", __DIR__)
-    ),
-  # v2 Planning: external service URLs
-  python_optimizer_url: System.get_env("PYTHON_OPTIMIZER_URL", "http://localhost:8000"),
-  go_scraper_url: System.get_env("GO_SCRAPER_URL", "http://localhost:4001"),
-  optimize_timeout_ms: 60_000,
-  # v2 Planning: external service URLs
-  python_optimizer_url: System.get_env("PYTHON_OPTIMIZER_URL", "http://localhost:8000"),
-  go_scraper_url: System.get_env("GO_SCRAPER_URL", "http://localhost:4001"),
-  optimize_timeout_ms: 60_000,
-  optimizer_timeout_ms: String.to_integer(System.get_env("OPTIMIZER_TIMEOUT_MS", "60000"))
+    System.get_env("OPTIMIZER_SCRIPT_PATH", Path.expand("../../optimizador.py", __DIR__))
 
 # For development, we disable any cache and enable
 # debugging and code reloading.

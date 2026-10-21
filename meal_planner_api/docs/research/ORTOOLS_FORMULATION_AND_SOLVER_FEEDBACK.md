@@ -2,6 +2,11 @@
 
 Research note for GitHub issue #85 (child of Wayfinder map #80). Written 2026-10-07.
 
+> **Historical record.** Repository facts below describe the code at `a364c7a`. Several
+> files they cite are gone: the optimizer server, its fallback and the generation
+> server (issue #110), `PythonClient` and `generador.py` (issue #151). The optimizer
+> contract in force is `docs/OPTIMIZER_CONTRACT.md`.
+
 This note is evidence for later policy decisions. It does **not** pick a solver, does **not** propose a production model, and does **not** recommend replacing anything. No code was changed. No solver experiments were run; the only command executed against the solver library was a version query (section 1).
 
 ## How to read this note

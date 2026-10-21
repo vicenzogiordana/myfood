@@ -220,6 +220,113 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraftConfirmTest do
     assert %{role: :tool_result, content: %{"error" => "recipe_not_found"}} = List.last(messages)
   end
 
+  # Issue #151: a revised Draft changes what the shown Proposal costs, so the
+  # Proposal that used it is voided and can no longer be confirmed.
+  test "revising a Draft the shown Proposal uses voids that Proposal", %{household: h} = ctx do
+    revised =
+      put_in(draft_args(ctx), ["ingredients", Access.at(0), "quantity"], 600)
+
+    script = [
+      {:tool_calls, [{"create_recipe", draft_args(ctx)}]},
+      {:tool_calls, [{"run_optimizer", %{}}]},
+      {:tool_calls, [{"present_proposal", %{}}]},
+      {:text, "Here is a plan with a new AI-created recipe."},
+      {:tool_calls, [{"create_recipe", revised}]},
+      {:text, "I added more sausage."}
+    ]
+
+    attrs = session_attrs(h, h.owner, {@monday, @monday})
+
+    {:ok, %{session_id: session_id, pid: pid}} =
+      Session.start(attrs,
+        model: {Scripted, script: script, notify: self()},
+        optimizer: {FakeOptimizer, result: pick(@draft_name)},
+        subscriber: self()
+      )
+
+    :ok = Session.send_message(pid, "Plan Monday with something new")
+
+    assert_receive {:planning_agent_event, ^session_id,
+                    %{"type" => "proposal", "proposal_id" => proposal_id}}
+
+    assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+
+    :ok = Session.send_message(pid, "More sausage, please")
+
+    assert_receive {:planning_agent_event, ^session_id,
+                    %{
+                      "type" => "proposal_invalidated",
+                      "proposal_id" => ^proposal_id,
+                      "reason" => "recipe_draft_revised"
+                    }}
+
+    assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+
+    # The revision's tool result tells the agent the Proposal is void.
+    assert %{"status" => "revised", "proposal_voided" => true} = last_tool_result()
+
+    assert {:error, :stale_proposal} =
+             Session.confirm(h.account_id, h.owner.membership_id, proposal_id)
+
+    assert Repo.all(from(m in ScheduledMeal, where: m.account_id == ^h.account_id)) == []
+    refute Repo.get_by(Recipe, name: @draft_name)
+    assert Session.current_proposal(pid) == nil
+  end
+
+  test "revising a Draft the shown Proposal does not use keeps that Proposal",
+       %{household: h} = ctx do
+    other = %{draft_args(ctx) | "name" => "Fictitious unused risotto"}
+
+    script = [
+      {:tool_calls, [{"create_recipe", draft_args(ctx)}, {"create_recipe", other}]},
+      {:tool_calls, [{"run_optimizer", %{}}]},
+      {:tool_calls, [{"present_proposal", %{}}]},
+      {:text, "Here is the plan."},
+      {:tool_calls,
+       [{"create_recipe", put_in(other, ["ingredients", Access.at(0), "quantity"], 600)}]},
+      {:text, "Revised the other recipe."}
+    ]
+
+    attrs = session_attrs(h, h.owner, {@monday, @monday})
+
+    {:ok, %{session_id: session_id, pid: pid}} =
+      Session.start(attrs,
+        model: {Scripted, script: script, notify: self()},
+        optimizer: {FakeOptimizer, result: pick(@draft_name)},
+        subscriber: self()
+      )
+
+    :ok = Session.send_message(pid, "Plan Monday with something new")
+
+    assert_receive {:planning_agent_event, ^session_id,
+                    %{"type" => "proposal", "proposal_id" => proposal_id}}
+
+    assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+    :ok = Session.send_message(pid, "Change the other one")
+    assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+
+    refute_received {:planning_agent_event, ^session_id, %{"type" => "proposal_invalidated"}}
+
+    assert {:ok, %{meals_count: 2}} =
+             Session.confirm(h.account_id, h.owner.membership_id, proposal_id)
+  end
+
+  defp last_tool_result do
+    requests =
+      Stream.repeatedly(fn ->
+        receive do
+          {:scripted_model_request, request} -> request
+        after
+          0 -> nil
+        end
+      end)
+      |> Enum.take_while(& &1)
+
+    %{messages: messages} = List.last(requests)
+    %{role: :tool_result, content: content} = List.last(messages)
+    content
+  end
+
   describe "pinning a Draft (issue #154)" do
     # Pins the Draft the previous tool result created to Monday's dinner.
     defp pin_created_draft(slot) do

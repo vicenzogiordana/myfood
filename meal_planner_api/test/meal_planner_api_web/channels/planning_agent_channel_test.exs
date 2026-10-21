@@ -21,6 +21,10 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     def init(_opts), do: {:error, {:unexpected, "detail"}}
   end
 
+  # A run of several model calls and recipe searches takes more than the
+  # default 100 ms of assert_push on a loaded machine (issue #151).
+  @run_timeout 2_000
+
   @range %{"range_from" => "2026-11-02", "range_to" => "2026-11-02", "slots" => ["dinner"]}
 
   setup do
@@ -264,16 +268,21 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     ref = push(socket, "send_message", %{"text" => "Plan dinner"})
     assert_reply(ref, :ok, _)
 
-    assert_push("agent_event", %{
-      "type" => "limit_reached",
-      "limit" => "no_progress",
-      "requires_authorization" => true
-    })
+    assert_push(
+      "agent_event",
+      %{"type" => "limit_reached", "limit" => "no_progress", "requires_authorization" => true},
+      @run_timeout
+    )
 
     ref = push(socket, "authorize_continuation", %{})
     assert_reply(ref, :ok, _)
 
-    assert_push("agent_event", %{"type" => "assistant_message", "text" => "Continued."})
+    assert_push(
+      "agent_event",
+      %{"type" => "assistant_message", "text" => "Continued."},
+      @run_timeout
+    )
+
     cancel!(socket)
   end
 
@@ -290,12 +299,21 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
 
     ref = push(socket, "send_message", %{"text" => "Plan dinner"})
     assert_reply(ref, :ok, _)
-    assert_push("agent_event", %{"type" => "limit_reached", "limit" => "no_progress"})
+
+    assert_push(
+      "agent_event",
+      %{"type" => "limit_reached", "limit" => "no_progress"},
+      @run_timeout
+    )
 
     ref = push(socket, "send_message", %{"text" => "Forget the soup"})
     assert_reply(ref, :ok, _)
 
-    assert_push("agent_event", %{"type" => "assistant_message", "text" => "Planned without soup."})
+    assert_push(
+      "agent_event",
+      %{"type" => "assistant_message", "text" => "Planned without soup."},
+      @run_timeout
+    )
 
     cancel!(socket)
   end

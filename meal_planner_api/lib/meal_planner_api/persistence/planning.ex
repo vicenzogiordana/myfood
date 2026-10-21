@@ -1,5 +1,5 @@
 defmodule MealPlannerApi.Persistence.Planning do
-  @moduledoc "Persistence helpers for planning runs, proposals and cooking state."
+  @moduledoc "Persistence helpers for scheduled meals and cooking state."
 
   import Ecto.Query, warn: false
 
@@ -11,22 +11,8 @@ defmodule MealPlannerApi.Persistence.Planning do
     ContextSnapshot,
     CookingSession,
     CookingStepEvent,
-    PlanningGenerationRun,
-    PlanningProposal,
     ScheduledMeal
   }
-
-  def create_generation_run(attrs),
-    do: %PlanningGenerationRun{} |> PlanningGenerationRun.changeset(attrs) |> Repo.insert()
-
-  def update_generation_run(run, attrs),
-    do: run |> PlanningGenerationRun.changeset(attrs) |> Repo.update()
-
-  def create_proposal(attrs),
-    do: %PlanningProposal{} |> PlanningProposal.changeset(attrs) |> Repo.insert()
-
-  def update_proposal(proposal, attrs),
-    do: proposal |> PlanningProposal.changeset(attrs) |> Repo.update()
 
   def schedule_meal(attrs),
     do: %ScheduledMeal{} |> ScheduledMeal.changeset(attrs) |> Repo.insert()
@@ -160,33 +146,5 @@ defmodule MealPlannerApi.Persistence.Planning do
       }
     )
     |> Repo.all()
-  end
-
-  def recipes_for_ids(recipe_ids, account_id) when is_list(recipe_ids) do
-    from(r in Recipe,
-      where: r.id in ^recipe_ids,
-      where: is_nil(r.account_id) or r.account_id == ^account_id,
-      select: %{id: r.id, name: r.name, suitable_for_slots: r.suitable_for_slots}
-    )
-    |> Repo.all()
-    |> Enum.flat_map(fn recipe ->
-      Enum.map(recipe.suitable_for_slots, fn slot ->
-        %{id: recipe.id, name: recipe.name, slot: slot, source: "favorite"}
-      end)
-    end)
-  end
-
-  def fetch_owned_proposal(proposal_id, account_id, user_id) do
-    query =
-      from(p in PlanningProposal,
-        join: r in assoc(p, :generation_run),
-        where: p.id == ^proposal_id and r.account_id == ^account_id and r.user_id == ^user_id,
-        select: {p, r}
-      )
-
-    case Repo.one(query) do
-      {proposal, run} -> {:ok, proposal, run}
-      nil -> {:error, :proposal_not_found}
-    end
   end
 end

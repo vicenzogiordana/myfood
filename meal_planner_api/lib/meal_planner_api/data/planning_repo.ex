@@ -1,6 +1,6 @@
 defmodule MealPlannerApi.Data.PlanningRepo do
   @moduledoc """
-  Pure data access for planning runs, proposals, meals, and cooking sessions.
+  Pure data access for Planning Sessions, scheduled meals, and cooking sessions.
 
   No business logic. No orchestration. Just queries and persistence.
   """
@@ -8,13 +8,9 @@ defmodule MealPlannerApi.Data.PlanningRepo do
   import Ecto.Query, warn: false
   alias MealPlannerApi.Repo
 
-  alias MealPlannerApi.Persistence.Accounts
-
   alias MealPlannerApi.Persistence.Catalog.{
     FavoriteRecipe,
-    Recipe,
     RecipeDailyCost,
-    RecipeIngredient,
     SlotFavorite
   }
 
@@ -24,86 +20,10 @@ defmodule MealPlannerApi.Data.PlanningRepo do
     CookingStepEvent,
     PlanningAgentRecovery,
     PlanningException,
-    PlanningGenerationRun,
     PlanningMessage,
-    PlanningProposal,
     PlanningSession,
     ScheduledMeal
   }
-
-  # -------------------------------------------------------------------------
-  # Generation runs
-  # -------------------------------------------------------------------------
-
-  @spec create_generation_run(map()) ::
-          {:ok, PlanningGenerationRun.t()} | {:error, Ecto.Changeset.t()}
-  def create_generation_run(attrs),
-    do: %PlanningGenerationRun{} |> PlanningGenerationRun.changeset(attrs) |> Repo.insert()
-
-  @spec update_generation_run(PlanningGenerationRun.t(), map()) ::
-          {:ok, PlanningGenerationRun.t()} | {:error, Ecto.Changeset.t()}
-  def update_generation_run(run, attrs),
-    do: run |> PlanningGenerationRun.changeset(attrs) |> Repo.update()
-
-  # -------------------------------------------------------------------------
-  # Proposals
-  # -------------------------------------------------------------------------
-
-  @spec create_proposal(map()) :: {:ok, PlanningProposal.t()} | {:error, Ecto.Changeset.t()}
-  def create_proposal(attrs),
-    do: %PlanningProposal{} |> PlanningProposal.changeset(attrs) |> Repo.insert()
-
-  @spec update_proposal(PlanningProposal.t(), map()) ::
-          {:ok, PlanningProposal.t()} | {:error, Ecto.Changeset.t()}
-  def update_proposal(proposal, attrs),
-    do: proposal |> PlanningProposal.changeset(attrs) |> Repo.update()
-
-  @spec get_proposal_with_run!(pos_integer()) :: {PlanningProposal.t(), PlanningGenerationRun.t()}
-  def get_proposal_with_run!(proposal_id) do
-    query =
-      from(p in PlanningProposal,
-        join: r in assoc(p, :generation_run),
-        where: p.id == ^proposal_id,
-        preload: [generation_run: []]
-      )
-
-    proposal = Repo.one!(query)
-
-    {:ok, run} =
-      Repo.all(from(r in PlanningGenerationRun, where: r.id == ^proposal.generation_run_id))
-      |> case do
-        [run] -> {:ok, run}
-        [] -> {:error, :not_found}
-      end
-
-    {proposal, run}
-  end
-
-  @spec fetch_owned_proposal(pos_integer(), pos_integer(), pos_integer()) ::
-          {:ok, PlanningProposal.t(), PlanningGenerationRun.t()} | {:error, :proposal_not_found}
-  def fetch_owned_proposal(proposal_id, account_id, user_id) do
-    query =
-      from(p in PlanningProposal,
-        join: r in assoc(p, :generation_run),
-        where: p.id == ^proposal_id and r.account_id == ^account_id and r.user_id == ^user_id,
-        preload: [generation_run: []]
-      )
-
-    case Repo.one(query) do
-      nil ->
-        {:error, :proposal_not_found}
-
-      proposal ->
-        {:ok, run} =
-          Repo.all(from(r in PlanningGenerationRun, where: r.id == ^proposal.generation_run_id))
-          |> case do
-            [run] -> {:ok, run}
-            [] -> {:error, :not_found}
-          end
-
-        {:ok, proposal, run}
-    end
-  end
 
   # -------------------------------------------------------------------------
   # Scheduled meals
@@ -206,89 +126,6 @@ defmodule MealPlannerApi.Data.PlanningRepo do
   def delete_scheduled_meal(id) do
     Repo.delete!(Repo.get!(ScheduledMeal, id))
     :ok
-  end
-
-  # -------------------------------------------------------------------------
-  # Candidate recipes (exclusion filtering)
-  # -------------------------------------------------------------------------
-
-  @spec candidate_recipe_ids_for_slots(Ecto.UUID.t(), [Ecto.UUID.t()], [atom() | String.t()]) :: [
-          Ecto.UUID.t()
-        ]
-  def candidate_recipe_ids_for_slots(account_id, participant_ids, slots)
-      when is_list(participant_ids) and is_list(slots) do
-    slot_strings = Enum.map(slots, &to_string/1)
-
-    excluded_ids =
-      participant_ids
-      |> active_participant_ids(account_id)
-      |> Accounts.list_user_excluded_ingredient_ids()
-      |> MapSet.to_list()
-
-    base_ids =
-      from(r in Recipe,
-        where: is_nil(r.account_id) or r.account_id == ^account_id,
-        where: is_nil(r.superseded_by_id),
-        where: fragment("? && ?", r.suitable_for_slots, ^slot_strings),
-        select: r.id
-      )
-      |> Repo.all()
-
-    if excluded_ids == [] or base_ids == [] do
-      base_ids
-    else
-      blocked_ids =
-        from(ri in RecipeIngredient,
-          where: ri.recipe_id in ^base_ids and ri.ingredient_id in ^excluded_ids,
-          select: ri.recipe_id,
-          distinct: true
-        )
-        |> Repo.all()
-        |> MapSet.new()
-
-      Enum.reject(base_ids, &MapSet.member?(blocked_ids, &1))
-    end
-  end
-
-  # A caller may name only active members of this account as participants. This
-  # is intentionally not a convenience filter over every household member:
-  # dietary exclusions apply to the people participating in this plan.
-  defp active_participant_ids(participant_ids, account_id) do
-    from(m in MealPlannerApi.Persistence.Accounts.AccountMembership,
-      where:
-        m.account_id == ^account_id and m.status == :active and
-          m.user_id in ^participant_ids,
-      select: m.user_id
-    )
-    |> Repo.all()
-  end
-
-  @spec recipes_for_ids([pos_integer()], pos_integer()) :: [
-          %{id: pos_integer(), name: String.t(), slot: atom(), source: String.t()}
-        ]
-  def recipes_for_ids(recipe_ids, account_id) when is_list(recipe_ids) do
-    from(r in Recipe,
-      where: r.id in ^recipe_ids,
-      where: is_nil(r.superseded_by_id),
-      where: is_nil(r.account_id) or r.account_id == ^account_id,
-      select: %{
-        id: r.id,
-        name: r.name,
-        suitable_for_slots: r.suitable_for_slots,
-        protein_g_per_serving: r.protein_g_per_serving,
-        carbs_g_per_serving: r.carbs_g_per_serving,
-        fat_g_per_serving: r.fat_g_per_serving,
-        calories_per_serving: r.calories_per_serving
-      }
-    )
-    |> Repo.all()
-    |> Enum.flat_map(fn recipe ->
-      Enum.map(recipe.suitable_for_slots, fn slot ->
-        recipe
-        |> Map.put(:slot, slot)
-        |> Map.put(:source, "candidate")
-      end)
-    end)
   end
 
   # -------------------------------------------------------------------------

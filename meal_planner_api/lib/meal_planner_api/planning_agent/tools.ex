@@ -464,13 +464,15 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       data = RecipeDraft.to_data(draft)
       emit(ctx, Map.put(data, "type", "recipe_draft"))
 
-      workspace =
+      {workspace, voided?} =
         ctx.workspace
         |> Map.put(:recipe_drafts, Map.put(drafts, draft.id, draft))
         |> Workspace.rename_pins(draft.id, draft.name)
+        |> void_revised_proposal(revised? && draft.id, ctx)
 
       {data
        |> Map.put("status", if(revised?, do: "revised", else: "drafted"))
+       |> with_voided_proposal(voided?)
        |> with_renamed(Map.get(draft, :renamed, []))
        |> with_resolved(Map.get(draft, :resolved, []))
        |> with_merged(Map.get(draft, :merged, []))
@@ -1295,6 +1297,37 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   end
 
   defp drafts(ctx), do: RecipeDraft.in_context(ctx)
+
+  # A revised Draft changes what the shown Proposal that uses it costs and
+  # contains (issue #151): that Proposal is voided, so it can never be
+  # confirmed at a cost other than the one shown, and the Member is told.
+  defp void_revised_proposal(%{proposal: %{"meals" => meals} = shown} = workspace, id, ctx)
+       when is_binary(id) do
+    if Enum.any?(meals, &(&1["recipe_id"] == id)) do
+      emit(ctx, %{
+        "type" => "proposal_invalidated",
+        "proposal_id" => shown["proposal_id"],
+        "reason" => "recipe_draft_revised"
+      })
+
+      {Workspace.void_proposal(workspace), true}
+    else
+      {workspace, false}
+    end
+  end
+
+  defp void_revised_proposal(workspace, _id, _ctx), do: {workspace, false}
+
+  defp with_voided_proposal(result, false), do: result
+
+  defp with_voided_proposal(result, true) do
+    Map.merge(result, %{
+      "proposal_voided" => true,
+      "proposal_note" =>
+        "The shown Proposal used this Draft and is void. Run run_optimizer and " <>
+          "present_proposal again so the Member sees the revised recipe."
+    })
+  end
 
   # Requested Ingredient names the catalog spells otherwise (issue #160): the
   # agent is told which catalog name was used, to say it that way.

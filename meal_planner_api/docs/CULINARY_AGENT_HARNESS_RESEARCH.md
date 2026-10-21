@@ -4,6 +4,11 @@
 **Date:** 2026-10-07
 **Feeds:** Wayfinder map #80; later prototype and decision issues.
 
+> **Historical record.** Repository facts below describe the code at the time of
+> writing. The legacy planner they map (`PlanningChannel` intents, `Generation.Server`,
+> `OptimizerServer` and its fallback) was retired in issue #110, and its leftovers in
+> issue #151.
+
 ## 1. Scope, pinned revisions, method, limits
 
 ### Question

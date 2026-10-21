@@ -6,6 +6,13 @@
 **Test Suite:** 498 tests, 0 failures
 **Last Updated:** 2026-07-11 (Phase A — Tenancy Refactor / multi-familia, PR 3c)
 
+> **Planning (updated 2026-10-21, issue #151).** The legacy planner is switched off
+> (issue #110): there is no `generate_menu`, `proposal_ready` or `confirm_proposal` flow
+> and no REST plan generation. Households plan through the culinary agent on the
+> `planning:<account_id>` channel; its messages and events are in the `planning:*` section of
+> [CHANNELS.md](CHANNELS.md). The planning examples below were
+> replaced by pointers to it.
+
 ---
 
 ## Tabla de Contenidos
@@ -145,8 +152,6 @@ manejo de refresh) y NO asumir un tipo específico.
 | `POST` | `/api/auth/social` | Login con Google/Apple/Facebook |
 | `GET` | `/api/calendar` | Obtener calendario mensual |
 | `GET` | `/api/calendar/slot?date=YYYY-MM-DD&slot=breakfast` | Obtener slot específico |
-| `POST` | `/api/planning/generate` | Generar plan semanal |
-| `POST` | `/api/planning/confirm` | Confirmar propuesta |
 | `GET` | `/api/shopping/list` | Lista de compras |
 | `POST` | `/api/shopping/checkout` | Confirmar compra |
 | `GET` | `/api/recipes` | Lista de recetas |
@@ -188,31 +193,10 @@ Authorization: Bearer <token>
 }
 ```
 
-### Ejemplo: Generar Plan
+### Plan generation
 
-```bash
-POST /api/planning/generate
-Authorization: Bearer <token>
-
-{
-  "date_from": "2026-06-10",
-  "date_to": "2026-06-16",
-  "constraints": {
-    "budget_cents": 15000,
-    "protein_g": 30,
-    "max_calories": 800
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "proposal_id": 789,
-  "request_id": "req_12345",
-  "status": "generating"
-}
-```
+Retired with the legacy planner (issue #110). Plans are made through the culinary
+agent on the planning channel: see [CHANNELS.md](CHANNELS.md).
 
 ---
 
@@ -499,37 +483,15 @@ the token's Household.
 |-------|--------|----------|
 | `ai_chat` | `ai_chat:<session_id>` | Asistente AI de meal planning |
 | `calendar` | `calendar:<account_id>` | Operaciones de calendario en tiempo real |
-| `planning` | `planning:<account_id>` | Generación de planes y confirmación |
+| `planning` | `planning:<account_id>` | Culinary agent: plan through conversation, confirm a Proposal ([CHANNELS.md](CHANNELS.md)) |
 | `cooking` | `cooking:<recipe_id>` | Modo cooking con timers y guía |
 
-### Canal de Planificación (para generar menús)
+### Canal de Planificación
 
-```javascript
-// 1. Conectar al canal de planificación
-const planningChannel = socket.channel("planning:1", {});
-
-// 2. Unirse al canal
-planningChannel.join()
-  .receive("ok", resp => console.log("Joined!", resp))
-  .receive("error", resp => console.log("Unable to join", resp));
-
-// 3. Escuchar eventos de generación
-planningChannel.on("generation_started", payload => {
-  console.log("Generando menú...", payload);
-});
-
-planningChannel.on("proposal_ready", payload => {
-  console.log("Propuesta lista!", payload);
-  // payload.proposal_id para confirmar/rechazar
-});
-
-// 4. Generar menú
-planningChannel.push("generate_menu", {
-  date_from: "2026-06-10",
-  date_to: "2026-06-16",
-  constraints: { budget_cents: 15000, protein_g: 30 }
-});
-```
+The planning channel serves the culinary agent: `start_session`, `send_message`,
+`confirm` and the events they produce are documented in
+[CHANNELS.md](CHANNELS.md). The legacy `generate_menu` flow was
+retired (issue #110).
 
 ### Canal de Calendario
 
@@ -671,8 +633,6 @@ O para errores de validación:
 | `account_mismatch` | El `:account_id` de la URL no coincide con la cuenta activa del token (multi-familia) | Hacer `switch-account` a la cuenta correcta primero, ver [Multi-Familia](#multi-familia-cuentas-múltiples) |
 | `not_found` | Recurso no existe | Verificar IDs |
 | `invalid_payload` | Datos inválidos | Validar input del usuario |
-| `generation_in_progress` | Ya hay una generación en curso | Esperar o cancelar |
-| `no_active_generation` | No hay generación activa | Generar primero |
 | `budget_exceeded` | Supera el presupuesto | Reducir constraints |
 | `unreachable` | Servicio externo no disponible | Retry con backoff |
 
@@ -830,48 +790,10 @@ async function getCalendar(month) {
 }
 ```
 
-### Generar Plan Semanal (con WebSocket)
+### Plan semanal
 
-```javascript
-class PlanningService {
-  constructor(socket) {
-    this.channel = socket.channel("planning:1", {});
-    this.listeners = {};
-  }
-
-  async generate(dateFrom, dateTo, constraints) {
-    return new Promise((resolve, reject) => {
-      // Escuchar respuesta
-      this.channel.on("proposal_ready", payload => {
-        resolve(payload);
-      });
-
-      this.channel.on("generation_error", payload => {
-        reject(new Error(payload.reason));
-      });
-
-      // Unirse y generar
-      this.channel.join().receive("ok", () => {
-        this.channel.push("generate_menu", {
-          date_from: dateFrom,
-          date_to: dateTo,
-          constraints
-        });
-      });
-    });
-  }
-
-  async confirm(proposalId) {
-    return new Promise((resolve, reject) => {
-      this.channel.on("proposal_confirmed", payload => {
-        resolve(payload);
-      });
-
-      this.channel.push("confirm_proposal", { proposal_id: proposalId });
-    });
-  }
-}
-```
+See the planning channel in [CHANNELS.md](CHANNELS.md); the
+legacy `generate_menu` client was retired with the legacy planner (issue #110).
 
 ### Uso en React Native
 
@@ -881,7 +803,6 @@ import { Socket } from "phoenix";
 
 function App() {
   const [socket, setSocket] = useState(null);
-  const [planning, setPlanning] = useState(null);
 
   useEffect(() => {
     const initSocket = async () => {
@@ -896,21 +817,9 @@ function App() {
     initSocket();
   }, []);
 
-  const handleGenerate = async () => {
-    const service = new PlanningService(socket);
-    const result = await service.generate(
-      "2026-06-10",
-      "2026-06-16",
-      { budget_cents: 15000, protein_g: 30 }
-    );
-    setPlanning(result);
-  };
-
-  return (
-    <View>
-      <Button title="Generar Plan" onPress={handleGenerate} />
-    </View>
-  );
+  // Planning runs through the culinary agent on the planning channel
+  // (see CHANNELS.md), not through a generate call.
+  return <View />;
 }
 ```
 
@@ -934,10 +843,9 @@ El backend no maneja cache offline directamente. Se recomienda:
 
 ### ¿Qué pasa si el optimizador no encuentra solución?
 
-El backend devuelve `no_valid_plan`. Opciones:
-- Relajar constraints (menos proteína, más presupuesto)
-- Excluir ingredientes problemáticos
-- Reducir días de planificación
+The culinary agent presents the closest plan with its Deviations for the Member to
+approve, or explains why no plan is possible and asks how to continue. See
+[CHANNELS.md](CHANNELS.md).
 
 ### ¿Puedo usar el mismo WebSocket para múltiples canales?
 
@@ -970,7 +878,7 @@ Phoenix Channels manejan heartbeats automáticamente. Si hay desconexión:
 - [ ] Conectar WebSocket con token
 - [ ] Implementar reconnection strategy
 - [ ] Manejar errores según tabla de códigos
-- [ ] Probar flow completo: login → calendario → generar plan → confirmar
+- [ ] Probar flow completo: login → calendario → planificar con el agente → confirmar
 
 ---
 

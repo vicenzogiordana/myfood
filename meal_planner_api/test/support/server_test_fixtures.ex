@@ -11,21 +11,18 @@ defmodule MealPlannerApi.Generation.ServerTestFixtures do
   Conventions:
 
     * Recipe `id`s are integers (Ecto autogenerates them).
-    * Scheduled meal / proposal / generation_run ids are binary_ids
-      (`Ecto.UUID`); both kinds flow through the existing schema unchanged.
-    * Slots are inserted into `proposal.proposal_json["slots"]` as plain
-      plain maps (`slot_key`, `recipe_id`, `name`, `price_cents`).
+    * Scheduled meal ids are binary_ids (`Ecto.UUID`).
+    * `slot/3` builds a plain slot map (`slot_key`, `recipe_id`, `name`,
+      `price_cents`).
   """
 
-  alias MealPlannerApi.Data.{PlanningRepo, RecipeRepo, ShoppingRepo}
+  alias MealPlannerApi.Data.{RecipeRepo, ShoppingRepo}
   alias MealPlannerApi.Persistence.Accounts.Account, as: PersistenceAccount
   alias MealPlannerApi.Persistence.Accounts.AccountMembership
   alias MealPlannerApi.Persistence.Accounts.User, as: PersistenceUser
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApi.Persistence.Catalog.Ingredient
   alias MealPlannerApi.Persistence.Catalog.Recipe
-  alias MealPlannerApi.Persistence.Planning.PlanningProposal
-  alias MealPlannerApi.Persistence.Planning.PlanningGenerationRun
   alias MealPlannerApi.Persistence.Shopping.CheckoutSession
   alias MealPlannerApi.Persistence.Shopping.ShoppingItem
   alias MealPlannerApi.Repo
@@ -121,32 +118,6 @@ defmodule MealPlannerApi.Generation.ServerTestFixtures do
         quantity_milli: quantity_milli,
         unit: unit
       })
-  end
-
-  @doc """
-  Build a `:processing` generation_run + `:pending` proposal owned by
-  `account`/`user`, optionally preloaded with `slots` in the `proposal_json`.
-  """
-  @spec insert_proposal_with_slots(PersistenceAccount.t(), PersistenceUser.t(), [map()]) ::
-          {PlanningGenerationRun.t(), PlanningProposal.t()}
-  def insert_proposal_with_slots(account, user, slots) when is_list(slots) do
-    {:ok, run} =
-      PlanningRepo.create_generation_run(%{
-        account_id: account.id,
-        user_id: user.id,
-        status: :processing,
-        started_at: DateTime.utc_now(),
-        input_context: %{}
-      })
-
-    {:ok, proposal} =
-      PlanningRepo.create_proposal(%{
-        generation_run_id: run.id,
-        proposal_json: %{slots: slots, generated_at: DateTime.utc_now() |> DateTime.to_iso8601()},
-        status: :pending
-      })
-
-    {run, proposal}
   end
 
   @doc "Slot builder mirroring the shape consumed by `persist_scheduled_meals/2`."

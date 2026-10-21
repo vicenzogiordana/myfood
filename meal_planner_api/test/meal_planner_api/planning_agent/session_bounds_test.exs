@@ -123,7 +123,20 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
     end
 
     test "backoff between retries increases", %{household: h} do
-      script = List.duplicate({:error, :provider_unavailable}, 3) ++ [{:text, "ok"}]
+      # Each call records when it was made: the time the test process happens
+      # to receive a notification is later by a scheduling delay, which made
+      # the measured gap shorter than the backoff (issue #151).
+      test = self()
+
+      called = fn step ->
+        fn _request ->
+          send(test, {:model_called_at, System.monotonic_time(:millisecond)})
+          step
+        end
+      end
+
+      script =
+        Enum.map(List.duplicate({:error, :provider_unavailable}, 3) ++ [{:text, "ok"}], called)
 
       {session_id, pid} =
         start!(h, script, call_policies: %{model: %{timeout_ms: 1_000, backoff_ms: 60}})
@@ -132,8 +145,8 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
 
       times =
         for _ <- 1..4 do
-          assert_receive {:scripted_model_request, _}, 2_000
-          System.monotonic_time(:millisecond)
+          assert_receive {:model_called_at, at}, 2_000
+          at
         end
 
       [first, second, third] =
@@ -319,6 +332,15 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
         calories_per_serving: nil
       }
 
+    # Every search finds the same recipe, without the database: under the
+    # 100 ms read deadline of @fast a real search slowed by a loaded machine
+    # was cut and retried, so a no-progress run outlived its assertion
+    # (the intermittent failure of issue #151).
+    defp same_evidence do
+      recipe = fake_recipe(0)
+      {FakeRecipeSearch, steps: FakeRecipeSearch.steps!(List.duplicate({:ok, [recipe]}, 20))}
+    end
+
     defp search_forever(query),
       do: fn _request -> {:tool_calls, [{"search_recipes", %{"query" => query}}]} end
 
@@ -482,7 +504,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
     test "three attempts without verifiable progress stop and ask the Member", %{household: h} do
       # Every rewording finds the same recipe: new words, no new evidence.
       script = Enum.map(["rice", "bowl", "Fictitious", "rice bowl", "rice"], &search_forever/1)
-      {session_id, pid} = start!(h, script)
+      {session_id, pid} = start!(h, script, recipe_search: same_evidence())
 
       :ok = Session.send_message(pid, "Plan")
 
@@ -536,7 +558,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
         Enum.map(["rice", "bowl", "Fictitious", "rice bowl"], &search_forever/1) ++
           Enum.map(["rice", "bowl", "rice"], &search_forever/1)
 
-      {session_id, pid} = start!(h, script)
+      {session_id, pid} = start!(h, script, recipe_search: same_evidence())
 
       :ok = Session.send_message(pid, "Plan")
 
@@ -626,6 +648,53 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
                       %{"type" => "run_finished", "outcome" => "partial"}}
     end
 
+    # Issue #151: the Session's wall-clock deadline kills the turn, so the
+    # notice comes from the tool results the turn had already reported.
+    test "a run cut by the deadline after failing tools tells the Member which failed",
+         %{household: h} do
+      steps = FakeRecipeSearch.steps!(List.duplicate(:fail, 20))
+      slow = fn _request -> Process.sleep(1_000) && {:text, "late"} end
+
+      {session_id, pid} =
+        start!(h, [search_forever("rice"), slow],
+          recipe_search: {FakeRecipeSearch, steps: steps},
+          call_policies: %{model: %{timeout_ms: 5_000}, read: %{timeout_ms: 100, backoff_ms: 1}},
+          deadline_ms: 300
+        )
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "assistant_message", "text" => text}},
+                     2_000
+
+      assert text =~ "recipe search (search failed)"
+      assert text =~ "try again later"
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "time"}},
+                     1_000
+    end
+
+    test "a run cut by the deadline without failing tools adds no notice", %{household: h} do
+      slow = fn _request -> Process.sleep(1_000) && {:text, "late"} end
+
+      {session_id, pid} =
+        start!(h, [search_forever("rice"), slow],
+          recipe_search: same_evidence(),
+          call_policies: %{model: %{timeout_ms: 5_000}},
+          deadline_ms: 300
+        )
+
+      :ok = Session.send_message(pid, "Plan")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "limit_reached", "limit" => "time"}},
+                     2_000
+
+      refute_received {:planning_agent_event, ^session_id, %{"type" => "assistant_message"}}
+    end
+
     test "the notice names an unavailable optimizer and its reason", %{household: h} do
       script = List.duplicate({:tool_calls, [{"run_optimizer", %{}}]}, 5)
 
@@ -684,7 +753,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
         search_forever("rice")
       ]
 
-      {session_id, pid} = start!(h, script)
+      {session_id, pid} = start!(h, script, recipe_search: same_evidence())
 
       :ok = Session.send_message(pid, "Plan")
 
@@ -755,7 +824,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
 
     test "a limit reached without failing tools adds no notice", %{household: h} do
       script = Enum.map(["rice", "bowl", "Fictitious", "rice bowl", "rice"], &search_forever/1)
-      {session_id, pid} = start!(h, script)
+      {session_id, pid} = start!(h, script, recipe_search: same_evidence())
 
       :ok = Session.send_message(pid, "Plan")
 
