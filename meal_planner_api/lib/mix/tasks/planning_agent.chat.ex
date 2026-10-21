@@ -16,12 +16,15 @@ defmodule Mix.Tasks.PlanningAgent.Chat do
   It runs only with `MIX_ENV=test`, like the battery, but unlike the
   battery it keeps its data: the database (`MYFOOD_TEST_DATABASE`) must be
   one of its own, never the shared test database, migrated beforehand.
-  The first run seeds the Household; later runs reuse it.
+  The first run seeds the Household; later runs reuse it. Run one chat per
+  database at a time: a second chat on the same database takes the
+  Household's session row from the first one.
 
   ## Options
 
     * `--reset` — empty the chat database and seed the Household again
-      (needed after a confirmation, which plans the whole range)
+      (needed after a confirmation, which plans the whole range); only a
+      database whose name ends in `_chat`
     * `--scripted` — an offline scripted model and a greedy optimizer: no
       key, no spend, no Python
 

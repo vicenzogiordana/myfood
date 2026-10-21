@@ -653,6 +653,31 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
       assert_reply(ref, :ok, %{status: "not_found"})
     end
 
+    test "a replay after the session ended answers only the Member who confirmed",
+         %{household: h} do
+      socket = join!(h, h.owner)
+      {_session_id, %{"proposal_id" => proposal_id}} = propose!(socket)
+
+      ref = push(socket, "confirm", %{"proposal_id" => proposal_id})
+      assert_reply(ref, :ok, %{confirmation_id: ^proposal_id})
+      assert_push("agent_event", %{"type" => "session_ended"})
+
+      other = join!(h, member!(h))
+      ref = push(other, "confirm", %{"proposal_id" => proposal_id})
+      assert_reply(ref, :error, %{reason: "forbidden"})
+
+      # Also while that Member runs a later session of the Household.
+      next_day = %{@range | "range_from" => "2026-11-03", "range_to" => "2026-11-03"}
+      ref = push(other, "start_session", next_day)
+      assert_reply(ref, :ok, _)
+      ref = push(other, "confirm", %{"proposal_id" => proposal_id})
+      assert_reply(ref, :error, %{reason: "forbidden"})
+      cancel!(other)
+
+      ref = push(socket, "confirm", %{"proposal_id" => proposal_id})
+      assert_reply(ref, :ok, %{confirmation_id: ^proposal_id})
+    end
+
     test "confirming a Proposal that is not on display saves nothing and shows it again",
          %{household: h} do
       socket = join!(h, h.owner)
@@ -745,6 +770,26 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
       cancel!(socket)
     end
 
+    test "an Absence Exception naming more meals than any Planning Range holds is refused unread",
+         %{household: h} do
+      socket = join!(h, h.owner)
+      meal = %{"date" => "2026-11-02", "slot" => "dinner"}
+
+      exception = %{
+        "member_id" => Ecto.UUID.generate(),
+        "restriction" => %{"kind" => "diet", "value" => "vegetarian"},
+        "meals" => [meal]
+      }
+
+      # Well formed and within the bound: it reaches the (absent) session.
+      ref = push(socket, "approve_absence_exception", exception)
+      assert_reply(ref, :error, %{reason: "session_not_active"})
+
+      oversized = Map.put(exception, "meals", List.duplicate(meal, Session.max_range_meals() + 1))
+      ref = push(socket, "approve_absence_exception", oversized)
+      assert_reply(ref, :error, %{reason: "invalid_absence_exception"})
+    end
+
     test "confirmation and approval events without a proposal_id are invalid payloads",
          %{household: h} do
       socket = join!(h, h.owner)
@@ -756,6 +801,92 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
 
       ref = push(socket, "approve_deviations", %{"proposal_id" => Ecto.UUID.generate()})
       assert_reply(ref, :error, %{reason: "session_not_active"})
+    end
+  end
+
+  describe "a Session that dies mid-call (issue #173)" do
+    # Suspends the Household's session, pushes `event` so the channel blocks
+    # in its call, kills the session and returns the push ref.
+    defp push_then_kill_session(socket, household, event, payload) do
+      pid = Session.whereis(household.account_id)
+      :ok = :sys.suspend(pid)
+      ref = push(socket, event, payload)
+      wait_until(fn -> Process.info(pid, :message_queue_len) == {:message_queue_len, 1} end)
+      Process.exit(pid, :kill)
+      ref
+    end
+
+    defp wait_until(fun) do
+      if fun.() do
+        :ok
+      else
+        Process.sleep(5)
+        wait_until(fun)
+      end
+    end
+
+    test "confirm replies a structured error and the channel survives", %{household: h} do
+      socket = join!(h, h.owner)
+      ref = push(socket, "start_session", @range)
+      assert_reply(ref, :ok, _)
+
+      ref = push_then_kill_session(socket, h, "confirm", %{"proposal_id" => Ecto.UUID.generate()})
+
+      # Nothing was confirmed: the replay lookup is the authority.
+      assert_reply(ref, :error, %{reason: "stale_proposal"})
+      assert Process.alive?(socket.channel_pid)
+    end
+
+    test "approve_deviations replies a structured error and the channel survives",
+         %{household: h} do
+      socket = join!(h, h.owner)
+      ref = push(socket, "start_session", @range)
+      assert_reply(ref, :ok, _)
+
+      ref =
+        push_then_kill_session(socket, h, "approve_deviations", %{
+          "proposal_id" => Ecto.UUID.generate()
+        })
+
+      assert_reply(ref, :error, %{reason: "session_not_active"})
+      assert Process.alive?(socket.channel_pid)
+    end
+
+    test "approve_absence_exception replies a structured error and the channel survives",
+         %{household: h} do
+      vegetarian = member!(h)
+      diet!(vegetarian, :vegetarian)
+      socket = join!(h, h.owner)
+      ref = push(socket, "start_session", @range)
+      assert_reply(ref, :ok, _)
+
+      ref =
+        push_then_kill_session(socket, h, "approve_absence_exception", %{
+          "member_id" => vegetarian.user_id,
+          "restriction" => %{"kind" => "diet", "value" => "vegetarian"},
+          "meals" => [%{"date" => "2026-11-02", "slot" => "dinner"}]
+        })
+
+      assert_reply(ref, :error, %{reason: "session_not_active"})
+      assert Process.alive?(socket.channel_pid)
+    end
+
+    test "an approval to a session that does not answer in time replies busy",
+         %{household: h} do
+      socket = join!(h, h.owner)
+      ref = push(socket, "start_session", @range)
+      assert_reply(ref, :ok, _)
+      pid = Session.whereis(h.account_id)
+      :ok = :sys.suspend(pid)
+
+      ref = push(socket, "approve_deviations", %{"proposal_id" => Ecto.UUID.generate()})
+
+      # The default GenServer.call timeout is 5 s.
+      assert_reply(ref, :error, %{reason: "busy"}, 6_000)
+      assert Process.alive?(socket.channel_pid)
+
+      :ok = :sys.resume(pid)
+      cancel!(socket)
     end
   end
 end

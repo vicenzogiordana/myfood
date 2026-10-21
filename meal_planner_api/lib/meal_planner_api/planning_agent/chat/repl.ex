@@ -85,6 +85,13 @@ defmodule MealPlannerApi.PlanningAgent.Chat.Repl do
 
           try do
             loop(state)
+          catch
+            # The session process died under a bare Session call (a crash
+            # or a kill that sent no session_ended): the chat still ends
+            # cleanly and prints its spend.
+            :exit, _reason ->
+              info("The session ended unexpectedly.")
+              :session_ended
           after
             # The reader may still be blocked in IO.gets; unlink first, or
             # its :killed exit would take this process down with it.

@@ -41,9 +41,10 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
     * `confirm` — `%{"proposal_id"}`; the session Member's confirmation of the
       exact displayed Proposal (issue #169). Replies `%{confirmation_id,
       meals_count, shopping_lines_count}` (also for a replay after the session
-      ended) or `%{reason: "forbidden" | "busy" | "member_absent" |
-      "stale_proposal" | "approval_required" | "revalidation_conflict" |
-      "unresolved"}`.
+      ended, to the Member who confirmed only) or `%{reason: "forbidden" |
+      "busy" | "member_absent" | "stale_proposal" | "approval_required" |
+      "revalidation_conflict" | "unresolved" | "internal_error"}`. A session
+      that ends during the call is answered from the stored confirmation.
     * `confirmation_status` — `%{"proposal_id"}`; replies `%{status:
       "confirmed", confirmation_id, meals_count, shopping_lines_count}`,
       `%{status: "not_found"}` or `%{status: "unknown"}`.
@@ -54,7 +55,12 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
     * `approve_absence_exception` — `%{"member_id", "restriction" => %{"kind",
       "value"}, "meals" => [%{"date", "slot"}]}`; replies `:ok` or
       `%{reason: "forbidden" | "busy" | "invalid_absence_exception" |
-      "session_not_active"}`.
+      "session_not_active"}`. `meals` holds at most
+      `Session.max_range_meals/0` entries.
+
+  A session that does not answer an approval in time replies `busy`, and
+  one that ends during the call replies `session_not_active`: the channel
+  never crashes with it.
 
   See `docs/CHANNELS.md` for the full client contract.
 
@@ -300,17 +306,31 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
 
   defp parse_absence_exception(_payload), do: :error
 
+  # No Planning Range holds more meals than `Session.max_range_meals/0`: a
+  # longer list is refused before any of it is parsed, counting no further
+  # than one past the bound.
   defp parse_meals(meals) do
-    Enum.reduce_while(meals, {:ok, []}, fn
-      %{"date" => date, "slot" => slot}, {:ok, acc} when is_binary(date) and is_binary(slot) ->
-        case Date.from_iso8601(date) do
-          {:ok, date} -> {:cont, {:ok, acc ++ [{date, slot}]}}
-          {:error, _} -> {:halt, :error}
-        end
+    max = Session.max_range_meals()
 
-      _meal, _acc ->
-        {:halt, :error}
-    end)
+    if meals |> Enum.take(max + 1) |> length() > max do
+      :error
+    else
+      meals
+      |> Enum.reduce_while({:ok, []}, fn
+        %{"date" => date, "slot" => slot}, {:ok, acc} when is_binary(date) and is_binary(slot) ->
+          case Date.from_iso8601(date) do
+            {:ok, date} -> {:cont, {:ok, [{date, slot} | acc]}}
+            {:error, _} -> {:halt, :error}
+          end
+
+        _meal, _acc ->
+          {:halt, :error}
+      end)
+      |> case do
+        {:ok, parsed} -> {:ok, Enum.reverse(parsed)}
+        :error -> :error
+      end
+    end
   end
 
   defp cancel_reply(:ok, socket),

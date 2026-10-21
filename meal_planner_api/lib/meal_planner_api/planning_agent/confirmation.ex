@@ -202,6 +202,23 @@ defmodule MealPlannerApi.PlanningAgent.Confirmation do
     end
   end
 
+  @doc """
+  The membership that confirmed `confirmation_id` in the Household:
+  `{:ok, membership_id}` (`nil` when that membership no longer exists or
+  there is no such confirmation), or `:unknown` when it cannot be read.
+  """
+  @spec confirmed_by(Ecto.UUID.t(), Ecto.UUID.t()) :: {:ok, Ecto.UUID.t() | nil} | :unknown
+  def confirmed_by(account_id, confirmation_id) do
+    safe(fn ->
+      Repo.one(
+        from(c in AgentConfirmation,
+          where: c.id == ^confirmation_id and c.account_id == ^account_id,
+          select: c.confirmed_by_membership_id
+        )
+      )
+    end)
+  end
+
   # ---------------------------------------------------------------------------
 
   defp reconcile(store, attrs, deadline, poll_ms) do

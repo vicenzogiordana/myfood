@@ -381,6 +381,13 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   def authorize_continuation(session, membership_id),
     do: GenServer.call(session, {:authorize_continuation, membership_id})
 
+  @doc """
+  The most meals any Planning Range holds: its longest range times every
+  known slot. Bounds what a client may name in one request.
+  """
+  @spec max_range_meals() :: pos_integer()
+  def max_range_meals, do: @max_range_days * length(@known_slots)
+
   @doc "The largest Member message, in bytes, a session accepts."
   @spec max_message_bytes() :: pos_integer()
   def max_message_bytes, do: @max_message_bytes
@@ -418,15 +425,18 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   saved (a replay, also after the Planning Session ended). Otherwise
   nothing is saved:
 
-    * `:forbidden` — not the session's Member
+    * `:forbidden` — not the session's Member; for a replay, not the
+      Member who confirmed it
     * `:busy` — the agent is working; the shown Proposal may be replaced
     * `:stale_proposal` — not the current Proposal; the Member is shown it
       again
     * `:session_not_active` — the Planning Session ended meanwhile
 
   `:unresolved` means the outcome could not be verified within the
-  reconciliation window; it is never a failure, and
-  `confirmation_status/2` reports the outcome once readable.
+  reconciliation window, or the session did not answer in time; it is
+  never a failure, and `confirmation_status/2` reports the outcome once
+  readable. A session that ends during the call (it committed, crashed or
+  was killed) is answered from the stored confirmation, as a replay.
   """
   @spec confirm(Ecto.UUID.t(), Ecto.UUID.t(), String.t()) ::
           {:ok, Confirmation.summary()}
@@ -440,16 +450,22 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   def confirm(account_id, membership_id, proposal_id) do
     case whereis(account_id) do
       nil ->
-        replayed(account_id, proposal_id)
+        replayed(account_id, membership_id, proposal_id)
 
       pid ->
         try do
           GenServer.call(pid, {:confirm, membership_id, proposal_id}, @confirm_call_timeout)
         catch
-          # The session ended meanwhile, for instance after this very
-          # confirmation committed.
-          :exit, {reason, _} when reason in [:noproc, :normal] ->
-            replayed(account_id, proposal_id)
+          # The session is alive but did not answer: the outcome is not
+          # known yet, and confirmation_status/2 reports it once readable.
+          :exit, {:timeout, _} ->
+            {:error, :unresolved}
+
+          # The session ended meanwhile (after this very confirmation
+          # committed, or it crashed or was killed): the stored confirmation
+          # is the authority.
+          :exit, _reason ->
+            replayed(account_id, membership_id, proposal_id)
         end
     end
   end
@@ -487,7 +503,10 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     * `:stale_proposal` — not the current Proposal; the Member is shown it
       again
     * `:no_deviations` — the Proposal is valid and needs no approval
-    * `:session_not_active` — no Planning Session is running
+    * `:session_not_active` — no Planning Session is running, or it ended
+      during the call
+
+  A session that does not answer in time refuses with `:busy`.
   """
   @spec approve_deviations(Ecto.UUID.t(), Ecto.UUID.t(), String.t()) ::
           :ok
@@ -506,7 +525,10 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     * `:busy` — the agent is working
     * `:invalid_absence_exception` — not a Restriction that Member holds, or
       meals outside the Planning Range and its slots
-    * `:session_not_active` — no Planning Session is running
+    * `:session_not_active` — no Planning Session is running, or it ended
+      during the call
+
+  A session that does not answer in time refuses with `:busy`.
   """
   @spec approve_absence_exception(Ecto.UUID.t(), Ecto.UUID.t(), map()) ::
           :ok
@@ -523,15 +545,28 @@ defmodule MealPlannerApi.PlanningAgent.Session do
         try do
           GenServer.call(pid, message)
         catch
-          :exit, {reason, _} when reason in [:noproc, :normal] -> {:error, :session_not_active}
+          # Alive but working on something else: the Member retries.
+          :exit, {:timeout, _} -> {:error, :busy}
+          # It ended, crashed or was killed during the call.
+          :exit, _reason -> {:error, :session_not_active}
         end
     end
   end
 
-  defp replayed(account_id, proposal_id) do
+  # A replay answers only the Member who confirmed: the stored confirmation
+  # names them.
+  defp replayed(account_id, membership_id, proposal_id) do
     case confirmation_status(account_id, proposal_id) do
-      {:confirmed, summary} -> {:ok, summary}
+      {:confirmed, summary} -> replay_for(summary, account_id, membership_id)
       :not_found -> {:error, :stale_proposal}
+      :unknown -> {:error, :unresolved}
+    end
+  end
+
+  defp replay_for(summary, account_id, membership_id) do
+    case Confirmation.confirmed_by(account_id, summary.confirmation_id) do
+      {:ok, ^membership_id} -> {:ok, summary}
+      {:ok, _other} -> {:error, :forbidden}
       :unknown -> {:error, :unresolved}
     end
   end
@@ -926,7 +961,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       {:confirmed, summary} ->
         if own_proposal?(state, proposal_id),
           do: confirmed(state, proposal_id, summary),
-          else: {:reply, {:ok, summary}, state}
+          else: {:reply, replay_for(summary, state.account_id, state.membership_id), state}
 
       _not_confirmed ->
         confirm_current(state, proposal_id)

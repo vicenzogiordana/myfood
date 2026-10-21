@@ -19,7 +19,7 @@ Una persona necesita convertir una conversación sobre alimentación en un plan 
 El sistema actual contiene piezas útiles, pero no entrega todavía este flujo de punta a punta:
 
 - `Generation.Server` (retired in #110) armaba candidatos y ejecutaba el optimizador con un presupuesto leído por el servidor, pero enviaba límites de macronutrientes deliberadamente permisivos.
-- `PlanningCandidateBuilder` y `PlanningRepo` controlan los IDs de recetas, el alcance de cuenta, los participantes activos y las exclusiones persistidas.
+- `PlanningCandidateBuilder` (retired in #151; the agent's recipe search now owns this) y `PlanningRepo` controlaban los IDs de recetas, el alcance de cuenta, los participantes activos y las exclusiones persistidas.
 - `optimizador.py` elige exactamente una receta por día y franja, aplica límites nutricionales por día y un límite de presupuesto sobre todo el período solicitado.
 - Existe una frontera de intents tipados y una sesión de planificación capaz de guardar un intent validado, pero ese intent todavía no está conectado al pipeline canónico de generación.
 - El perfil dietario persiste categorías limitadas, mientras que las recetas no tienen metadatos dietarios ni de alérgenos suficientes para demostrar compatibilidad general.
@@ -199,7 +199,7 @@ Por lo tanto:
 2. **Normalizar:** sólo para un intent válido, el servidor resuelve por separado participantes, unidades, centavos, moneda, ingredientes y demás datos autoritativos contra fuentes canónicas.
 3. **Reconciliar:** el servidor combina perfil y conversación según la precedencia definida.
 4. **Confirmar comprensión:** la interfaz muestra una síntesis separando restricciones duras, preferencias blandas, advertencias y datos no resueltos.
-5. **Construir candidatos:** `PlanningCandidateBuilder` usa cuenta, participantes activos, franjas y filtros canónicos. La IA no aporta IDs.
+5. **Construir candidatos:** `PlanningCandidateBuilder` (retired in #151; historical proposal) usa cuenta, participantes activos, franjas y filtros canónicos. La IA no aporta IDs.
 6. **Optimizar:** el optimizador aplica una comida por franja, límites diarios, inclusión semanal y presupuesto semanal.
 7. **Validar:** el servidor vuelve a calcular cumplimiento sobre la respuesta del optimizador y rechaza IDs o valores fuera del conjunto canónico.
 8. **Proponer:** se muestra el plan y sus totales sin escribir comidas programadas.
@@ -216,7 +216,7 @@ Si la normalización produce más de una interpretación razonable de un ingredi
 | Interpretación | Reutilizar la frontera de intents tipados como entrada no autoritativa. Rechazar el intent completo si contiene IDs, precios, nutrientes autoritativos, participantes o directivas de escritura; no sanearlo parcialmente para continuar. |
 | Sesión | La sesión conserva el borrador confirmado y su rango; hoy puede guardar un intent validado, pero falta conectarla al pipeline canónico. |
 | Participantes | Resolverlos por separado en el servidor, sólo entre membresías activas de la cuenta; rechazar IDs desconocidos o externos en lugar de ignorarlos. |
-| Candidatos | Mantener `PlanningCandidateBuilder` como única puerta de recetas hacia optimización. |
+| Candidatos | Historical (retired in #151): mantener `PlanningCandidateBuilder` como única puerta de recetas hacia optimización. Hoy la búsqueda de recetas del agente (`MealPlannerApi.PlanningAgent.Tools`) y `ProposalValidator` cumplen ese rol. |
 | Exclusiones | Mantener `PlanningRepo` como filtro canónico de ingredientes excluidos de los participantes y sumar exclusiones conversacionales normalizadas en la misma etapa de elegibilidad. |
 | Dieta | Agregar una clasificación canónica verificable antes de filtrar; no usar el nombre o texto generado de una receta como prueba. |
 | Ingrediente requerido | Incorporar una restricción semanal de cobertura: al menos una receta elegida contiene cada ingrediente requerido duro. |

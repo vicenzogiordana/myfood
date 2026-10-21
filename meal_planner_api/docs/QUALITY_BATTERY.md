@@ -165,3 +165,9 @@ until then.
 offline with the scripted model and a fake optimizer. It also covers the
 zero-tolerance verdict, the spend ceiling and the refusals. These tests make
 no provider call.
+
+## Trying the agent by hand
+
+`mix planning_agent.chat` runs one live Planning Session over a fictitious
+Household in the terminal, with the same provider environment as the
+battery. See [PLANNING_CHAT.md](PLANNING_CHAT.md).

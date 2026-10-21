@@ -53,6 +53,9 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
   `claude-opus-5-5`) each request sends `fallbacks: "default"` and the beta
   `server-side-fallback-2026-07-01`: a safety-classifier decline is re-run
   on the model Anthropic recommends for its category, in the same call.
+  `init/1` refuses `fallbacks: true` on a `claude-haiku-*` model with
+  `:fallbacks_unsupported` (and logs why), so the misconfiguration fails
+  before any paid call instead of on every request.
 
   ## Spend
 
@@ -121,6 +124,8 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
 
   @behaviour MealPlannerApi.PlanningAgent.Model
 
+  require Logger
+
   alias MealPlannerApi.PlanningAgent.{ConcurrencyLimiter, SpendLedger}
   alias MealPlannerApi.PlanningAgent.Model.PaidCall
 
@@ -156,7 +161,8 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
          :ok <- PaidCall.validate_concurrency(config),
          :ok <- validate_pricing(config),
          :ok <- PaidCall.validate_api_key(config),
-         :ok <- validate_effort(config) do
+         :ok <- validate_effort(config),
+         :ok <- validate_fallbacks(config) do
       {:ok, %{config: config, ledger: ledger, assistant_turns: %{}}}
     end
   end
@@ -550,6 +556,20 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
 
   defp validate_effort(%{effort: effort}) when effort in @efforts, do: :ok
   defp validate_effort(_config), do: {:error, :provider_unconfigured}
+
+  # Haiku models reject the `fallbacks` parameter, so every paid call would
+  # fail: the misconfiguration is refused before any session starts.
+  defp validate_fallbacks(%{fallbacks: true, model: "claude-haiku-" <> _ = model}) do
+    Logger.error(
+      "ClaudeMessages: fallbacks: true is not supported by #{model}; " <>
+        "set PLANNING_AGENT_CLAUDE_FALLBACKS=false or choose a model that accepts " <>
+        "server-side refusal fallbacks, such as claude-opus-5-5"
+    )
+
+    {:error, :fallbacks_unsupported}
+  end
+
+  defp validate_fallbacks(_config), do: :ok
 
   defp positive_integer?(value), do: is_integer(value) and value > 0
 end

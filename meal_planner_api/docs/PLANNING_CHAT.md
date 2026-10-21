@@ -47,10 +47,16 @@ caps the session refuses to start. It runs with `MIX_ENV=test` because the
 test environment holds the offline price scraper, but it keeps its data, so
 it refuses the shared `meal_planner_api_test` database.
 
+Run one chat per database at a time. Each chat releases a session row that
+no process of its own runs (one left by a chat killed without `/quit`), so
+a second chat on the same database would take the Household's session from
+the first one. Use another `*_chat` database for a second chat.
+
 Options:
 
 - `--reset` empties the chat database and seeds again. Needed after a
-  `/confirm`, which plans the whole range.
+  `/confirm`, which plans the whole range. It only empties a database whose
+  name ends in `_chat`.
 - `--scripted` replaces the model with a scripted one and the optimizer
   with a greedy one: no key, no spend, no Python. The first message gets a
   plan; later ones get a fixed reply.
