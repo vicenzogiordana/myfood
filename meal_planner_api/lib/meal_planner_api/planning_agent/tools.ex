@@ -135,6 +135,10 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "skip: the household will not eat at home at that date and slot (e.g. \"Wednesday " <>
             "night we eat out\"); apply it without asking: that meal is not planned, bought or " <>
             "saved. unskip: plan it again. " <>
+            "A Recipe Draft pinned to a meal stays on the meals it is pinned to and is never " <>
+            "planned on another one; repeat_recipe (recipe_id) lets run_optimizer plan it on " <>
+            "other meals too, only when the household asks (e.g. \"you can repeat it\"); " <>
+            "pinning it to one more meal the household names also works. " <>
             "Approvals and confirmations are never possible here. Refused edits return a reason.",
         parameters: %{
           "type" => "object",
@@ -142,7 +146,8 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "action" => %{
               "type" => "string",
               "enum" =>
-                ~w(pin unpin exclude include release release_all set_variety_cap set_guests skip unskip)
+                ~w(pin unpin exclude include release release_all set_variety_cap set_guests skip unskip
+                   repeat_recipe)
             },
             "date" => %{"type" => "string", "description" => "ISO date inside the range"},
             "slot" => %{"type" => "string"},
@@ -185,6 +190,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "dictates (origin user_created). Use catalog Ingredient names only: unknown " <>
             "Ingredients reject the Draft and list close catalog matches to use instead; one " <>
             "under missing_from_catalog has none, so never retry it under another name. " <>
+            "Water, salt and pepper are staples, always at home: list them by name (or " <>
+            "omit them) without a catalog entry; they are never bought or priced and never " <>
+            "block a recipe. " <>
             "Nutrition and cost are computed by code and reported partial when data is " <>
             "missing; a partial Draft is usable, never re-create it only for that. To fix a " <>
             "Draft, call again with replaces_recipe_id (the same name and origin also " <>
@@ -491,7 +499,12 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
     with {:ok, candidates_by_slot} <- candidates(ctx, exclude),
          {:ok, candidates_by_slot} <- with_fixed_candidates(ctx, candidates_by_slot, fixed),
-         avoided = Enum.uniq(avoided ++ guest_avoided(ctx, candidates_by_slot, fixed)),
+         avoided =
+           Enum.uniq(
+             avoided ++
+               guest_avoided(ctx, candidates_by_slot, fixed) ++
+               own_meal_avoided(ctx, candidates_by_slot, fixed)
+           ),
          {:ok, payload} <- payload(ctx, candidates_by_slot, exclude_everywhere, fixed, avoided),
          {:ok, solution} <- solve(ctx, payload),
          :ok <- keeps_fixed(solution.meals, fixed),
@@ -823,8 +836,16 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
 
   # AI-created Recipe Drafts of the Workspace are candidates for their slots
   # beside the searched recipes; the validator checks them like any recipe.
+  # A Draft kept to its own meals (issue #162) is not: it enters only where
+  # it is fixed.
   defp candidates(ctx, exclude) do
-    drafts = ctx |> drafts() |> Map.values() |> Enum.filter(&RecipeDraft.plannable?/1)
+    own_meals = Workspace.own_meal_drafts(ctx.workspace)
+
+    drafts =
+      ctx
+      |> drafts()
+      |> Map.values()
+      |> Enum.filter(&(RecipeDraft.plannable?(&1) and not MapSet.member?(own_meals, &1.id)))
 
     Enum.reduce_while(ctx.slots, {:ok, %{}}, fn slot, {:ok, acc} ->
       filters = %{slot: slot, exclude_recipe_ids: exclude, limit: @optimizer_candidates_per_slot}
@@ -1009,6 +1030,22 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     |> Enum.sort_by(&{Date.to_iso8601(&1.date), &1.slot, &1.recipe_id})
   end
 
+  # A Draft kept to its own meals is a candidate of its slot for its fixed
+  # meals only (issue #162): every other meal of that slot avoids it, so the
+  # optimizer never spreads it to a meal the household did not ask for.
+  defp own_meal_avoided(ctx, candidates_by_slot, fixed) do
+    own_meals = Workspace.own_meal_drafts(ctx.workspace)
+    fixed_keys = fixed |> MapSet.new(&{&1.date, &1.slot}) |> MapSet.union(Workspace.skipped(ctx))
+    {from_date, to_date} = ctx.range
+
+    for date <- Date.range(from_date, to_date),
+        slot <- ctx.slots,
+        not MapSet.member?(fixed_keys, {date, slot}),
+        candidate <- Map.get(candidates_by_slot, slot, []),
+        MapSet.member?(own_meals, candidate["recipe_id"]),
+        do: %{date: date, slot: slot, recipe_id: candidate["recipe_id"]}
+  end
+
   defp payload(ctx, candidates_by_slot, exclude, fixed, avoided) do
     {from_date, to_date} = ctx.range
 
@@ -1089,7 +1126,16 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
     case CallBounds.run(Map.get(ctx, :bounds), :solver, nil, attempt) do
       {:ok, %{"meals" => meals} = result, _} when is_list(meals) ->
         with {:ok, parsed} <- parse_meals(meals) do
-          {:ok, %{meals: parsed, extra: Map.take(result, ["deviations", "optimality"])}}
+          extra =
+            case Map.take(result, ["deviations", "optimality"]) do
+              %{"deviations" => deviations} = extra ->
+                %{extra | "deviations" => deviations_data(deviations)}
+
+              extra ->
+                extra
+            end
+
+          {:ok, %{meals: parsed, extra: extra}}
         end
 
       {:ok, _other, _} ->
@@ -1102,6 +1148,30 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
         {:error, :optimizer_timeout, %{}}
     end
   end
+
+  # A budget Deviation of the optimizer counts cents: its amounts are renamed
+  # `*_cents` so the model gets their code-formatted twins (issue #162).
+  # Nutrition Deviations count grams or calories and stay as they are.
+  @deviation_amounts ~w(bound actual amount)
+
+  defp deviations_data(deviations) when is_list(deviations),
+    do: Enum.map(deviations, &deviation_data/1)
+
+  defp deviations_data(other), do: other
+
+  defp deviation_data(%{"goal" => "budget"} = deviation) do
+    Enum.reduce(@deviation_amounts, deviation, fn key, acc ->
+      case Map.pop(acc, key) do
+        {nil, acc} -> acc
+        {value, acc} -> Map.put(acc, key <> "_cents", cents(value))
+      end
+    end)
+  end
+
+  defp deviation_data(deviation), do: deviation
+
+  defp cents(value) when is_float(value), do: round(value)
+  defp cents(value), do: value
 
   # Recipe search is a read tool: bounded and retried on transient failure.
   defp search(ctx, filters) do

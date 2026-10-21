@@ -116,6 +116,43 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraftConfirmTest do
     assert proposal["purchase"]["complete"] == true
   end
 
+  # Staples are assumed at home (issue #162): never in the Purchase.
+  test "a Draft's staples are not in the Purchase", %{household: h} = ctx do
+    args =
+      Map.update!(
+        draft_args(ctx),
+        "ingredients",
+        &(&1 ++
+            [
+              %{"ingredient" => "Water", "quantity" => 400, "unit" => "ml"},
+              %{"ingredient" => "Salt", "quantity" => 4, "unit" => "g"}
+            ])
+      )
+
+    script = [
+      {:tool_calls, [{"create_recipe", args}]},
+      {:tool_calls, [{"run_optimizer", %{}}]},
+      {:tool_calls, [{"present_proposal", %{}}]},
+      {:text, "Here is the plan."}
+    ]
+
+    attrs = session_attrs(h, h.owner, {@monday, @monday})
+
+    {:ok, %{session_id: session_id, pid: pid}} =
+      Session.start(attrs,
+        model: {Scripted, script: script},
+        optimizer: {FakeOptimizer, result: pick(@draft_name)},
+        subscriber: self()
+      )
+
+    :ok = Session.send_message(pid, "Plan Monday with something new")
+
+    assert_receive {:planning_agent_event, ^session_id, %{"type" => "proposal"} = proposal}
+    assert proposal["purchase"]["total_cents"] == 900 + 1_500
+    assert proposal["purchase"]["complete"] == true
+    assert proposal["purchase"]["missing_prices"] == []
+  end
+
   test "confirmation saves the used Draft as a private AI-created Household Recipe",
        %{household: h} = ctx do
     %{proposal: proposal, draft_id: draft_id} = present_draft!(h, ctx)
@@ -303,6 +340,214 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraftConfirmTest do
       _session_id = run_pin_script(h, script)
       [_guests, _created, %{content: refused}] = tool_results()
       assert refused["error"] == "restriction_conflict"
+    end
+  end
+
+  describe "a pinned Draft stays on its meals (issue #162)" do
+    @tuesday ~D[2026-11-03]
+
+    # The optimizer prefers the Draft wherever the payload lets it: as if it
+    # were the cheapest candidate. A fixed meal keeps its recipe and an
+    # avoided meal never takes it.
+    defp prefer(name) do
+      fn payload ->
+        fixed = Map.new(payload["fixed_meals"], &{{&1["day"], &1["slot"]}, &1["recipe_id"]})
+        avoided = MapSet.new(payload["avoided_meals"], &{&1["day"], &1["slot"], &1["recipe_id"]})
+
+        meals =
+          for day <- payload["days"], slot <- payload["slots"] do
+            candidates = payload["candidates_by_slot"][slot]
+            preferred = Enum.find(candidates, &(&1["label"] == name))
+
+            recipe_id =
+              cond do
+                Map.has_key?(fixed, {day, slot}) ->
+                  Map.fetch!(fixed, {day, slot})
+
+                preferred && not MapSet.member?(avoided, {day, slot, preferred["recipe_id"]}) ->
+                  preferred["recipe_id"]
+
+                true ->
+                  candidates
+                  |> Enum.reject(&MapSet.member?(avoided, {day, slot, &1["recipe_id"]}))
+                  |> hd()
+                  |> Map.fetch!("recipe_id")
+              end
+
+            %{"day" => day, "slot" => slot, "recipe_id" => recipe_id}
+          end
+
+        {:ok, %{"meals" => meals}}
+      end
+    end
+
+    defp pin_draft(date, slot) do
+      fn %{messages: messages} ->
+        id =
+          Enum.find_value(Enum.reverse(messages), fn
+            %{role: :tool_result, content: %{"recipe_id" => id, "draft" => true}} -> id
+            _ -> nil
+          end)
+
+        {:tool_calls,
+         [
+           {"edit_workspace",
+            %{
+              "action" => "pin",
+              "date" => Date.to_iso8601(date),
+              "slot" => slot,
+              "recipe_id" => id
+            }}
+         ]}
+      end
+    end
+
+    defp repeat_draft do
+      fn %{messages: messages} ->
+        id =
+          Enum.find_value(Enum.reverse(messages), fn
+            %{role: :tool_result, content: %{"recipe_id" => id, "draft" => true}} -> id
+            _ -> nil
+          end)
+
+        {:tool_calls, [{"edit_workspace", %{"action" => "repeat_recipe", "recipe_id" => id}}]}
+      end
+    end
+
+    defp plan_two_days!(household, steps) do
+      script =
+        steps ++
+          [
+            {:tool_calls, [{"run_optimizer", %{}}]},
+            {:tool_calls, [{"present_proposal", %{}}]},
+            {:text, "Here is the plan."}
+          ]
+
+      attrs = session_attrs(household, household.owner, {@monday, @tuesday})
+
+      {:ok, %{session_id: session_id, pid: pid}} =
+        Session.start(attrs,
+          model: {Scripted, script: script, notify: self()},
+          optimizer: {FakeOptimizer, result: prefer(@draft_name), notify: self()},
+          subscriber: self()
+        )
+
+      :ok = Session.send_message(pid, "Burgers on Monday dinner")
+
+      assert_receive {:planning_agent_event, ^session_id,
+                      %{"type" => "recipe_draft", "recipe_id" => draft_id}}
+
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "proposal"} = proposal}
+      assert_receive {:optimizer_payload, payload}
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "run_finished"}}
+
+      %{draft_id: draft_id, proposal: proposal, payload: payload}
+    end
+
+    defp draft_meals(proposal, draft_id) do
+      for %{"recipe_id" => ^draft_id} = meal <- proposal["meals"],
+          do: {meal["date"], meal["slot"]}
+    end
+
+    test "is not chosen for other meals, even as the preferred candidate",
+         %{household: h} = ctx do
+      %{draft_id: draft_id, proposal: proposal, payload: payload} =
+        plan_two_days!(h, [
+          {:tool_calls, [{"create_recipe", draft_args(ctx)}]},
+          pin_draft(@monday, "dinner")
+        ])
+
+      assert proposal["status"] == "valid"
+      assert draft_meals(proposal, draft_id) == [{"2026-11-02", "dinner"}]
+
+      # Its own slot holds it only for the pinned meal: every other meal of
+      # that slot avoids it, and the other slot never offers it.
+      refute draft_id in Enum.map(payload["candidates_by_slot"]["lunch"], & &1["recipe_id"])
+
+      assert %{"day" => "2026-11-03", "slot" => "dinner", "recipe_id" => draft_id} in payload[
+               "avoided_meals"
+             ]
+    end
+
+    test "after the household asks, it can be planned on other meals", %{household: h} = ctx do
+      %{draft_id: draft_id, proposal: proposal} =
+        plan_two_days!(h, [
+          {:tool_calls, [{"create_recipe", draft_args(ctx)}]},
+          pin_draft(@monday, "dinner"),
+          repeat_draft()
+        ])
+
+      assert proposal["status"] == "valid"
+      assert length(draft_meals(proposal, draft_id)) == 4
+    end
+
+    test "pinning it to another meal adds only that meal", %{household: h} = ctx do
+      %{draft_id: draft_id, proposal: proposal} =
+        plan_two_days!(h, [
+          {:tool_calls, [{"create_recipe", draft_args(ctx)}]},
+          pin_draft(@monday, "dinner"),
+          pin_draft(@tuesday, "lunch")
+        ])
+
+      assert Enum.sort(draft_meals(proposal, draft_id)) == [
+               {"2026-11-02", "dinner"},
+               {"2026-11-03", "lunch"}
+             ]
+    end
+
+    test "a revision keeps it on its meals", %{household: h} = ctx do
+      revise = fn %{messages: messages} ->
+        id =
+          Enum.find_value(Enum.reverse(messages), fn
+            %{role: :tool_result, content: %{"recipe_id" => id, "draft" => true}} -> id
+            _ -> nil
+          end)
+
+        args = Map.merge(draft_args(ctx), %{"replaces_recipe_id" => id, "servings" => 3})
+        {:tool_calls, [{"create_recipe", args}]}
+      end
+
+      %{draft_id: draft_id, proposal: proposal} =
+        plan_two_days!(h, [
+          {:tool_calls, [{"create_recipe", draft_args(ctx)}]},
+          pin_draft(@monday, "dinner"),
+          revise
+        ])
+
+      assert draft_meals(proposal, draft_id) == [{"2026-11-02", "dinner"}]
+    end
+
+    test "an unpinned Draft is still a candidate everywhere", %{household: h} = ctx do
+      %{draft_id: draft_id, proposal: proposal} =
+        plan_two_days!(h, [{:tool_calls, [{"create_recipe", draft_args(ctx)}]}])
+
+      assert length(draft_meals(proposal, draft_id)) == 4
+    end
+
+    test "only a Draft of this chat can be repeated", %{household: h} = ctx do
+      script = [
+        {:tool_calls,
+         [
+           {"edit_workspace", %{"action" => "repeat_recipe", "recipe_id" => Ecto.UUID.generate()}}
+         ]},
+        {:text, "done"}
+      ]
+
+      attrs = session_attrs(h, h.owner, {@monday, @monday})
+
+      {:ok, %{session_id: session_id, pid: pid}} =
+        Session.start(attrs,
+          model: {Scripted, script: script, notify: self()},
+          optimizer: {FakeOptimizer, []},
+          subscriber: self()
+        )
+
+      :ok = Session.send_message(pid, "Repeat it")
+      assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+      assert_receive {:scripted_model_request, _first}
+      assert_receive {:scripted_model_request, %{messages: messages}}
+      assert %{role: :tool_result, content: %{"error" => "not_a_draft"}} = List.last(messages)
+      _ = ctx
     end
   end
 end

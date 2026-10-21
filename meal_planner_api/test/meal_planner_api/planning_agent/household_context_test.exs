@@ -179,6 +179,19 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContextTest do
       assert dishes =~ "Ask nothing else"
     end
 
+    test "a requested dish stays on its meal unless the household asks (issue #162)",
+         %{dishes: dishes} do
+      assert dishes =~ "stays on that meal only"
+      assert dishes =~ "never plans it on another meal"
+      assert dishes =~ "repeat_recipe; never on your own"
+    end
+
+    test "staples never block a requested dish (issue #162)", %{dishes: dishes} do
+      assert dishes =~ "Water, salt and pepper are staples, always at home"
+      assert dishes =~ "without a catalog entry or omit them"
+      assert dishes =~ "never a reason not to create a dish"
+    end
+
     test "no rule tells the agent to plan a requested dish with another recipe",
          %{instructions: instructions} do
       refute instructions =~ "plan with the closest recipe and say so"

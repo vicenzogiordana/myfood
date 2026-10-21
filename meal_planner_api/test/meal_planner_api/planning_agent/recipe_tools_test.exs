@@ -160,6 +160,81 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       refute Repo.get_by(Recipe, name: "Fictitious tomato pasta")
     end
 
+    # Water, salt and pepper are assumed at home (issue #162): they need no
+    # catalog entry, never block the Draft and are never priced or bought.
+    test "staples need no catalog entry and are never priced", %{household: h} = ctx do
+      product!(ctx.pasta, package: {500_000, :g}, price_cents: 1_000)
+      product!(ctx.tomato, package: {1_000_000, :g}, price_cents: 2_000)
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" =>
+            draft_args(ctx)["ingredients"] ++
+              [
+                %{"ingredient" => "Water", "quantity" => 500, "unit" => "ml"},
+                %{"ingredient" => " sal ", "quantity" => 5, "unit" => "g"},
+                %{"ingredient" => "Pimienta negra", "quantity" => 1, "unit" => "g"}
+              ]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["status"] == "drafted"
+      assert result["outcome"] == "complete"
+
+      assert Enum.map(result["ingredients"], & &1["ingredient"]) == [
+               ctx.pasta.name,
+               ctx.tomato.name
+             ]
+
+      assert result["staples"] == [
+               %{"ingredient" => "Water", "quantity_milli" => 500_000, "unit" => "ml"},
+               %{"ingredient" => "sal", "quantity_milli" => 5_000, "unit" => "g"},
+               %{"ingredient" => "Pimienta negra", "quantity_milli" => 1_000, "unit" => "g"}
+             ]
+
+      assert result["nutrition"]["complete"] == true
+      assert result["cost"]["total_cents"] == 1_000
+      assert result["cost"]["complete"] == true
+      assert result["cost"]["missing_prices"] == []
+    end
+
+    test "a staple in the catalog is still never priced", %{household: h} = ctx do
+      salt = ingredient!("Salt")
+      product!(salt, package: {1_000_000, :g}, price_cents: 9_999)
+      product!(ctx.pasta, package: {500_000, :g}, price_cents: 1_000)
+      product!(ctx.tomato, package: {1_000_000, :g}, price_cents: 2_000)
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" =>
+            draft_args(ctx)["ingredients"] ++
+              [%{"ingredient" => "salt", "quantity" => 5, "unit" => "g"}]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["status"] == "drafted"
+      refute Enum.any?(result["ingredients"], &(&1["ingredient"] == "Salt"))
+      assert [%{"ingredient" => "salt"}] = result["staples"]
+      assert result["cost"]["total_cents"] == 1_000
+    end
+
+    test "a staple listed twice is a duplicate", %{household: h} = ctx do
+      args =
+        draft_args(ctx, %{
+          "ingredients" =>
+            draft_args(ctx)["ingredients"] ++
+              [
+                %{"ingredient" => "agua", "quantity" => 100, "unit" => "ml"},
+                %{"ingredient" => "Agua", "quantity" => 200, "unit" => "ml"}
+              ]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+      assert %{"error" => "invalid_recipe", "reason" => "duplicate_ingredient"} = result
+    end
+
     test "rejects unknown Ingredients instead of inventing them", %{household: h} = ctx do
       args =
         draft_args(ctx, %{

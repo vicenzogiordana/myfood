@@ -391,11 +391,19 @@ defmodule MealPlannerApi.PlanningAgent.SessionWorkspaceTest do
     end
 
     test "the optimizer's Deviations reach the agent", %{household: h} do
-      deviation = %{"goal" => "budget", "priority" => 1, "amount" => 800}
+      calories = %{
+        "goal" => "calories",
+        "priority" => 2,
+        "day" => "2026-11-02",
+        "direction" => "below_min",
+        "bound" => 1_000,
+        "actual" => 400,
+        "amount" => 600
+      }
 
       with_deviation = fn payload ->
         {:ok, %{"meals" => meals}} = FakeOptimizer.first_candidates(payload)
-        {:ok, %{"meals" => meals, "deviations" => [deviation], "optimality" => "optimal"}}
+        {:ok, %{"meals" => meals, "deviations" => [calories], "optimality" => "optimal"}}
       end
 
       {session_id, pid} =
@@ -405,8 +413,46 @@ defmodule MealPlannerApi.PlanningAgent.SessionWorkspaceTest do
 
       results = run_turn!(session_id, pid, "Plan")
 
-      assert %{"status" => "ok", "deviations" => [^deviation], "optimality" => "optimal"} =
+      assert %{"status" => "ok", "deviations" => [^calories], "optimality" => "optimal"} =
                last_result(results, "run_optimizer")
+    end
+
+    # Budget amounts are cents: they carry code-formatted twins like every
+    # other model-facing amount (issue #162).
+    test "the optimizer's budget Deviation carries formatted amounts", %{household: h} do
+      budget = %{
+        "goal" => "budget",
+        "priority" => 1,
+        "direction" => "above_max",
+        "bound" => 1_000_000,
+        "actual" => 1_250_050,
+        "amount" => 250_050
+      }
+
+      with_deviation = fn payload ->
+        {:ok, %{"meals" => meals}} = FakeOptimizer.first_candidates(payload)
+        {:ok, %{"meals" => meals, "deviations" => [budget], "optimality" => "optimal"}}
+      end
+
+      {session_id, pid} =
+        start!(h, [{:tool_calls, [{"run_optimizer", %{}}]}, {:text, "ok"}],
+          result: with_deviation
+        )
+
+      results = run_turn!(session_id, pid, "Plan")
+      assert %{"deviations" => [deviation]} = last_result(results, "run_optimizer")
+
+      assert deviation == %{
+               "goal" => "budget",
+               "priority" => 1,
+               "direction" => "above_max",
+               "bound_cents" => 1_000_000,
+               "bound" => "ARS 10.000,00",
+               "actual_cents" => 1_250_050,
+               "actual" => "ARS 12.500,50",
+               "amount_cents" => 250_050,
+               "amount" => "ARS 2.500,50"
+             }
     end
 
     test "a re-optimization keeps every meal that was not released", %{household: h, recipes: r} do

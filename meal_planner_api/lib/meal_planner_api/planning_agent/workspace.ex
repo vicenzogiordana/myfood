@@ -18,6 +18,11 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
       (`release_all`) releases without forcing a change
     * `variety_cap` — the session's variety cap
     * `recipe_drafts` — Recipe Drafts by id (`MealPlannerApi.PlanningAgent.RecipeDraft`)
+    * `repeatable_drafts` / `own_meal_drafts` — a Draft pinned to a meal
+      the household asked for stays on its own meals (issue #162): it is
+      planned only where it is fixed, never chosen for another meal, until
+      the household asks to repeat it (`repeat_recipe`). A Draft never
+      pinned is a candidate for every meal of its slots
     * `deviation_approval` / `absence_exceptions` — human-owned approvals,
       set only by the Member through `MealPlannerApi.PlanningAgent.Session`
     * `price_refreshes` — recent live price refreshes by ingredient id
@@ -69,6 +74,8 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
             session_brands: %{},
             guests: %{},
             skipped: MapSet.new(),
+            own_meal_drafts: MapSet.new(),
+            repeatable_drafts: MapSet.new(),
             budget_conflict: nil
 
   @type key :: {Date.t(), String.t()}
@@ -88,6 +95,8 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
           session_brands: %{Ecto.UUID.t() => %{ingredient: String.t(), brand: String.t()}},
           guests: %{key() => Diners.guests()},
           skipped: MapSet.t(key()),
+          own_meal_drafts: MapSet.t(Ecto.UUID.t()),
+          repeatable_drafts: MapSet.t(Ecto.UUID.t()),
           budget_conflict: map() | nil
         }
 
@@ -134,6 +143,7 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
       action == "set_guests" -> set_guests(ws, args, ctx)
       action == "skip" -> skip(ws, args, ctx)
       action == "unskip" -> unskip(ws, args, ctx)
+      action == "repeat_recipe" -> repeat_recipe(ws, args)
       true -> {:error, "unknown_action", %{}}
     end
   end
@@ -146,7 +156,7 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
   def reason("unknown_action"),
     do:
       "Use pin, unpin, exclude, include, release, release_all, set_variety_cap, set_guests, " <>
-        "skip or unskip."
+        "skip, unskip or repeat_recipe."
 
   def reason("invalid_date"), do: "The date must be an ISO date (YYYY-MM-DD)."
   def reason("date_outside_range"), do: "The date is outside the Planning Range."
@@ -169,6 +179,12 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
   def reason("no_meal_to_keep"), do: "There is no proposed meal there to keep; name a recipe."
   def reason("not_pinned"), do: "No Pin exists for that day and slot."
   def reason("not_skipped"), do: "That day and slot is not skipped."
+
+  def reason("not_a_draft"),
+    do:
+      "Only a Recipe Draft of this chat can be repeated; stored recipes are planned on any " <>
+        "meal already."
+
   def reason("no_proposal"), do: "There is no Proposal yet; run the optimizer and present one."
   def reason("no_proposed_meal"), do: "The last Proposal has no meal for that day and slot."
   def reason("meal_pinned"), do: "That meal is pinned; unpin it before releasing it."
@@ -204,6 +220,18 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
     skipped
     |> Enum.sort_by(&sort_key(&1, order))
     |> Enum.map(&key_data/1)
+  end
+
+  @doc """
+  The Drafts kept to their own meals (issue #162): pinned to a meal the
+  household asked for and not repeated since. They are planned only where
+  they are fixed. Snapshots stored before #162 lack the fields: none.
+  """
+  @spec own_meal_drafts(t()) :: MapSet.t(Ecto.UUID.t())
+  def own_meal_drafts(%__MODULE__{} = ws) do
+    ws
+    |> Map.get(:own_meal_drafts, MapSet.new())
+    |> MapSet.difference(Map.get(ws, :repeatable_drafts, MapSet.new()))
   end
 
   @doc """
@@ -327,7 +355,8 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
         |> Map.get(:guests, %{})
         |> Enum.sort_by(fn {key, _guests} -> sort_key(key, order) end)
         |> Enum.map(fn {key, guests} -> Diners.data(key, guests) end),
-      "skipped" => ws |> skipped() |> skipped_data(ctx.slots)
+      "skipped" => ws |> skipped() |> skipped_data(ctx.slots),
+      "own_meal_recipe_ids" => ws |> own_meal_drafts() |> MapSet.to_list() |> Enum.sort()
     }
   end
 
@@ -346,6 +375,7 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
           released: MapSet.delete(ws.released, key)
       }
 
+      ws = keep_draft_to_its_meals(ws, recipe.id)
       {:ok, ws, %{"status" => "ok", "pinned" => pin_data(key, recipe)}}
     end
   end
@@ -489,6 +519,35 @@ defmodule MealPlannerApi.PlanningAgent.Workspace do
           {:ok, Map.put(ws, :skipped, MapSet.delete(skipped, key)),
            %{"status" => "ok", "unskipped" => key_data(key)}},
         else: {:error, "not_skipped", %{}}
+    end
+  end
+
+  # A Draft pinned to a meal stays there (issue #162), unless the household
+  # already asked to repeat it.
+  defp keep_draft_to_its_meals(ws, recipe_id) do
+    if Map.has_key?(Map.get(ws, :recipe_drafts, %{}), recipe_id),
+      do:
+        Map.put(
+          ws,
+          :own_meal_drafts,
+          ws |> Map.get(:own_meal_drafts, MapSet.new()) |> MapSet.put(recipe_id)
+        ),
+      else: ws
+  end
+
+  # The household asked to plan a Draft on other meals too ("use it again on
+  # Thursday", "you can repeat it"): it becomes a candidate for every meal of
+  # its slots.
+  defp repeat_recipe(ws, args) do
+    with {:ok, recipe_id} <- recipe_id_arg(args) do
+      if Map.has_key?(Map.get(ws, :recipe_drafts, %{}), recipe_id) do
+        repeatable = ws |> Map.get(:repeatable_drafts, MapSet.new()) |> MapSet.put(recipe_id)
+
+        {:ok, Map.put(ws, :repeatable_drafts, repeatable),
+         %{"status" => "ok", "repeatable" => recipe_id}}
+      else
+        {:error, "not_a_draft", %{}}
+      end
     end
   end
 
