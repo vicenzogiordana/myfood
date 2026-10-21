@@ -187,14 +187,18 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
         name: "create_recipe",
         description:
           "Draft a new recipe when existing recipes do not fit, or build the recipe a Member " <>
-            "dictates (origin user_created). Use catalog Ingredient names only: unknown " <>
-            "Ingredients reject the Draft and list close catalog matches to use instead; one " <>
-            "under missing_from_catalog has none, so never retry it under another name. " <>
+            "dictates (origin user_created). Use catalog Ingredient names only. An unknown " <>
+            "Ingredient with one clear close match is used as that match and listed under " <>
+            "resolved (requested, used); other unknown Ingredients reject the Draft and list " <>
+            "close catalog matches to use instead; one under missing_from_catalog has none, " <>
+            "so never retry it under another name. " <>
             "Water, salt and pepper are staples, always at home: list them by name (or " <>
             "omit them) without a catalog entry; they are never bought or priced and never " <>
             "block a recipe. " <>
             "Nutrition and cost are computed by code and reported partial when data is " <>
-            "missing; a partial Draft is usable, never re-create it only for that. To fix a " <>
+            "missing; a partial Draft is usable, never re-create it only for that, except " <>
+            "that a missing price with sold_in names the units the Ingredient is sold in: " <>
+            "restate its quantity in one of them to price it. To fix a " <>
             "Draft, call again with replaces_recipe_id (the same name and origin also " <>
             "revise it): it never adds a duplicate. The Draft lives only in this chat; it is " <>
             "never saved by you. AI-created Drafts can be planned; a dictated recipe is saved " <>
@@ -348,13 +352,34 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   updated workspace, and whether the turn continues. Money in the content
   carries its code-formatted amount beside the cents
   (`MealPlannerApi.PlanningAgent.Money`).
+
+  An empty or whitespace-only string given for an optional argument of the
+  tool (one its schema does not require) is absent, for every tool: models
+  send `"replaces_recipe_id": ""` meaning no value (issue #164).
   """
   @spec execute(String.t(), map(), context()) :: {map(), map(), control()}
   def execute(name, args, ctx) do
-    {content, workspace, control} = run(name, args, ctx)
+    {content, workspace, control} = run(name, without_blank_optionals(name, args), ctx)
     content = Money.annotate(content)
     {Map.put_new(content, "outcome", outcome(content)), workspace, control}
   end
+
+  defp without_blank_optionals(name, args) when is_map(args) do
+    case Enum.find(definitions(), &(&1.name == name)) do
+      nil ->
+        args
+
+      %{parameters: parameters} ->
+        required = Map.get(parameters, "required", [])
+        optional = parameters |> Map.get("properties", %{}) |> Map.drop(required)
+
+        Map.reject(args, fn {key, value} ->
+          Map.has_key?(optional, key) and is_binary(value) and String.trim(value) == ""
+        end)
+    end
+  end
+
+  defp without_blank_optionals(_name, args), do: args
 
   @doc """
   The outcome kind of a tool result: `complete`, `partial` (verified but
@@ -445,6 +470,7 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       {data
        |> Map.put("status", if(revised?, do: "revised", else: "drafted"))
        |> with_renamed(Map.get(draft, :renamed, []))
+       |> with_resolved(Map.get(draft, :resolved, []))
        |> Map.merge(RecipeDraft.outcome(draft)), workspace, :continue}
     else
       {:error, error} -> {error, ctx.workspace, :continue}
@@ -1276,6 +1302,20 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
       "renamed_ingredients" => renamed,
       "renamed_note" =>
         "These Ingredients were matched to the catalog names shown; call them by those names."
+    })
+  end
+
+  # Requested Ingredients the catalog does not have, resolved to their one
+  # clear close match (issue #164) instead of failing the call.
+  defp with_resolved(result, []), do: result
+
+  defp with_resolved(result, resolved) do
+    Map.merge(result, %{
+      "resolved" => resolved,
+      "resolved_note" =>
+        "These Ingredients were not in the catalog and were replaced by the closest one " <>
+          "shown under used. Tell the household only when the meaning could differ (e.g. " <>
+          "a different cut or variety that changes the dish); otherwise just use the name."
     })
   end
 

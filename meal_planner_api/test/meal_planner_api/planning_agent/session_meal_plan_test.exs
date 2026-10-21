@@ -114,6 +114,16 @@ defmodule MealPlannerApi.PlanningAgent.SessionMealPlanTest do
              ]
     end
 
+    # Issue #164: an empty optional argument is absent, in every tool.
+    test "an empty optional to reads the from date alone", %{household: h, recipes: r} do
+      plan_week!(h, r)
+
+      {_session_id, [result]} =
+        run_tools(h, [{"get_plan", %{"from" => "2026-11-02", "to" => " "}}])
+
+      assert Enum.map(result["meals"], & &1["date"]) == ["2026-11-02", "2026-11-02"]
+    end
+
     test "returns the Planned Meals of an inclusive range in date and slot order",
          %{household: h, recipes: r} do
       plan_week!(h, r)

@@ -9,7 +9,9 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
     * Ingredients are matched against the catalog by
       `MealPlannerApi.PlanningAgent.IngredientMatch`: the exact name
       (case-insensitive) or an unambiguous spelling variant (accents, a
-      plural ending), reported under `renamed`. Any other unknown Ingredient
+      plural ending), reported under `renamed`; otherwise its one clear
+      close match (the only candidate, or one well ahead of the rest, issue
+      #164), reported under `resolved`. Any other unknown Ingredient
       rejects the whole Draft with close catalog matches ranked by
       similarity; it is never invented
     * nutrition per serving is computed by code from the Ingredients'
@@ -107,6 +109,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
           nutrition: map(),
           cost: map(),
           renamed: [%{String.t() => String.t()}],
+          resolved: [%{String.t() => String.t()}],
           staples: [%{name: String.t(), quantity_milli: pos_integer(), unit: :g | :ml | :unit}]
         }
 
@@ -135,7 +138,8 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
         "replaces_recipe_id" => %{
           "type" => "string",
           "description" =>
-            "Recipe id of a Draft of this chat to revise instead of adding a new Draft"
+            "Recipe id of a Draft of this chat to revise instead of adding a new Draft; " <>
+              "omit it (or leave it empty) for a new Draft"
         },
         "ingredients" => %{
           "type" => "array",
@@ -179,7 +183,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
          {:ok, requested} <- requested_ingredients(args),
          {:ok, steps} <- steps(args),
          {staples, requested} = Enum.split_with(requested, &staple?(&1.name)),
-         {:ok, ingredients, catalog, renamed} <- resolve(requested),
+         {:ok, ingredients, catalog, matched} <- resolve(requested),
          :ok <- restriction_check(source, ingredients, household) do
       {:ok,
        %{
@@ -192,7 +196,8 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
          steps: steps,
          nutrition: nutrition(ingredients, catalog, servings),
          cost: cost(ingredients, servings),
-         renamed: renamed,
+         renamed: matched.renamed,
+         resolved: matched.resolved,
          staples: staples
        }}
     end
@@ -237,7 +242,9 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
         "usable" => true,
         "note" =>
           "The Draft is usable as is: plan it and present it. Missing nutrition or prices " <>
-            "come from the catalog, so do not re-create the Draft only for them."
+            "come from the catalog, so do not re-create the Draft only for them. The one " <>
+            "exception is a missing price with sold_in: restating that quantity in a unit " <>
+            "it is sold in prices it."
       }
   end
 
@@ -464,7 +471,10 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
   # ---------------------------------------------------------------------------
 
   defp resolve(requested) do
-    resolved = requested |> Enum.map(& &1.name) |> IngredientMatch.resolve()
+    names = requested |> Enum.map(& &1.name) |> Enum.uniq()
+    named = IngredientMatch.resolve(names)
+    clear = names |> Enum.reject(&Map.has_key?(named, &1)) |> IngredientMatch.clear_matches()
+    resolved = Map.merge(named, clear)
 
     case Enum.reject(requested, &Map.has_key?(resolved, &1.name)) do
       [] ->
@@ -484,7 +494,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
 
         if Enum.uniq(keys) == keys do
           {:ok, ingredients, Map.new(resolved, fn {_, i} -> {i.id, i} end),
-           renamed(requested, resolved)}
+           %{renamed: renamed(requested, named), resolved: substituted(requested, clear)}}
         else
           invalid("duplicate_ingredient")
         end
@@ -508,12 +518,22 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
 
   # Requested names that resolved to a catalog Ingredient spelled otherwise
   # (accents, a plural ending): the agent is told which name was used.
-  defp renamed(requested, resolved) do
+  defp renamed(requested, named) do
     for %{name: name} <- requested,
-        catalog = Map.fetch!(resolved, name).name,
+        Map.has_key?(named, name),
+        catalog = Map.fetch!(named, name).name,
         String.downcase(catalog) != String.downcase(name),
         uniq: true,
         do: %{"requested" => name, "catalog" => catalog}
+  end
+
+  # Requested names the catalog does not have, resolved to their one clear
+  # close match (issue #164): the agent is told which Ingredient was used.
+  defp substituted(requested, clear) do
+    for %{name: name} <- requested,
+        Map.has_key?(clear, name),
+        uniq: true,
+        do: %{"requested" => name, "used" => Map.fetch!(clear, name).name}
   end
 
   @retry_hint "Retry with catalog names from close_matches (ranked by similarity: the first " <>
