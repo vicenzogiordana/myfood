@@ -236,27 +236,6 @@ defmodule MealPlannerApi.Data.PlanningRepoTest do
     end
   end
 
-  describe "fetch_owned_proposal/3 — account_id + user_id scoping" do
-    test "rejects a proposal that belongs to a different account" do
-      account_a = insert_account("Proposal A")
-      account_b = insert_account("Proposal B")
-
-      user_a = insert_user_with_active_membership(account_a.id, "prop-a@example.com", :owner)
-      user_b = insert_user_with_active_membership(account_b.id, "prop-b@example.com", :owner)
-
-      proposal_a = insert_proposal(account_a.id, user_a.id, "A-Proposal")
-      _proposal_b = insert_proposal(account_b.id, user_b.id, "B-Proposal")
-
-      # Asking for the A proposal with account_b scope returns :proposal_not_found.
-      assert {:error, :proposal_not_found} =
-               PlanningRepo.fetch_owned_proposal(proposal_a.id, account_b.id, user_b.id)
-
-      # And the canonical lookup (account_a, user_a) succeeds.
-      assert {:ok, _proposal, _run} =
-               PlanningRepo.fetch_owned_proposal(proposal_a.id, account_a.id, user_a.id)
-    end
-  end
-
   describe "list_uncooked_scheduled_meals_with_recipe_ingredients/3 — account_id scoping" do
     test "filters by account_id, is_cooked = false, and preloads recipe ingredients" do
       account_a = insert_account("Ingredients A")
@@ -1114,24 +1093,6 @@ defmodule MealPlannerApi.Data.PlanningRepoTest do
       unit: :g
     })
     |> Repo.insert!()
-  end
-
-  defp insert_proposal(account_id, user_id, label) do
-    run =
-      Repo.insert!(%MealPlannerApi.Persistence.Planning.PlanningGenerationRun{
-        account_id: account_id,
-        user_id: user_id,
-        status: :completed,
-        input_context: %{},
-        started_at: DateTime.utc_now(),
-        completed_at: DateTime.utc_now()
-      })
-
-    Repo.insert!(%MealPlannerApi.Persistence.Planning.PlanningProposal{
-      generation_run_id: run.id,
-      proposal_json: %{"title" => label},
-      status: :pending
-    })
   end
 
   # ---- PR2 helpers --------------------------------------------------------

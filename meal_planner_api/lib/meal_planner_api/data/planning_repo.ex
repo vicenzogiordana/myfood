@@ -1,6 +1,6 @@
 defmodule MealPlannerApi.Data.PlanningRepo do
   @moduledoc """
-  Pure data access for planning runs, proposals, meals, and cooking sessions.
+  Pure data access for Planning Sessions, scheduled meals, and cooking sessions.
 
   No business logic. No orchestration. Just queries and persistence.
   """
@@ -24,86 +24,10 @@ defmodule MealPlannerApi.Data.PlanningRepo do
     CookingStepEvent,
     PlanningAgentRecovery,
     PlanningException,
-    PlanningGenerationRun,
     PlanningMessage,
-    PlanningProposal,
     PlanningSession,
     ScheduledMeal
   }
-
-  # -------------------------------------------------------------------------
-  # Generation runs
-  # -------------------------------------------------------------------------
-
-  @spec create_generation_run(map()) ::
-          {:ok, PlanningGenerationRun.t()} | {:error, Ecto.Changeset.t()}
-  def create_generation_run(attrs),
-    do: %PlanningGenerationRun{} |> PlanningGenerationRun.changeset(attrs) |> Repo.insert()
-
-  @spec update_generation_run(PlanningGenerationRun.t(), map()) ::
-          {:ok, PlanningGenerationRun.t()} | {:error, Ecto.Changeset.t()}
-  def update_generation_run(run, attrs),
-    do: run |> PlanningGenerationRun.changeset(attrs) |> Repo.update()
-
-  # -------------------------------------------------------------------------
-  # Proposals
-  # -------------------------------------------------------------------------
-
-  @spec create_proposal(map()) :: {:ok, PlanningProposal.t()} | {:error, Ecto.Changeset.t()}
-  def create_proposal(attrs),
-    do: %PlanningProposal{} |> PlanningProposal.changeset(attrs) |> Repo.insert()
-
-  @spec update_proposal(PlanningProposal.t(), map()) ::
-          {:ok, PlanningProposal.t()} | {:error, Ecto.Changeset.t()}
-  def update_proposal(proposal, attrs),
-    do: proposal |> PlanningProposal.changeset(attrs) |> Repo.update()
-
-  @spec get_proposal_with_run!(pos_integer()) :: {PlanningProposal.t(), PlanningGenerationRun.t()}
-  def get_proposal_with_run!(proposal_id) do
-    query =
-      from(p in PlanningProposal,
-        join: r in assoc(p, :generation_run),
-        where: p.id == ^proposal_id,
-        preload: [generation_run: []]
-      )
-
-    proposal = Repo.one!(query)
-
-    {:ok, run} =
-      Repo.all(from(r in PlanningGenerationRun, where: r.id == ^proposal.generation_run_id))
-      |> case do
-        [run] -> {:ok, run}
-        [] -> {:error, :not_found}
-      end
-
-    {proposal, run}
-  end
-
-  @spec fetch_owned_proposal(pos_integer(), pos_integer(), pos_integer()) ::
-          {:ok, PlanningProposal.t(), PlanningGenerationRun.t()} | {:error, :proposal_not_found}
-  def fetch_owned_proposal(proposal_id, account_id, user_id) do
-    query =
-      from(p in PlanningProposal,
-        join: r in assoc(p, :generation_run),
-        where: p.id == ^proposal_id and r.account_id == ^account_id and r.user_id == ^user_id,
-        preload: [generation_run: []]
-      )
-
-    case Repo.one(query) do
-      nil ->
-        {:error, :proposal_not_found}
-
-      proposal ->
-        {:ok, run} =
-          Repo.all(from(r in PlanningGenerationRun, where: r.id == ^proposal.generation_run_id))
-          |> case do
-            [run] -> {:ok, run}
-            [] -> {:error, :not_found}
-          end
-
-        {:ok, proposal, run}
-    end
-  end
 
   # -------------------------------------------------------------------------
   # Scheduled meals

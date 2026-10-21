@@ -5,7 +5,6 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
 
   alias MealPlannerApi.Accounts
   alias MealPlannerApi.Auth.Guardian
-  alias MealPlannerApi.Data.PlanningRepo
   alias MealPlannerApi.Persistence.Accounts.Account, as: PersistenceAccount
   alias MealPlannerApi.Persistence.Catalog
   alias MealPlannerApi.Persistence.Identity
@@ -183,34 +182,7 @@ defmodule MealPlannerApiWeb.ShoppingControllerTest do
           unit: :g
         })
 
-      {:ok, run} =
-        PlanningRepo.create_generation_run(%{
-          account_id: membership.account_id,
-          user_id: user.id,
-          status: :processing,
-          started_at: DateTime.utc_now(),
-          input_context: %{}
-        })
-
       today = Date.utc_today()
-
-      {:ok, _proposal} =
-        PlanningRepo.create_proposal(%{
-          generation_run_id: run.id,
-          status: :pending,
-          proposal_json: %{
-            slots: [
-              %{
-                slot_key: "#{Date.to_iso8601(today)}_lunch",
-                date: Date.to_iso8601(today),
-                slot: "lunch",
-                recipe_id: recipe.id,
-                recipe_name: recipe.name,
-                price_cents: 1000
-              }
-            ]
-          }
-        })
 
       conn =
         conn
