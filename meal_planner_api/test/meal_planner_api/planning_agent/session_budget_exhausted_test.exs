@@ -94,6 +94,87 @@ defmodule MealPlannerApi.PlanningAgent.SessionBudgetExhaustedTest do
              Session.confirm(h.account_id, h.owner.membership_id, proposal_id)
   end
 
+  # Issue #151: a revalidation conflict in an exhausted session voids the
+  # Proposal but starts no paid turn to correct it; with nothing left to act
+  # on, the session ends like an exhausted one without a Proposal.
+  test "a revalidation conflict after the spend cap starts no turn and ends the session",
+       %{household: h} do
+    recipe!("Fictitious stew", [ingredient!("Fictitious beef", [:contains_meat])])
+
+    script = [
+      {:tool_calls, [{"run_optimizer", %{}}]},
+      {:tool_calls, [{"present_proposal", %{}}]},
+      {:text, "Here is your plan."},
+      {:error, :spend_cap_reached}
+    ]
+
+    attrs = session_attrs(h, h.owner, {@monday, @monday})
+
+    {:ok, %{session_id: session_id, pid: pid}} =
+      Session.start(attrs,
+        model: {Scripted, script: script, notify: self()},
+        optimizer: {FakeOptimizer, result: pick("Fictitious stew")},
+        subscriber: self()
+      )
+
+    ref = Process.monitor(pid)
+
+    :ok = Session.send_message(pid, "Plan Monday")
+
+    assert_receive {:planning_agent_event, ^session_id,
+                    %{"type" => "proposal", "proposal_id" => proposal_id}}
+
+    assert_receive {:planning_agent_event, ^session_id, %{"type" => "turn_completed"}}
+    :ok = Session.send_message(pid, "Make it cheaper")
+
+    assert_receive {:planning_agent_event, ^session_id,
+                    %{"type" => "session_budget_exhausted", "limit" => "spend_cap"}}
+
+    assert_receive {:planning_agent_event, ^session_id, %{"type" => "run_finished"}}
+    assert model_requests() == 4
+    flush_progress(session_id)
+
+    diet!(h.owner, :vegetarian)
+
+    assert {:error, :revalidation_conflict} =
+             Session.confirm(h.account_id, h.owner.membership_id, proposal_id)
+
+    assert_receive {:planning_agent_event, ^session_id,
+                    %{"type" => "proposal_invalidated", "proposal_id" => ^proposal_id}}
+
+    assert_receive {:planning_agent_event, ^session_id,
+                    %{"type" => "session_budget_exhausted", "proposal" => nil} = event}
+
+    assert event["message"] =~ "new planning session"
+    assert_receive {:planning_agent_event, ^session_id, %{"type" => "session_ended"}}
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    refute_received {:planning_agent_event, ^session_id, %{"type" => "progress"}}
+    assert model_requests() == 0
+  end
+
+  # The optimizer picks the candidate labelled `name` for every day and slot.
+  defp pick(name) do
+    fn payload ->
+      meals =
+        for day <- payload["days"], slot <- payload["slots"] do
+          %{"recipe_id" => id} =
+            Enum.find(payload["candidates_by_slot"][slot], &(&1["label"] == name))
+
+          %{"day" => day, "slot" => slot, "recipe_id" => id}
+        end
+
+      {:ok, %{"meals" => meals}}
+    end
+  end
+
+  defp flush_progress(session_id) do
+    receive do
+      {:planning_agent_event, ^session_id, %{"type" => "progress"}} -> flush_progress(session_id)
+    after
+      0 -> :ok
+    end
+  end
+
   test "the token cap without a Proposal ends the session and frees the Household",
        %{household: h} do
     {session_id, pid} = start!(h, [{:error, :token_cap_reached}])

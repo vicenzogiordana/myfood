@@ -1257,8 +1257,9 @@ defmodule MealPlannerApi.PlanningAgent.Session do
       save(state, shown, purchase)
     else
       {:invalid, violations} ->
-        {:reply, {:error, :revalidation_conflict},
-         revalidation_conflict(state, shown, violations)}
+        state
+        |> revalidation_conflict(shown, violations)
+        |> after_conflict({:error, :revalidation_conflict})
 
       # Only the affected parts changed: the same meals are shown again,
       # recalculated, as a new Proposal the Member is asked to confirm.
@@ -1343,7 +1344,9 @@ defmodule MealPlannerApi.PlanningAgent.Session do
   # The shown Proposal no longer passes validation: it is voided and the
   # agent is sent the violations to build a corrected one, which needs the
   # Member's confirmation again. With a reached limit pending, the Member
-  # decides first whether the agent continues.
+  # decides first whether the agent continues. An exhausted session starts
+  # no turn, which could only be refused (issue #151): the Member is told
+  # why, as after any exhausted run.
   defp revalidation_conflict(state, shown, violations) do
     emit(state, %{
       "type" => "proposal_invalidated",
@@ -1354,11 +1357,26 @@ defmodule MealPlannerApi.PlanningAgent.Session do
 
     state = %{state | workspace: show(Workspace.void_proposal(state.workspace), nil)}
 
-    if state.consent? and state.pending_limit == nil do
-      notice = %{role: :user, content: conflict_notice(violations)}
-      start_turn(%{state | messages: state.messages ++ [notice]})
-    else
-      state
+    cond do
+      state.exhausted != nil ->
+        emit(state, budget_exhausted_event(state))
+        state
+
+      state.consent? and state.pending_limit == nil ->
+        notice = %{role: :user, content: conflict_notice(violations)}
+        start_turn(%{state | messages: state.messages ++ [notice]})
+
+      true ->
+        state
+    end
+  end
+
+  # An exhausted session whose Proposal was voided holds nothing the Member
+  # could still act on: it ends after replying, as `after_run/1` does.
+  defp after_conflict(state, reply) do
+    case after_run(state) do
+      {:noreply, state} -> {:reply, reply, state}
+      {:stop, reason, state} -> {:stop, reason, reply, state}
     end
   end
 
