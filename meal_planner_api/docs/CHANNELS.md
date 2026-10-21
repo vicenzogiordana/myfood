@@ -190,6 +190,7 @@ Every event is pushed as `agent_event` with `type` and `session_id`:
 | `proposal` | `{proposal_id, status, meals: [{date, slot, recipe_id, name, origin, draft}], skipped: [{date, slot}], purchase, consumed_cost, budget, deviations}` | A Proposal validated by code; `status` is code-owned (`valid` or `requires_approval`). `skipped` lists the meals the Household does not eat at home: they have no meal, are not bought or costed, and confirming saves nothing for them (see "Skipped meals" below). Every meal shows its Recipe Origin (`traditional`, `ai_created`, `user_created`); `draft: true` marks an unsaved AI-created Recipe Draft, saved as a private Household Recipe only if this Proposal is confirmed. See "Proposal Purchase" below |
 | `recipe_draft` | `{recipe_id, name, origin, draft: true, servings, slots, ingredients: [{ingredient, quantity_milli, unit}], staples: [{ingredient, quantity_milli, unit}], steps, nutrition, cost}` | The agent built a Recipe Draft from catalog Ingredients; `staples` are water, salt or pepper, never priced or bought. `origin` is `ai_created` (disclose as AI-made, possibly imperfect) or `user_created` (a dictated recipe). See "Recipe Drafts" below |
 | `recipe_saved` | `{recipe_id, name, origin}` | The Member saved a dictated recipe as a Household Recipe |
+| `proposal_invalidated` | `{proposal_id, reason, violations}` — `reason` is `revalidation_conflict` (confirming found violations, listed in `violations`) or `recipe_draft_revised` (the agent revised a Draft the Proposal uses; no `violations`) | The Proposal is void: stop offering it for confirmation and wait for the next `proposal` |
 | `optimizer_failed` | `{reason}` | The optimizer failed (including `optimizer_busy` / `optimizer_unconfigured` from the global subprocess cap); no fallback plan is produced |
 | `session_brand_changed` | `{ingredient, brand, source, previous_brand, previous_source}` — `source` is `session`, `household` or `null` | The agent set or cleared a Session Brand (this Planning Session only; household settings are unchanged). `brand` is the brand now bought for the ingredient |
 | `consent_required` | `{}` | Consent must be given before the agent can call the AI provider |
@@ -338,7 +339,11 @@ it was created with AI and may contain errors; it still asks first before
 creating recipes to fit an infeasible budget or a plan limited to "only recipes
 with X". Re-creating a Draft (by `replaces_recipe_id`, or with the
 same name and origin) revises it in place, keeping its `recipe_id`, so the client
-receives a new `recipe_draft` event for the same id instead of a duplicate. An
+receives a new `recipe_draft` event for the same id instead of a duplicate. When
+the shown Proposal uses the revised Draft, that Proposal is voided at once
+(`proposal_invalidated` with `reason: "recipe_draft_revised"`): confirming it
+replies `stale_proposal`, so nothing is saved at a cost other than the one shown,
+and the agent presents a new Proposal. An
 AI-created Draft can be pinned to a meal like any recipe. Its computed
 nutrition and cost look like:
 
