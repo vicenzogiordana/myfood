@@ -176,10 +176,10 @@ Meal Plans and Shopping Lists are unchanged.
 | `save_recipe` | `{recipe_id}` — only the session's Member, for a `recipe_draft` with `origin: "user_created"` (a dictated recipe) | `{recipe_id, name, origin}` (`origin` is `user_created`) — saved as a user-created Household Recipe — or `{reason}`: `forbidden`, `busy`, `member_absent`, `not_found`, `not_dictated` (AI-created Drafts are saved only by confirming a Proposal that uses them), `invalid_recipe`, `no_active_session`, `internal_error` |
 | `stop` | `{}` — only the session's Member (the Owner can Cancel, not Stop) | `{status}` (`"stopped"`; the session, Workspace and last valid Proposal survive and a new `send_message` is accepted) or `{reason}`: `forbidden`, `no_active_session` |
 | `cancel_session` | `{}` — the session's Member or the Household Owner; also cancels a session waiting for recovery after a restart | `{status}` (`"cancelled"`) or `{reason}`: `forbidden`, `no_active_session` |
-| `confirm` | `{proposal_id}` — only the session's Member, the `proposal_id` of the Proposal on display | `{confirmation_id, meals_count, shopping_lines_count}` (the plan is saved and the session ends; a replay of the same `proposal_id`, also after the session ended, returns the same result and saves nothing twice) or `{reason}`: `forbidden`, `busy`, `member_absent`, `stale_proposal`, `approval_required`, `revalidation_conflict`, `unresolved`, `internal_error` |
+| `confirm` | `{proposal_id}` — only the session's Member, the `proposal_id` of the Proposal on display | `{confirmation_id, meals_count, shopping_lines_count}` (the plan is saved and the session ends; a replay of the same `proposal_id`, also after the session ended, returns the same result to the Member who confirmed it and saves nothing twice; any other Member gets `forbidden`) or `{reason}`: `forbidden`, `busy`, `member_absent`, `stale_proposal`, `approval_required`, `revalidation_conflict`, `unresolved`, `internal_error` |
 | `confirmation_status` | `{proposal_id}` — any Member of the Household, also after the session ended | `{status, confirmation_id?, meals_count?, shopping_lines_count?}` — `status` is `confirmed` (with the three counts), `not_found` (nothing was saved for it) or `unknown` (cannot be read right now; ask again) |
 | `approve_deviations` | `{proposal_id}` — only the session's Member, for a `requires_approval` Proposal on display | `ok` (a `deviations_approved` event follows; the Proposal can now be confirmed) or `{reason}`: `forbidden`, `busy`, `stale_proposal`, `no_deviations`, `session_not_active` |
-| `approve_absence_exception` | `{member_id, restriction, meals}` — only the session's Member. `member_id` is the absent Member's user id; `restriction` is `{"kind": "diet", "value": <diet>}` (`vegetarian`, `pescatarian`, `vegan`, `celiac`) or `{"kind": "allergy", "value": <tag>}` (`milk`, `egg`, `peanut`, `tree_nut`, `soy`, `crustacean`, `mollusc`, `sesame`, `mustard`, `celery`, `lupin`, `sulphite`, `contains_fish`, `contains_gluten`); `meals` is a non-empty list of distinct `{date, slot}` inside the range and its slots | `ok` (an `absence_exception_approved` event follows) or `{reason}`: `forbidden`, `busy`, `invalid_absence_exception` (malformed, a Restriction that Member does not hold, or meals outside the range), `session_not_active` |
+| `approve_absence_exception` | `{member_id, restriction, meals}` — only the session's Member. `member_id` is the absent Member's user id; `restriction` is `{"kind": "diet", "value": <diet>}` (`vegetarian`, `pescatarian`, `vegan`, `celiac`) or `{"kind": "allergy", "value": <tag>}` (`milk`, `egg`, `peanut`, `tree_nut`, `soy`, `crustacean`, `mollusc`, `sesame`, `mustard`, `celery`, `lupin`, `sulphite`, `contains_fish`, `contains_gluten`); `meals` is a non-empty list of distinct `{date, slot}` inside the range and its slots, at most 124 (31 days x 4 slots) | `ok` (an `absence_exception_approved` event follows) or `{reason}`: `forbidden`, `busy`, `invalid_absence_exception` (malformed, a Restriction that Member does not hold, or meals outside the range), `session_not_active` |
 | any other event | — | `{reason}`: `invalid_payload` (also for a payload of the wrong shape, e.g. `confirm` without a string `proposal_id`) |
 
 #### Outgoing Events
@@ -318,7 +318,7 @@ Every `reason` a client can receive, with what it means and what the client does
 
 | `reason` | Meaning | Client action |
 |----------|---------|---------------|
-| `forbidden` | Not allowed for this Member: another Member's session (only its Member acts on it; the Owner may only Cancel), or not an active Member of the Household | Show that the session belongs to someone else; offer nothing but Cancel to the Owner |
+| `forbidden` | Not allowed for this Member: another Member's session (only its Member acts on it; the Owner may only Cancel), or not an active Member of the Household, or a `confirm` replay by a Member other than the one who confirmed | Show that the session belongs to someone else; offer nothing but Cancel to the Owner |
 | `subscription_required` | The Household has no active plan or trial | Send the Member to the subscription screen |
 | `invalid_payload` | Unknown event, or a payload of the wrong shape | A client bug: fix the call |
 | `invalid_range` | Missing or malformed dates, `range_to` before `range_from`, or more than 31 days | Ask for another range |
@@ -331,11 +331,11 @@ Every `reason` a client can receive, with what it means and what the client does
 | `no_active_session` | No Planning Session on this socket (none started or resumed here, or it ended) | Start one, or `resume_session` |
 | `no_session` | Nothing to resume: the session ended or its 15-minute grace expired | Start a new session |
 | `session_busy` | The session did not answer the resume within 5 s; it is still running | Retry `resume_session` |
-| `session_not_active` | No Planning Session runs in the Household (approvals) | Start a new session |
+| `session_not_active` | No Planning Session runs in the Household, or it ended during the call (approvals) | Start a new session |
 | `consent_required` | Consent to external AI use is missing | Ask for it, then `give_consent` and resend |
 | `invalid_message` | `text` is missing, not a string or blank | Do not send empty messages |
 | `message_too_long` | `text` is over 4,000 bytes | Shorten it |
-| `busy` | The agent is working; the shown Proposal may still change | Wait for `run_finished`, or `stop` first |
+| `busy` | The agent is working; the shown Proposal may still change (an approval also gets it when the session did not answer within 5 s) | Wait for `run_finished`, or `stop` first |
 | `session_budget_exhausted` | The session's spend, tokens or model calls are used up | Offer to confirm or cancel the latest Proposal, or start a new session |
 | `no_limit_reached` | `authorize_continuation` without a pending `limit_reached` | Nothing to authorize |
 | `member_absent` | The session has no connected Member (this socket did not resume it) | `resume_session`, then retry |
@@ -346,7 +346,7 @@ Every `reason` a client can receive, with what it means and what the client does
 | `approval_required` | A `requires_approval` Proposal confirmed without its Deviation Approval | Show the Deviations and offer `approve_deviations` |
 | `no_deviations` | `approve_deviations` on a `valid` Proposal | Confirm it directly |
 | `revalidation_conflict` | Confirmation found the Proposal no longer valid; a `proposal_invalidated` event explains why | Wait for the corrected `proposal` |
-| `unresolved` | The confirmation could not be verified within 30 s; it may have succeeded | Never report failure: poll `confirmation_status` |
+| `unresolved` | The confirmation could not be verified within 30 s, or the session did not answer within 60 s; it may have succeeded | Never report failure: poll `confirmation_status` |
 | `invalid_absence_exception` | Malformed, a Restriction that Member does not hold, or meals outside the range | Fix the selection |
 | `internal_error` | An unexpected server failure; its detail stays on the server | Retry later |
 
