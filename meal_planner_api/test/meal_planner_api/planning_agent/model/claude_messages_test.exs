@@ -74,6 +74,8 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
         fallback_output_price_micros_per_mtok: 8_000_000,
         max_tokens: 1_000,
         max_concurrent_calls: 100,
+        # Most tests exercise the refusal fallback path, which is off by default.
+        fallbacks: true,
         req_options: [plug: {Req.Test, @stub}]
       ],
       overrides
@@ -206,10 +208,13 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
       assert {:error, :provider_unconfigured} = ClaudeMessages.init(opts(effort: "huge"))
     end
 
-    test "defaults to Claude Opus 5.5 at medium effort" do
-      {:ok, state} = ClaudeMessages.init(opts())
-      assert state.config.model == "claude-opus-5-5"
+    # Haiku 5.5 rejects the `fallbacks` parameter (issue #156), so its
+    # default runs without server-side refusal fallbacks.
+    test "defaults to Claude Haiku 5.5 at medium effort without refusal fallbacks" do
+      {:ok, state} = ClaudeMessages.init(Keyword.delete(opts(), :fallbacks))
+      assert state.config.model == "claude-haiku-5-5"
       assert state.config.effort == "medium"
+      assert state.config.fallbacks == false
     end
   end
 
@@ -267,7 +272,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
                "server-side-fallback-2026-07-01"
              ]
 
-      assert body["model"] == "claude-opus-5-5"
+      assert body["model"] == "claude-haiku-5-5"
       assert body["max_tokens"] == 1_000
       assert body["thinking"] == %{"type" => "adaptive"}
       assert body["output_config"] == %{"effort" => "medium"}

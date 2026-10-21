@@ -2,12 +2,12 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
   @moduledoc """
   Anthropic Messages API adapter for the planning agent (issue #141, spec
   #93), over raw HTTP with `Req` (`POST /v1/messages`). Default model
-  `claude-opus-5-5`.
+  `claude-haiku-5-5` (issue #156: it passes the quality battery at a
+  fraction of the cost of `claude-opus-5-5`).
 
   ## Request
 
-  Thinking cannot be disabled on Claude Opus 5.5, so every request sends
-  adaptive thinking with an explicit `output_config.effort` (default
+  Every request sends adaptive thinking with an explicit `output_config.effort` (default
   `medium`). It never sends `budget_tokens`, sampling parameters, an
   assistant prefill or a forced `tool_choice`: tool use is `auto`. Neutral
   tools become Claude tool definitions; tool calls and results travel as
@@ -45,8 +45,10 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
   stop that is not a finished turn (`end_turn`, `tool_use`,
   `stop_sequence`) is `:invalid_provider_response`. None is transient.
 
-  Server-side refusal fallback is on by default (`fallbacks: "default"`,
-  beta `server-side-fallback-2026-07-01`): a safety-classifier decline is
+  Server-side refusal fallback (`fallbacks: "default"`, beta
+  `server-side-fallback-2026-07-01`) is off by default, because Claude
+  Haiku 5.5 rejects the parameter. With `fallbacks: true` (for models that
+  accept it, such as `claude-opus-5-5`) a safety-classifier decline is
   re-run on the model Anthropic recommends for its category, in the same
   call.
 
@@ -83,7 +85,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
 
       config :meal_planner_api, MealPlannerApi.PlanningAgent.Model.ClaudeMessages,
         api_key: "...",
-        model: "claude-opus-5-5",
+        model: "claude-haiku-5-5",
         effort: "medium",                            # low | medium | high | xhigh | max
         base_url: "https://api.anthropic.com/v1",
         spend_cap_micros: nil,                       # micro-USD per Planning Session
@@ -93,7 +95,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
         output_price_micros_per_mtok: nil,
         cache_write_price_micros_per_mtok: nil,      # default 1.25x input
         cache_read_price_micros_per_mtok: nil,       # default 1x input
-        fallbacks: true,
+        fallbacks: false,                            # true needs the fallback prices
         max_fallback_attempts: 1,
         fallback_input_price_micros_per_mtok: nil,
         fallback_output_price_micros_per_mtok: nil,
@@ -128,10 +130,10 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
   @bytes_per_token 3
 
   @defaults [
-    model: "claude-opus-5-5",
+    model: "claude-haiku-5-5",
     effort: "medium",
     base_url: "https://api.anthropic.com/v1",
-    fallbacks: true,
+    fallbacks: false,
     max_fallback_attempts: 1,
     max_tokens: 16_000,
     receive_timeout_ms: 55_000,

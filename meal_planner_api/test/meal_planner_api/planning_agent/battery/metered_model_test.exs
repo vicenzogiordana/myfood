@@ -39,6 +39,8 @@ defmodule MealPlannerApi.PlanningAgent.Battery.MeteredModelTest do
       cache_read_price_micros_per_mtok: 200_000,
       fallback_input_price_micros_per_mtok: 5_000_000,
       fallback_output_price_micros_per_mtok: 25_000_000,
+      # The worst case below includes one refusal fallback attempt.
+      fallbacks: true,
       max_tokens: 16_000,
       max_concurrent_calls: 100,
       concurrency_limiter: start_limiter!(),
