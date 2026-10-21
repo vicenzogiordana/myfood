@@ -629,9 +629,12 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
         do: %{"requested" => name, "used" => Map.fetch!(clear, name).name}
   end
 
-  @retry_hint "Retry with catalog names from close_matches (ranked by similarity: the first " <>
-                "is usually the same Ingredient spelled otherwise, e.g. Muzzarella for " <>
-                "mozzarella), or drop the Ingredient. search_recipes finds recipes, not Ingredients."
+  # A name with one clear close match was already used as it (issue #164),
+  # so the names left here have several close candidates that score alike.
+  @retry_hint "Retry with the catalog name from close_matches that the dish means (ranked by " <>
+                "similarity; the top ones score alike, e.g. Harina de trigo or Harina leudante " <>
+                "for harina 000, so choose, do not just take the first), or drop the " <>
+                "Ingredient. search_recipes finds recipes, not Ingredients."
 
   # An Ingredient without any close match is not in the catalog (issue
   # #158): guessing other names for it only burns attempts.

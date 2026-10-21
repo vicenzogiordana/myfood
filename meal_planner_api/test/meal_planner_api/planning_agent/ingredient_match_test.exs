@@ -102,5 +102,15 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatchTest do
 
       assert IngredientMatch.clear_matches(["harina 000", "Imaginary truffle"]) == %{}
     end
+
+    # Issue #166: "Pera" scores 1.0 and "Peras" 0.8 for "pera", a lead of
+    # exactly 0.2 that reads 0.19999998 once the float4 scores are subtracted.
+    test "a lead of exactly the clear margin is clear, despite floating-point noise" do
+      {:ok, pear} = Catalog.create_ingredient(%{name: "Pera", category: :otros})
+      {:ok, _} = Catalog.create_ingredient(%{name: "Peras", category: :otros})
+
+      assert ["Pera", "Peras" | _rest] = IngredientMatch.close_matches(["pera"])["pera"]
+      assert IngredientMatch.clear_matches(["pera"])["pera"].id == pear.id
+    end
   end
 end

@@ -341,6 +341,25 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       assert result["hint"] =~ "close_matches"
     end
 
+    # Issue #166: close matches stay ranked best first, not alphabetically.
+    test "close matches of an ambiguous name are ranked by similarity", %{household: h} = ctx do
+      {:ok, _} = Catalog.create_ingredient(%{name: "Queso crema", category: :otros})
+      {:ok, _} = Catalog.create_ingredient(%{name: "Queso cremoso", category: :otros})
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [%{"ingredient" => "queso cremos", "quantity" => 100, "unit" => "g"}]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert result["error"] == "unknown_ingredients"
+
+      assert result["close_matches"] == [
+               %{"ingredient" => "queso cremos", "matches" => ["Queso cremoso", "Queso crema"]}
+             ]
+    end
+
     # Issue #164: one clear candidate is used, and the substitution reported.
     test "an unknown Ingredient with one clear close match resolves to it and is reported",
          %{household: h} = ctx do
