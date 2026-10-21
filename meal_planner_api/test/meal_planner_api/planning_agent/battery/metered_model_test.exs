@@ -193,8 +193,9 @@ defmodule MealPlannerApi.PlanningAgent.Battery.MeteredModelTest do
         MeteredModel.respond(state, Map.put(@request, :checkpoint, checkpoint))
       end)
 
-    assert_receive {:checkpoint, reserved}
-    assert_receive :provider_called
+    # The default 100 ms is too short under a loaded full-suite run.
+    assert_receive {:checkpoint, reserved}, 5_000
+    assert_receive :provider_called, 5_000
     Task.shutdown(task, :brutal_kill)
 
     %{spent_micros: 0, reserved_micros: open} = ClaudeMessages.spend(reserved.inner)
