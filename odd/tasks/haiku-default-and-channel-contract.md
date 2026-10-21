@@ -47,7 +47,7 @@ Out of scope: behavior changes beyond what the contract needs.
 - [x] T2 Channel events `confirm`, `confirmation_status`, `approve_deviations`,
       `approve_absence_exception` as thin adapters over the Session. Route: inline (one channel
       module plus its test).
-- [ ] T3 CHANNELS.md audited against the code plus a contract test for documented event types
+- [x] T3 CHANNELS.md audited against the code plus a contract test for documented event types
       and fields; `recipe_draft` allowlist keeps `staples`. Route: inline (one doc, one test,
       one allowlist line; the bounded worker does not spawn subagents).
 
@@ -68,9 +68,14 @@ Out of scope: behavior changes beyond what the contract needs.
 - T1: done (commit 7846878). RED observed (3 failures: default model and fallbacks), GREEN after the default
   change; fixtures that exercise the fallback path now set `fallbacks: true` explicitly.
   Full suite: 1411 passed, 24 skipped.
-- T2: done. RED observed (6 new channel tests failing), GREEN after the adapter (30/30).
-- T3: pending
+- T2: done (commit 8449843). RED observed (6 new channel tests failing), GREEN after the adapter (30/30).
+- T3: done. RED observed (contract test: `Session.event_fields/0` undefined, the
+  `start_session` reasons and incoming rows mismatched); GREEN after the doc rewrite, the
+  allowlist accessors and the `staples` fix. Mutation check: dropping `staples` from the
+  allowlist fails "documented fields of recipe_draft drifted from the allowlist". The probe
+  also caught a crash (`String.to_existing_atom("diet")` before the atom existed) in the T2
+  absence-exception parser, fixed here.
 
 ## Next step
 
-T3.
+Full suite, `mix precommit`, PR.

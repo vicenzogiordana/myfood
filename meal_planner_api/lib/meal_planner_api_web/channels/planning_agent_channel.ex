@@ -74,10 +74,13 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
 
   # Restriction names a client may send, mapped to the atoms of
   # `MealPlannerApi.Planning.Restrictions` without creating new atoms.
-  @restriction_values %{
-    "diet" => Map.new(Restrictions.diets(), &{Atom.to_string(&1), &1}),
-    "allergy" => Map.new(Restrictions.allergen_tags(), &{Atom.to_string(&1), &1})
-  }
+  @restrictions Map.new(
+                  Enum.map(Restrictions.diets(), &{{"diet", Atom.to_string(&1)}, {:diet, &1}}) ++
+                    Enum.map(
+                      Restrictions.allergen_tags(),
+                      &{{"allergy", Atom.to_string(&1)}, {:allergy, &1}}
+                    )
+                )
 
   @impl true
   def join("planning:" <> topic_account_id, payload, socket),
@@ -289,14 +292,9 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
          "meals" => [_ | _] = meals
        })
        when is_binary(member_id) and is_binary(kind) and is_binary(value) do
-    with {:ok, restriction_value} <- @restriction_values |> Map.get(kind, %{}) |> Map.fetch(value),
+    with {:ok, restriction} <- Map.fetch(@restrictions, {kind, value}),
          {:ok, meals} <- parse_meals(meals) do
-      {:ok,
-       %{
-         member_id: member_id,
-         restriction: {String.to_existing_atom(kind), restriction_value},
-         meals: meals
-       }}
+      {:ok, %{member_id: member_id, restriction: restriction, meals: meals}}
     end
   end
 
