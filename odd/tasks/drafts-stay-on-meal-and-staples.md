@@ -24,11 +24,11 @@ codes.
 
 ## Tasks
 
-- [ ] T1 Port maps every optimizer validation code (TR-1).
-- [ ] T2 Optimizer budget deviations carry formatted amounts (CD-1).
-- [ ] T3 Staples in `create_recipe`.
-- [ ] T4 Pinned Drafts stay on their meals; `repeat_recipe` opt-in.
-- [ ] T5 Instructions, tool descriptions, CONTEXT.md and docs.
+- [x] T1 Port maps every optimizer error code (TR-1); the test reads the codes from optimizador.py. RED 7 failing, GREEN port_test 33/33. Commit 367a04a.
+- [x] T2 Optimizer budget deviations carry `*_cents` and formatted amounts (CD-1). RED 1 failing, GREEN session_workspace_test 18/18. Commit c427eec.
+- [x] T3 Staples in `create_recipe` (kept under `staples`, never priced or bought). RED 2 failing (+1 Purchase), GREEN recipe tests 33/33. Commit 6143ff0.
+- [x] T4 Pinned Drafts stay on their meals (avoided elsewhere, not a free candidate); `repeat_recipe` opt-in. RED 4 failing, GREEN recipe_draft_confirm_test 15/15. Commit 5628732.
+- [x] T5 Instructions, tool descriptions, CONTEXT.md and CHANNELS.md, committed with T3 and T4.
 
 Route: single bounded worker, inline per task (the worker is the delegated
 writer of this pipeline). No optimizer contract change: the Draft rule uses the
@@ -50,3 +50,9 @@ existing `avoided_meals` contract.
 - `mix precommit`
 
 ## Progress
+
+- Full suite `MYFOOD_TEST_DATABASE=meal_planner_api_test162 mix test`: 1395 passed, 24 skipped.
+- `mix precommit`: exit 0, 1395 passed.
+- `python -m unittest test_optimizador`: 64 OK (contract unchanged).
+
+Next step: PR review (Jorge), then merge.
