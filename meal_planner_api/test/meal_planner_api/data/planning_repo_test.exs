@@ -424,40 +424,6 @@ defmodule MealPlannerApi.Data.PlanningRepoTest do
     end
   end
 
-  describe "candidate_recipe_ids_for_slots/3 — participating member exclusions" do
-    test "excludes recipes containing an ingredient excluded by any participating member" do
-      account = insert_account("Candidate Filtering")
-
-      owner =
-        insert_user_with_active_membership(account.id, "candidate-owner@example.com", :owner)
-
-      member =
-        insert_user_with_active_membership(account.id, "candidate-member@example.com", :member)
-
-      excluded_ingredient = insert_ingredient("Excluded Candidate Ingredient")
-      allowed_ingredient = insert_ingredient("Allowed Candidate Ingredient")
-      blocked_recipe = insert_recipe("Blocked Candidate Recipe")
-      allowed_recipe = insert_recipe("Allowed Candidate Recipe")
-
-      insert_recipe_ingredient(blocked_recipe, excluded_ingredient, 100)
-      insert_recipe_ingredient(allowed_recipe, allowed_ingredient, 100)
-
-      %UserExcludedIngredient{}
-      |> UserExcludedIngredient.changeset(%{
-        user_id: member.id,
-        ingredient_id: excluded_ingredient.id,
-        reason: :allergy
-      })
-      |> Repo.insert!()
-
-      candidate_ids =
-        PlanningRepo.candidate_recipe_ids_for_slots(account.id, [owner.id, member.id], ["lunch"])
-
-      assert allowed_recipe.id in candidate_ids
-      refute blocked_recipe.id in candidate_ids
-    end
-  end
-
   # =========================================================================
   # PR2 — ephemeral-planning-sessions: PlanningRepo lifecycle CRUD
   # =========================================================================

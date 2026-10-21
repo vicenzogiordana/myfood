@@ -29,7 +29,10 @@ defmodule MealPlannerApi.LegacyPlannerRetiredTest do
     MealPlannerApi.Integrations.PythonClient.Mock,
     # The legacy planner's persisted proposals and runs (issue #151).
     MealPlannerApi.Persistence.Planning.PlanningProposal,
-    MealPlannerApi.Persistence.Planning.PlanningGenerationRun
+    MealPlannerApi.Persistence.Planning.PlanningGenerationRun,
+    # The legacy planner's candidate gate to the optimizer (issue #151); the
+    # agent searches recipes through MealPlannerApi.PlanningAgent.RecipeSearch.
+    MealPlannerApi.Services.PlanningCandidateBuilder
   ]
 
   # REST endpoints that generated or saved plans outside the agent.

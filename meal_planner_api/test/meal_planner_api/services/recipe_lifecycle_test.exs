@@ -181,16 +181,8 @@ defmodule MealPlannerApi.Services.RecipeLifecycleTest do
     assert Repo.aggregate(MealPlannerApi.Persistence.Planning.CookingChatMessage, :count) == 0
   end
 
-  test "a corrected recipe replaces it as a candidate, planned meals keep their version", f do
-    {:ok, successor} = RecipeVersions.correct(f.recipe.id, %{name: "Successor"})
-
-    candidates =
-      MealPlannerApi.Data.PlanningRepo.candidate_recipe_ids_for_slots(f.account.id, [f.user.id], [
-        "dinner"
-      ])
-
-    refute f.recipe.id in candidates
-    assert successor.recipe_id in candidates
+  test "a planned meal keeps its recipe version after a correction", f do
+    {:ok, _successor} = RecipeVersions.correct(f.recipe.id, %{name: "Successor"})
     meal = meal!(f)
     assert meal.recipe_snapshot["name"] == "Original soup"
 

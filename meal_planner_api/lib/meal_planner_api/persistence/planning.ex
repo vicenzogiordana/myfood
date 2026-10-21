@@ -147,18 +147,4 @@ defmodule MealPlannerApi.Persistence.Planning do
     )
     |> Repo.all()
   end
-
-  def recipes_for_ids(recipe_ids, account_id) when is_list(recipe_ids) do
-    from(r in Recipe,
-      where: r.id in ^recipe_ids,
-      where: is_nil(r.account_id) or r.account_id == ^account_id,
-      select: %{id: r.id, name: r.name, suitable_for_slots: r.suitable_for_slots}
-    )
-    |> Repo.all()
-    |> Enum.flat_map(fn recipe ->
-      Enum.map(recipe.suitable_for_slots, fn slot ->
-        %{id: recipe.id, name: recipe.name, slot: slot, source: "favorite"}
-      end)
-    end)
-  end
 end
