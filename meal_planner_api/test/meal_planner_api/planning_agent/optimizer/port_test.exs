@@ -127,6 +127,36 @@ defmodule MealPlannerApi.PlanningAgent.Optimizer.PortTest do
              PortOptimizer.solve(payload("error"), opts())
   end
 
+  # Every error code optimizador.py returns is a typed error, never the
+  # catch-all (issue #162: invalid_skipped_meals was missing).
+  @optimizer_source Path.expand("../../../../../optimizador.py", __DIR__)
+  @external_resource @optimizer_source
+  @validation_codes ~r/return (?:"(invalid_[a-z_]+)"|None, \("([a-z_]+)")/
+                    |> Regex.scan(File.read!(@optimizer_source), capture: :all_but_first)
+                    |> List.flatten()
+                    |> Enum.reject(&(&1 == ""))
+                    |> Enum.uniq()
+
+  test "the error codes of optimizador.py are read" do
+    assert "invalid_skipped_meals" in @validation_codes
+    assert "inconclusive" in @validation_codes
+    assert length(@validation_codes) >= 10
+  end
+
+  for code <- @validation_codes do
+    test "the optimizer error #{code} is a typed error" do
+      payload = Map.put(payload("code"), "fake_error", unquote(code))
+      expected = String.to_atom(unquote(code))
+
+      assert {:error, ^expected, %{}} = PortOptimizer.solve(payload, opts())
+    end
+  end
+
+  test "an unknown optimizer error code is the catch-all optimizer_error" do
+    payload = Map.put(payload("code"), "fake_error", "something_new")
+    assert {:error, :optimizer_error, %{}} = PortOptimizer.solve(payload, opts())
+  end
+
   test "a timeout is reported as a timeout, never as a plan" do
     started = System.monotonic_time(:millisecond)
 
