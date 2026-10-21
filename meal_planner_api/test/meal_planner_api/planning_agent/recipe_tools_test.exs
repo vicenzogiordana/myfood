@@ -518,6 +518,19 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       assert result["error"] == "draft_not_found"
     end
 
+    # Issue #164: Haiku sent `"replaces_recipe_id": ""` for a new Draft.
+    test "an empty replaces_recipe_id is absent: a new Draft is created", %{household: h} = ctx do
+      calls =
+        for {blank, name} <- [{"", "Fictitious pasta one"}, {"   ", "Fictitious pasta two"}] do
+          {"create_recipe", draft_args(ctx, %{"name" => name, "replaces_recipe_id" => blank})}
+        end
+
+      results = run_tools(h, [{:tool_calls, calls}])
+
+      assert Enum.map(results, & &1["status"]) == ["drafted", "drafted"]
+      assert results |> Enum.map(& &1["recipe_id"]) |> Enum.uniq() |> length() == 2
+    end
+
     test "a partial Draft tells the agent it is usable as is", %{household: h} = ctx do
       [result] = run_tools(h, [{:tool_calls, [{"create_recipe", draft_args(ctx)}]}])
 

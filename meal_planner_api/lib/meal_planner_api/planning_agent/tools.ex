@@ -348,13 +348,34 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
   updated workspace, and whether the turn continues. Money in the content
   carries its code-formatted amount beside the cents
   (`MealPlannerApi.PlanningAgent.Money`).
+
+  An empty or whitespace-only string given for an optional argument of the
+  tool (one its schema does not require) is absent, for every tool: models
+  send `"replaces_recipe_id": ""` meaning no value (issue #164).
   """
   @spec execute(String.t(), map(), context()) :: {map(), map(), control()}
   def execute(name, args, ctx) do
-    {content, workspace, control} = run(name, args, ctx)
+    {content, workspace, control} = run(name, without_blank_optionals(name, args), ctx)
     content = Money.annotate(content)
     {Map.put_new(content, "outcome", outcome(content)), workspace, control}
   end
+
+  defp without_blank_optionals(name, args) when is_map(args) do
+    case Enum.find(definitions(), &(&1.name == name)) do
+      nil ->
+        args
+
+      %{parameters: parameters} ->
+        required = Map.get(parameters, "required", [])
+        optional = parameters |> Map.get("properties", %{}) |> Map.drop(required)
+
+        Map.reject(args, fn {key, value} ->
+          Map.has_key?(optional, key) and is_binary(value) and String.trim(value) == ""
+        end)
+    end
+  end
+
+  defp without_blank_optionals(_name, args), do: args
 
   @doc """
   The outcome kind of a tool result: `complete`, `partial` (verified but
