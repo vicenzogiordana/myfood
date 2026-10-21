@@ -319,6 +319,15 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
         calories_per_serving: nil
       }
 
+    # Every search finds the same recipe, without the database: under the
+    # 100 ms read deadline of @fast a real search slowed by a loaded machine
+    # was cut and retried, so a no-progress run outlived its assertion
+    # (the intermittent failure of issue #151).
+    defp same_evidence do
+      recipe = fake_recipe(0)
+      {FakeRecipeSearch, steps: FakeRecipeSearch.steps!(List.duplicate({:ok, [recipe]}, 20))}
+    end
+
     defp search_forever(query),
       do: fn _request -> {:tool_calls, [{"search_recipes", %{"query" => query}}]} end
 
@@ -482,7 +491,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
     test "three attempts without verifiable progress stop and ask the Member", %{household: h} do
       # Every rewording finds the same recipe: new words, no new evidence.
       script = Enum.map(["rice", "bowl", "Fictitious", "rice bowl", "rice"], &search_forever/1)
-      {session_id, pid} = start!(h, script)
+      {session_id, pid} = start!(h, script, recipe_search: same_evidence())
 
       :ok = Session.send_message(pid, "Plan")
 
@@ -536,7 +545,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
         Enum.map(["rice", "bowl", "Fictitious", "rice bowl"], &search_forever/1) ++
           Enum.map(["rice", "bowl", "rice"], &search_forever/1)
 
-      {session_id, pid} = start!(h, script)
+      {session_id, pid} = start!(h, script, recipe_search: same_evidence())
 
       :ok = Session.send_message(pid, "Plan")
 
@@ -684,7 +693,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
         search_forever("rice")
       ]
 
-      {session_id, pid} = start!(h, script)
+      {session_id, pid} = start!(h, script, recipe_search: same_evidence())
 
       :ok = Session.send_message(pid, "Plan")
 
@@ -755,7 +764,7 @@ defmodule MealPlannerApi.PlanningAgent.SessionBoundsTest do
 
     test "a limit reached without failing tools adds no notice", %{household: h} do
       script = Enum.map(["rice", "bowl", "Fictitious", "rice bowl", "rice"], &search_forever/1)
-      {session_id, pid} = start!(h, script)
+      {session_id, pid} = start!(h, script, recipe_search: same_evidence())
 
       :ok = Session.send_message(pid, "Plan")
 
