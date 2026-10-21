@@ -21,7 +21,10 @@ defmodule MealPlannerApi.LegacyPlannerRetiredTest do
     MealPlannerApi.Optimization.OptimizerFallback,
     MealPlannerApi.Optimization.OptimizerMock,
     MealPlannerApi.Optimization.PayloadAdapter,
-    MealPlannerApi.Planning
+    MealPlannerApi.Planning,
+    # The HTTP client of the legacy Python optimizer service (issue #151).
+    MealPlannerApi.Integrations.PythonClient,
+    MealPlannerApi.Integrations.PythonClient.Mock
   ]
 
   # REST endpoints that generated or saved plans outside the agent.
