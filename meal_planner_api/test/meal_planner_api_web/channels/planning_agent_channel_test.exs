@@ -26,7 +26,8 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
   setup do
     household = household!()
     _ = persist_trial_window!(Repo.get!(Account, household.account_id), :eligible)
-    recipe!("Fictitious soup", [ingredient!("Fictitious leek")], slots: ["dinner"])
+    leek = ingredient!("Fictitious leek")
+    recipe!("Fictitious soup", [leek], slots: ["dinner"])
 
     previous = Application.get_env(:meal_planner_api, :planning_agent)
     on_exit(fn -> Application.put_env(:meal_planner_api, :planning_agent, previous) end)
@@ -37,7 +38,7 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
       {:text, "Here is your dinner."}
     ])
 
-    %{household: household}
+    %{household: household, leek: leek}
   end
 
   defp configure_agent(script) do
@@ -578,5 +579,165 @@ defmodule MealPlannerApiWeb.PlanningAgentChannelTest do
     ref = push(owner_socket, "start_session", @range)
     assert_reply(ref, :ok, _)
     cancel!(owner_socket)
+  end
+
+  # Starts a session through the channel and returns the shown Proposal.
+  defp propose!(socket) do
+    ref = push(socket, "start_session", @range)
+    assert_reply(ref, :ok, %{session_id: session_id})
+    ref = push(socket, "give_consent", %{})
+    assert_reply(ref, :ok, _)
+    ref = push(socket, "send_message", %{"text" => "Plan dinner"})
+    assert_reply(ref, :ok, _)
+    assert_push("agent_event", %{"type" => "proposal"} = proposal)
+    assert_push("agent_event", %{"type" => "run_finished", "outcome" => "complete"})
+    {session_id, proposal}
+  end
+
+  describe "confirmation and approvals" do
+    test "the Member confirms the shown Proposal; a replay and its status read the same",
+         %{household: h} do
+      socket = join!(h, h.owner)
+      {session_id, %{"proposal_id" => proposal_id}} = propose!(socket)
+
+      ref = push(socket, "confirm", %{"proposal_id" => proposal_id})
+
+      assert_reply(ref, :ok, %{
+        confirmation_id: ^proposal_id,
+        meals_count: 1,
+        shopping_lines_count: lines
+      })
+
+      assert_push("agent_event", %{
+        "type" => "proposal_confirmed",
+        "session_id" => ^session_id,
+        "proposal_id" => ^proposal_id,
+        "meals_count" => 1,
+        "shopping_lines_count" => ^lines
+      })
+
+      assert_push("agent_event", %{"type" => "session_ended"})
+
+      # Idempotent by the confirmation identity, after the session ended.
+      ref = push(socket, "confirm", %{"proposal_id" => proposal_id})
+      assert_reply(ref, :ok, %{confirmation_id: ^proposal_id, meals_count: 1})
+
+      ref = push(socket, "confirmation_status", %{"proposal_id" => proposal_id})
+
+      assert_reply(ref, :ok, %{
+        status: "confirmed",
+        confirmation_id: ^proposal_id,
+        meals_count: 1,
+        shopping_lines_count: ^lines
+      })
+
+      ref = push(socket, "confirmation_status", %{"proposal_id" => Ecto.UUID.generate()})
+      assert_reply(ref, :ok, %{status: "not_found"})
+    end
+
+    test "confirming a Proposal that is not on display saves nothing and shows it again",
+         %{household: h} do
+      socket = join!(h, h.owner)
+      {_session_id, %{"proposal_id" => proposal_id}} = propose!(socket)
+
+      ref = push(socket, "confirm", %{"proposal_id" => Ecto.UUID.generate()})
+      assert_reply(ref, :error, %{reason: "stale_proposal"})
+      assert_push("agent_event", %{"type" => "proposal", "proposal_id" => ^proposal_id})
+
+      # Only the session's Member confirms.
+      other = join!(h, member!(h))
+      ref = push(other, "confirm", %{"proposal_id" => proposal_id})
+      assert_reply(ref, :error, %{reason: "forbidden"})
+
+      cancel!(socket)
+    end
+
+    test "a Proposal over the budget is confirmed only after its Deviation Approval",
+         %{household: h, leek: leek} do
+      budget!(h, 100)
+      product!(leek, price_cents: 800)
+      socket = join!(h, h.owner)
+
+      {_session_id, %{"proposal_id" => proposal_id, "status" => "requires_approval"} = proposal} =
+        propose!(socket)
+
+      assert [%{"type" => "budget"}] = deviations = proposal["deviations"]
+
+      ref = push(socket, "confirm", %{"proposal_id" => proposal_id})
+      assert_reply(ref, :error, %{reason: "approval_required"})
+
+      ref = push(socket, "approve_deviations", %{"proposal_id" => proposal_id})
+      assert_reply(ref, :ok, _)
+
+      assert_push("agent_event", %{
+        "type" => "deviations_approved",
+        "proposal_id" => ^proposal_id,
+        "deviations" => ^deviations
+      })
+
+      ref = push(socket, "confirm", %{"proposal_id" => proposal_id})
+      assert_reply(ref, :ok, %{confirmation_id: ^proposal_id})
+    end
+
+    test "a valid Proposal needs no Deviation Approval", %{household: h} do
+      socket = join!(h, h.owner)
+      {_session_id, %{"proposal_id" => proposal_id}} = propose!(socket)
+
+      ref = push(socket, "approve_deviations", %{"proposal_id" => proposal_id})
+      assert_reply(ref, :error, %{reason: "no_deviations"})
+      cancel!(socket)
+    end
+
+    test "the Member approves an Absence Exception for an absent Member's Restriction",
+         %{household: h} do
+      vegetarian = member!(h)
+      diet!(vegetarian, :vegetarian)
+      socket = join!(h, h.owner)
+      ref = push(socket, "start_session", @range)
+      assert_reply(ref, :ok, _)
+
+      exception = %{
+        "member_id" => vegetarian.user_id,
+        "restriction" => %{"kind" => "diet", "value" => "vegetarian"},
+        "meals" => [%{"date" => "2026-11-02", "slot" => "dinner"}]
+      }
+
+      ref = push(socket, "approve_absence_exception", exception)
+      assert_reply(ref, :ok, _)
+
+      assert_push("agent_event", %{
+        "type" => "absence_exception_approved",
+        "meals" => [%{"date" => "2026-11-02", "slot" => "dinner"}]
+      })
+
+      # A Restriction the Member does not hold, an unknown one, or a meal
+      # outside the range is refused.
+      for invalid <- [
+            put_in(exception, ["restriction", "value"], "vegan"),
+            put_in(exception, ["restriction", "value"], "not-a-diet"),
+            put_in(exception, ["restriction", "kind"], "allergy"),
+            Map.put(exception, "meals", [%{"date" => "2026-11-09", "slot" => "dinner"}]),
+            Map.put(exception, "meals", [%{"date" => "not-a-date", "slot" => "dinner"}]),
+            Map.delete(exception, "member_id")
+          ] do
+        ref = push(socket, "approve_absence_exception", invalid)
+        assert_reply(ref, :error, %{reason: "invalid_absence_exception"})
+      end
+
+      cancel!(socket)
+    end
+
+    test "confirmation and approval events without a proposal_id are invalid payloads",
+         %{household: h} do
+      socket = join!(h, h.owner)
+
+      for event <- ~w(confirm confirmation_status approve_deviations) do
+        ref = push(socket, event, %{})
+        assert_reply(ref, :error, %{reason: "invalid_payload"})
+      end
+
+      ref = push(socket, "approve_deviations", %{"proposal_id" => Ecto.UUID.generate()})
+      assert_reply(ref, :error, %{reason: "session_not_active"})
+    end
   end
 end

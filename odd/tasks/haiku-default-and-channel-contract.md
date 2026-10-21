@@ -27,16 +27,29 @@ the code implements it, guarded by a contract test.
 - A contract test asserting the documented `agent_event` types (and fields where practical)
   against the session's allowlist.
 
-Out of scope: behavior changes to the channel itself (only doc fixes unless a real bug blocks
-the contract).
+Out of scope: behavior changes beyond what the contract needs.
+
+## Rationale for accepted scope changes
+
+- The audit found that `Session.confirm/3`, `confirmation_status/2`, `approve_deviations/3` and
+  `approve_absence_exception/3` (spec #93: human-only UI actions, the channel is a thin
+  adapter) were not reachable from the planning channel, so a frontend could not confirm or
+  approve anything. The issue requires documenting confirm and approvals in the lifecycle, so
+  the channel now exposes them as thin adapters (T2). The legacy `confirm_proposal` name stays
+  refused with `invalid_payload`.
+- The `recipe_draft` allowlist dropped `staples`, which CHANNELS.md documents (#162). Fixed
+  in T3, caught by the contract test.
 
 ## Tasks
 
 - [x] T1 Haiku default with fallbacks off; overrides keep Opus and fallbacks working; tests
       and docs. Route: inline (one adapter module, one config, known tests).
-- [ ] T2 CHANNELS.md audited against the code plus a contract test for documented event types
-      and fields. Route: inline (single doc plus one test; the bounded worker does not spawn
-      subagents).
+- [x] T2 Channel events `confirm`, `confirmation_status`, `approve_deviations`,
+      `approve_absence_exception` as thin adapters over the Session. Route: inline (one channel
+      module plus its test).
+- [ ] T3 CHANNELS.md audited against the code plus a contract test for documented event types
+      and fields; `recipe_draft` allowlist keeps `staples`. Route: inline (one doc, one test,
+      one allowlist line; the bounded worker does not spawn subagents).
 
 ## Acceptance criteria
 
@@ -52,11 +65,12 @@ the contract).
 
 ## Progress
 
-- T1: done. RED observed (3 failures: default model and fallbacks), GREEN after the default
+- T1: done (commit 7846878). RED observed (3 failures: default model and fallbacks), GREEN after the default
   change; fixtures that exercise the fallback path now set `fallbacks: true` explicitly.
   Full suite: 1411 passed, 24 skipped.
-- T2: pending
+- T2: done. RED observed (6 new channel tests failing), GREEN after the adapter (30/30).
+- T3: pending
 
 ## Next step
 
-T2.
+T3.

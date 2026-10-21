@@ -38,6 +38,25 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
       Workspace (its Member or the Owner), also one waiting for recovery after
       a restart; replies `%{status: "cancelled"}` or
       `%{reason: "forbidden" | "no_active_session"}`.
+    * `confirm` — `%{"proposal_id"}`; the session Member's confirmation of the
+      exact displayed Proposal (issue #169). Replies `%{confirmation_id,
+      meals_count, shopping_lines_count}` (also for a replay after the session
+      ended) or `%{reason: "forbidden" | "busy" | "member_absent" |
+      "stale_proposal" | "approval_required" | "revalidation_conflict" |
+      "unresolved"}`.
+    * `confirmation_status` — `%{"proposal_id"}`; replies `%{status:
+      "confirmed", confirmation_id, meals_count, shopping_lines_count}`,
+      `%{status: "not_found"}` or `%{status: "unknown"}`.
+    * `approve_deviations` — `%{"proposal_id"}`; the session Member's
+      Deviation Approval of that exact Proposal. Replies `:ok` or
+      `%{reason: "forbidden" | "busy" | "stale_proposal" | "no_deviations" |
+      "session_not_active"}`.
+    * `approve_absence_exception` — `%{"member_id", "restriction" => %{"kind",
+      "value"}, "meals" => [%{"date", "slot"}]}`; replies `:ok` or
+      `%{reason: "forbidden" | "busy" | "invalid_absence_exception" |
+      "session_not_active"}`.
+
+  See `docs/CHANNELS.md` for the full client contract.
 
   Outgoing: every session event is pushed as `agent_event` with its `type`
   and the `session_id`.
@@ -46,11 +65,19 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
   use MealPlannerApiWeb, :channel
 
   alias MealPlannerApi.AccountAccess
+  alias MealPlannerApi.Planning.Restrictions
   alias MealPlannerApi.PlanningAgent.Session
   alias MealPlannerApiWeb.ChannelCapability
   alias MealPlannerApiWeb.Plugs.LoadCurrentMembershipSocket
 
   @default_slots ["lunch", "dinner"]
+
+  # Restriction names a client may send, mapped to the atoms of
+  # `MealPlannerApi.Planning.Restrictions` without creating new atoms.
+  @restriction_values %{
+    "diet" => Map.new(Restrictions.diets(), &{Atom.to_string(&1), &1}),
+    "allergy" => Map.new(Restrictions.allergen_tags(), &{Atom.to_string(&1), &1})
+  }
 
   @impl true
   def join("planning:" <> topic_account_id, payload, socket),
@@ -184,6 +211,57 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
     end
   end
 
+  # Confirmation needs no running session: a replay after the session ended
+  # returns the original result.
+  def handle_in("confirm", %{"proposal_id" => proposal_id}, socket)
+      when is_binary(proposal_id) do
+    membership = socket.assigns.current_membership
+
+    case Session.confirm(membership.account_id, membership.id, proposal_id) do
+      {:ok, summary} ->
+        {:reply, {:ok, summary_data(summary)}, assign(socket, :session_pid, nil)}
+
+      {:error, reason} ->
+        {:reply, {:error, %{reason: reason_string(reason)}}, socket}
+    end
+  end
+
+  def handle_in("confirmation_status", %{"proposal_id" => proposal_id}, socket)
+      when is_binary(proposal_id) do
+    account_id = socket.assigns.current_membership.account_id
+
+    reply =
+      case Session.confirmation_status(account_id, proposal_id) do
+        {:confirmed, summary} -> Map.put(summary_data(summary), :status, "confirmed")
+        status when status in [:not_found, :unknown] -> %{status: Atom.to_string(status)}
+      end
+
+    {:reply, {:ok, reply}, socket}
+  end
+
+  def handle_in("approve_deviations", %{"proposal_id" => proposal_id}, socket)
+      when is_binary(proposal_id) do
+    membership = socket.assigns.current_membership
+
+    membership.account_id
+    |> Session.approve_deviations(membership.id, proposal_id)
+    |> ok_reply(socket)
+  end
+
+  def handle_in("approve_absence_exception", payload, socket) when is_map(payload) do
+    membership = socket.assigns.current_membership
+
+    case parse_absence_exception(payload) do
+      {:ok, exception} ->
+        membership.account_id
+        |> Session.approve_absence_exception(membership.id, exception)
+        |> ok_reply(socket)
+
+      :error ->
+        {:reply, {:error, %{reason: "invalid_absence_exception"}}, socket}
+    end
+  end
+
   def handle_in(_event, _payload, socket),
     do: {:reply, {:error, %{reason: "invalid_payload"}}, socket}
 
@@ -194,6 +272,48 @@ defmodule MealPlannerApiWeb.PlanningAgentChannel do
   end
 
   def handle_info(_message, socket), do: {:noreply, socket}
+
+  defp ok_reply(:ok, socket), do: {:reply, :ok, socket}
+
+  defp ok_reply({:error, reason}, socket),
+    do: {:reply, {:error, %{reason: reason_string(reason)}}, socket}
+
+  defp summary_data(summary),
+    do: Map.take(summary, [:confirmation_id, :meals_count, :shopping_lines_count])
+
+  # `{"member_id", "restriction" => {"kind", "value"}, "meals" => [{"date",
+  # "slot"}]}`: a malformed one never reaches the session.
+  defp parse_absence_exception(%{
+         "member_id" => member_id,
+         "restriction" => %{"kind" => kind, "value" => value},
+         "meals" => [_ | _] = meals
+       })
+       when is_binary(member_id) and is_binary(kind) and is_binary(value) do
+    with {:ok, restriction_value} <- @restriction_values |> Map.get(kind, %{}) |> Map.fetch(value),
+         {:ok, meals} <- parse_meals(meals) do
+      {:ok,
+       %{
+         member_id: member_id,
+         restriction: {String.to_existing_atom(kind), restriction_value},
+         meals: meals
+       }}
+    end
+  end
+
+  defp parse_absence_exception(_payload), do: :error
+
+  defp parse_meals(meals) do
+    Enum.reduce_while(meals, {:ok, []}, fn
+      %{"date" => date, "slot" => slot}, {:ok, acc} when is_binary(date) and is_binary(slot) ->
+        case Date.from_iso8601(date) do
+          {:ok, date} -> {:cont, {:ok, acc ++ [{date, slot}]}}
+          {:error, _} -> {:halt, :error}
+        end
+
+      _meal, _acc ->
+        {:halt, :error}
+    end)
+  end
 
   defp cancel_reply(:ok, socket),
     do: {:reply, {:ok, %{status: "cancelled"}}, assign(socket, :session_pid, nil)}
