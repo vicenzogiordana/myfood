@@ -31,10 +31,12 @@ defmodule Mix.Tasks.PlanningAgent.Battery do
   reads the same variables as `config/runtime.exs`.
   `PLANNING_AGENT_MODEL_PROVIDER=claude` selects the Claude adapter
   (`ANTHROPIC_API_KEY`, `ANTHROPIC_INPUT_PRICE_MICROS_PER_MTOK`,
-  `ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK`, the fallback prices
+  `ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK`, optionally the cache prices,
+  `PLANNING_AGENT_CLAUDE_MODEL` (default `claude-haiku-5-5`),
+  `PLANNING_AGENT_CLAUDE_EFFORT` and `PLANNING_AGENT_CLAUDE_FALLBACKS`
+  (default off; when `true`, the fallback prices
   `ANTHROPIC_FALLBACK_INPUT_PRICE_MICROS_PER_MTOK` and
-  `ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK`, optionally the cache
-  prices, `PLANNING_AGENT_CLAUDE_MODEL` and `PLANNING_AGENT_CLAUDE_EFFORT`);
+  `ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK` are required too));
   otherwise the OpenAI adapter (`OPENAI_API_KEY`,
   `OPENAI_INPUT_PRICE_MICROS_PER_MTOK`, `OPENAI_OUTPUT_PRICE_MICROS_PER_MTOK`).
   Both read `PLANNING_AGENT_SPEND_CAP_MICROS`, `PLANNING_AGENT_TOKEN_CAP`

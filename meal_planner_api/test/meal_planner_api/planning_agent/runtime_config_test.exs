@@ -149,8 +149,9 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
     refute Keyword.has_key?(adapter, :effort)
 
     assert {:ok, state} = ClaudeMessages.init(adapter)
-    assert state.config.model == "claude-opus-5-5"
+    assert state.config.model == "claude-haiku-5-5"
     assert state.config.effort == "medium"
+    assert state.config.fallbacks == false
   end
 
   test "the Claude model, effort and cache prices are read from the environment" do
@@ -170,7 +171,22 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
     assert adapter[:cache_read_price_micros_per_mtok] == 200_000
   end
 
-  test "refusal fallbacks can be turned off for models that reject them" do
+  test "Opus with refusal fallbacks is selected through the environment" do
+    config =
+      read_runtime(
+        Map.merge(@valid, @claude)
+        |> Map.put("PLANNING_AGENT_CLAUDE_MODEL", "claude-opus-5-5")
+        |> Map.put("PLANNING_AGENT_CLAUDE_FALLBACKS", "true")
+      )
+
+    adapter = Keyword.fetch!(config, ClaudeMessages)
+    assert adapter[:fallbacks] == true
+    assert {:ok, state} = ClaudeMessages.init(adapter)
+    assert state.config.model == "claude-opus-5-5"
+    assert state.config.fallbacks == true
+  end
+
+  test "refusal fallbacks stay off unless explicitly turned on" do
     off =
       read_runtime(
         Map.merge(@valid, @claude)
@@ -185,19 +201,24 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
       adapter = Keyword.fetch!(read_runtime(env), ClaudeMessages)
       refute Keyword.has_key?(adapter, :fallbacks)
       assert {:ok, state} = ClaudeMessages.init(adapter)
-      assert state.config.fallbacks == true
+      assert state.config.fallbacks == false
     end
   end
 
   test "a malformed Claude price leaves paid execution refused" do
-    config =
-      read_runtime(
-        Map.merge(@valid, @claude)
-        |> Map.put("ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK", "25e6")
-      )
+    for overrides <- [
+          %{"ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK" => "20e6"},
+          # Fallback prices matter only while fallbacks are on.
+          %{
+            "PLANNING_AGENT_CLAUDE_FALLBACKS" => "true",
+            "ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK" => "25e6"
+          }
+        ] do
+      config = read_runtime(Map.merge(@valid, @claude) |> Map.merge(overrides))
 
-    assert {:error, :pricing_unconfigured} =
-             ClaudeMessages.init(Keyword.fetch!(config, ClaudeMessages))
+      assert {:error, :pricing_unconfigured} =
+               ClaudeMessages.init(Keyword.fetch!(config, ClaudeMessages))
+    end
   end
 
   test "a malformed or partial start rate limit reads as unset" do
