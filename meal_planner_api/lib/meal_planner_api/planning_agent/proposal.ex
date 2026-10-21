@@ -63,7 +63,7 @@ defmodule MealPlannerApi.PlanningAgent.Proposal do
         end),
       "skipped" => ctx |> Workspace.skipped() |> Workspace.skipped_data(ctx.slots),
       "purchase" => Purchase.to_data(purchase),
-      "consumed_cost" => Purchase.consumed_data(purchase),
+      "consumed_cost" => Purchase.consumed_data(purchase, :proposal),
       "budget" => budget_data(purchase, ctx.household.budget_cents),
       "deviations" => deviations
     }

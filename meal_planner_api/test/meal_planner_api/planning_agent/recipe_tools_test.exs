@@ -511,6 +511,42 @@ defmodule MealPlannerApi.PlanningAgent.RecipeToolsTest do
       assert missing["hint"] =~ "never converts units"
     end
 
+    # Issue #166: an offer in another currency cannot price the Draft either.
+    test "sold_in names only units of offers in the household currency",
+         %{household: h} = ctx do
+      onion = ingredient!("Fictitious onion")
+      product!(onion, package: {1_000_000, :g}, price_cents: 900)
+      product!(onion, package: {1_000_000, :ml}, price_cents: 5, currency: "USD")
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [%{"ingredient" => onion.name, "quantity" => 1, "unit" => "unit"}]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert [missing] = result["cost"]["missing_prices"]
+      assert missing["sold_in"] == ["g"]
+      assert missing["hint"] =~ "restate the quantity in g with create_recipe"
+    end
+
+    test "only offers in another currency name no units to restate in", %{household: h} = ctx do
+      onion = ingredient!("Fictitious onion")
+      product!(onion, package: {1_000_000, :g}, price_cents: 5, currency: "USD")
+
+      args =
+        draft_args(ctx, %{
+          "ingredients" => [%{"ingredient" => onion.name, "quantity" => 1, "unit" => "unit"}]
+        })
+
+      [result] = run_tools(h, [{:tool_calls, [{"create_recipe", args}]}])
+
+      assert [missing] = result["cost"]["missing_prices"]
+      assert missing["reason"] == "no_matching_presentation"
+      refute Map.has_key?(missing, "sold_in")
+      refute Map.has_key?(missing, "hint")
+    end
+
     test "a missing price without any stored price names no units", %{household: h} = ctx do
       [result] = run_tools(h, [{:tool_calls, [{"create_recipe", draft_args(ctx)}]}])
 

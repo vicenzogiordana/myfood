@@ -176,7 +176,7 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
           })
         end),
       "brand_substitutions" => brand_substitutions(purchase),
-      "missing_prices" => Enum.map(purchase.missing, &missing_data/1),
+      "missing_prices" => Enum.map(purchase.missing, &missing_data(&1, :proposal)),
       "stale_prices" =>
         purchase.lines
         |> Enum.reject(& &1.offer.fresh?)
@@ -237,14 +237,18 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
   @spec stale?(t()) :: boolean()
   def stale?(purchase), do: Enum.any?(purchase.lines, &(not &1.offer.fresh?))
 
-  @doc "JSON-safe consumed-ingredient cost."
-  @spec consumed_data(t()) :: map()
-  def consumed_data(purchase) do
+  @doc """
+  JSON-safe consumed-ingredient cost, for a Recipe Draft (`:draft`) or a
+  Proposal (`:proposal`). A missing price in an unsold unit tells a Draft to
+  restate the quantity; in a Proposal it is informational (issue #166).
+  """
+  @spec consumed_data(t(), :draft | :proposal) :: map()
+  def consumed_data(purchase, context) when context in [:draft, :proposal] do
     %{
       "total_cents" => purchase.consumed.total_cents,
       "currency" => purchase.currency,
       "complete" => purchase.consumed.complete?,
-      "missing_prices" => Enum.map(purchase.consumed.missing, &missing_data/1)
+      "missing_prices" => Enum.map(purchase.consumed.missing, &missing_data(&1, context))
     }
   end
 
@@ -374,13 +378,19 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
 
   # The presentation units an Ingredient is sold in, when none matches the
   # unit asked (issue #164): the agent restates the quantity, code never
-  # converts units by guessing weights.
-  defp sold_in(:no_matching_presentation, offers),
-    do: offers |> Enum.map(& &1.package_unit) |> Enum.uniq() |> Enum.sort()
+  # converts units by guessing weights. Only offers in the household
+  # currency count (issue #166): another one could not price it either.
+  defp sold_in(:no_matching_presentation, offers) do
+    offers
+    |> Enum.filter(&(&1.currency == @currency))
+    |> Enum.map(& &1.package_unit)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
 
   defp sold_in(_reason, _offers), do: nil
 
-  defp missing_data(missing) do
+  defp missing_data(missing, context) do
     data = %{
       "ingredient" => missing.ingredient,
       "quantity_milli" => missing.quantity_milli,
@@ -393,17 +403,23 @@ defmodule MealPlannerApi.PlanningAgent.Purchase do
         sold_in = Enum.map(units, &Atom.to_string/1)
         listed = Enum.join(sold_in, " or ")
 
-        Map.merge(data, %{
-          "sold_in" => sold_in,
-          "hint" =>
-            "Sold only in #{listed}. For a Recipe Draft, restate the quantity in #{listed} " <>
-              "with create_recipe to price it. Code never converts units."
-        })
+        Map.merge(data, %{"sold_in" => sold_in, "hint" => sold_in_hint(listed, context)})
 
       _none ->
         data
     end
   end
+
+  defp sold_in_hint(listed, :draft),
+    do:
+      "Sold only in #{listed}. For this Draft, restate the quantity in #{listed} with " <>
+        "create_recipe to price it. Code never converts units."
+
+  # A Proposal plans recipes as they are: nothing to retry there.
+  defp sold_in_hint(listed, :proposal),
+    do:
+      "Sold only in #{listed}, so this quantity is not priced and is left out of the " <>
+        "total. Informational: code never converts units."
 
   defp ceil_div(a, b), do: div(a + b - 1, b)
 

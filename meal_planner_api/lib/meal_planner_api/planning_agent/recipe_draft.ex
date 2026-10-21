@@ -751,7 +751,7 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraft do
     ids = Enum.map(ingredients, & &1.ingredient_id)
     names = Map.new(ingredients, &{&1.ingredient_id, &1.ingredient})
     purchase = Purchase.calculate(needs, %{}, Prices.offers_for(ids), names)
-    data = Purchase.consumed_data(purchase)
+    data = Purchase.consumed_data(purchase, :draft)
     total = data["total_cents"]
 
     Map.put(data, "per_serving_cents", div(2 * total + servings, 2 * servings))

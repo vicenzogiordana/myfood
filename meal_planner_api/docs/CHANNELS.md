@@ -359,8 +359,13 @@ nutrition and cost look like:
 - A missing price with reason `no_matching_presentation` (the Ingredient is
   sold, but not in the unit asked) names the units it is sold in, e.g.
   `"sold_in": ["g"]`, with a hint to restate the quantity in that unit
-  (issue #164); Proposal `missing_prices` carry the same. Code never converts
-  units by guessing weights.
+  (issue #164). Only offers in the household currency (ARS) count toward
+  `sold_in`; when every offer is in another currency there is no `sold_in`
+  (issue #166). Proposal `missing_prices` (in `purchase` and
+  `consumed_cost`) carry the same `sold_in` with an informational hint, not a
+  retry instruction. `lookup_prices` carries no `sold_in`: it already lists
+  each offer with its presentation unit. Code never converts units by
+  guessing weights.
 
 Paid execution requires `PLANNING_AGENT_SPEND_CAP_MICROS`,
 `PLANNING_AGENT_TOKEN_CAP`, `PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS` and the

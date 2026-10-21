@@ -26,7 +26,7 @@ cannot flip.
 
 - [x] T1 Merge or reject requested names resolving to one Ingredient (route: inline, `recipe_draft.ex`, `tools.ex`, CHANNELS.md + recipe_tools test)
 - [x] T2 Rounded clear lead, boundary and ranked-order tests, moduledoc and `@retry_hint` (route: inline, `ingredient_match.ex`, `recipe_draft.ex` + tests)
-- [ ] T3 `sold_in` in the household currency, informational Proposal hint, docs reconciled (route: inline, `purchase.ex`, CHANNELS.md, #164 feature doc + tests)
+- [x] T3 `sold_in` in the household currency, informational Proposal hint, docs reconciled (route: inline, `purchase.ex`, CHANNELS.md, #164 feature doc + tests)
 
 Route note: the parent delegated this whole issue to one bounded worker; the
 worker is not an orchestrator, so every task runs inline in that worker.
@@ -49,10 +49,17 @@ worker is not an orchestrator, so every task runs inline in that worker.
   listed in two units stays two lines (the catalog allows one Ingredient per
   unit); only different requested names colliding on one Ingredient merge or
   fail.
-- T2: commit (this one); RED observed for the boundary test ("pera": Pera 1.0
+- T2: commit 66e0da0; RED observed for the boundary test ("pera": Pera 1.0
   vs Peras 0.8 subtracts to 0.19999998, so clear_matches left it out); the
   ranked-order test ("queso cremos": Queso cremoso 0.92 before Queso crema
   0.77, not alphabetical) restores the ordered assertion and passed as
   written. GREEN planning_agent suite 607 passed. `@retry_hint` no longer
   cites mozzarella/Muzzarella (now a clear match) and says the remaining
   candidates score alike.
+- T3: commit (this one); RED observed (sold_in listed a USD offer's ml unit;
+  sold_in present when only USD offers exist; Proposal hint still told the
+  agent to restate), GREEN planning_agent suite 609 passed. Docs reconciled:
+  CHANNELS.md says `lookup_prices` carries no `sold_in` (it lists each
+  offer's presentation) and that Proposal hints are informational; the #164
+  feature document no longer claims a CONTEXT.md update it did not make, and
+  CONTEXT.md's Ingredient entry gains the clear-match sentence.

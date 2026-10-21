@@ -446,8 +446,8 @@ defmodule MealPlannerApi.PlanningAgent.PurchaseToolsTest do
                  "reason" => "no_matching_presentation",
                  "sold_in" => ["unit"],
                  "hint" =>
-                   "Sold only in unit. For a Recipe Draft, restate the quantity in unit " <>
-                     "with create_recipe to price it. Code never converts units."
+                   "Sold only in unit, so this quantity is not priced and is left out of the " <>
+                     "total. Informational: code never converts units."
                },
                %{
                  "ingredient" => saffron.name,
@@ -465,6 +465,10 @@ defmodule MealPlannerApi.PlanningAgent.PurchaseToolsTest do
       assert proposal["deviations"] == []
       assert tool_result["purchase_complete"] == false
       assert length(tool_result["missing_prices"]) == 2
+      # The Proposal's consumed cost reads the same, informational hint.
+      hints = Enum.map(proposal["consumed_cost"]["missing_prices"], &Map.get(&1, "hint", ""))
+      assert Enum.any?(hints, &(&1 =~ "Informational"))
+      refute Enum.any?(hints, &(&1 =~ "restate"))
     end
 
     test "a household without a budget gets no budget Deviation",
