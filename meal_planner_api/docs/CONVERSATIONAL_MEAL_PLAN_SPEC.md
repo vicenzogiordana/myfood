@@ -4,6 +4,12 @@
 **Estado:** Draft
 **Alcance:** Especificación de producto; no describe una funcionalidad disponible
 
+> **Historical note (2026-10-21, issue #151).** This draft predates the culinary agent
+> (spec #93). The pieces it names as current were retired with the legacy planner:
+> `Generation.Server`, the typed-intent planning session (issue #110) and
+> `PlanningCandidateBuilder` (issue #151). Planning now runs through
+> `MealPlannerApi.PlanningAgent.Session`; see `docs/CHANNELS.md`.
+
 ---
 
 ## 1. Problem Statement
@@ -12,7 +18,7 @@ Una persona necesita convertir una conversación sobre alimentación en un plan 
 
 El sistema actual contiene piezas útiles, pero no entrega todavía este flujo de punta a punta:
 
-- `Generation.Server` arma candidatos y ejecuta el optimizador con un presupuesto leído por el servidor, pero hoy envía límites de macronutrientes deliberadamente permisivos.
+- `Generation.Server` (retired in #110) armaba candidatos y ejecutaba el optimizador con un presupuesto leído por el servidor, pero enviaba límites de macronutrientes deliberadamente permisivos.
 - `PlanningCandidateBuilder` y `PlanningRepo` controlan los IDs de recetas, el alcance de cuenta, los participantes activos y las exclusiones persistidas.
 - `optimizador.py` elige exactamente una receta por día y franja, aplica límites nutricionales por día y un límite de presupuesto sobre todo el período solicitado.
 - Existe una frontera de intents tipados y una sesión de planificación capaz de guardar un intent validado, pero ese intent todavía no está conectado al pipeline canónico de generación.
@@ -214,7 +220,7 @@ Si la normalización produce más de una interpretación razonable de un ingredi
 | Exclusiones | Mantener `PlanningRepo` como filtro canónico de ingredientes excluidos de los participantes y sumar exclusiones conversacionales normalizadas en la misma etapa de elegibilidad. |
 | Dieta | Agregar una clasificación canónica verificable antes de filtrar; no usar el nombre o texto generado de una receta como prueba. |
 | Ingrediente requerido | Incorporar una restricción semanal de cobertura: al menos una receta elegida contiene cada ingrediente requerido duro. |
-| Nutrientes | Reemplazar los límites permisivos de `Generation.Server` por rangos diarios confirmados y validados por el servidor. |
+| Nutrientes | Reemplazar los límites permisivos de `Generation.Server` (retired in #110) por rangos diarios confirmados y validados por el servidor. |
 | Presupuesto | Resolver el máximo autorizado de cuenta y usar como límite efectivo el menor entre ese máximo y el valor inferior confirmado; fallar de forma cerrada si no puede resolverse. Nunca aceptar costos declarados por IA. |
 | Precio faltante | Representar desconocido de forma distinta de cero y excluirlo de una prueba de presupuesto duro. |
 | Optimización | Extender `optimizador.py` en su seam actual: restricciones diarias para nutrientes y globales para presupuesto e inclusiones semanales. |
