@@ -56,10 +56,14 @@ worker is not an orchestrator, so every task runs inline in that worker.
   written. GREEN planning_agent suite 607 passed. `@retry_hint` no longer
   cites mozzarella/Muzzarella (now a clear match) and says the remaining
   candidates score alike.
-- T3: commit (this one); RED observed (sold_in listed a USD offer's ml unit;
+- T3: commit ca40474; RED observed (sold_in listed a USD offer's ml unit;
   sold_in present when only USD offers exist; Proposal hint still told the
   agent to restate), GREEN planning_agent suite 609 passed. Docs reconciled:
   CHANNELS.md says `lookup_prices` carries no `sold_in` (it lists each
   offer's presentation) and that Proposal hints are informational; the #164
   feature document no longer claims a CONTEXT.md update it did not make, and
   CONTEXT.md's Ingredient entry gains the clear-match sentence.
+- Closure: `MYFOOD_TEST_DATABASE=meal_planner_api_test166 mix precommit`
+  (compile --warnings-as-errors, deps.unlock --unused, format, full suite)
+  exit 0, 1408 passed, 24 skipped. Python optimizer untouched, not run.
+- Next step: PR to main, Jorge's review, merge (authorized by the user).
