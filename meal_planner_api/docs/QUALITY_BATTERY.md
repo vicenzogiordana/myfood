@@ -128,14 +128,17 @@ The battery makes paid provider calls. It needs:
     `ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK`. Optional:
     `ANTHROPIC_CACHE_WRITE_PRICE_MICROS_PER_MTOK` (default 1.25x input),
     `ANTHROPIC_CACHE_READ_PRICE_MICROS_PER_MTOK` (default 1x input),
-    `PLANNING_AGENT_CLAUDE_MODEL` (default `claude-haiku-5-5`),
-    `PLANNING_AGENT_CLAUDE_EFFORT` (default `medium`) and
-    `PLANNING_AGENT_CLAUDE_FALLBACKS` (default `false`, since
-    `claude-haiku-5-5` rejects server-side refusal fallbacks; set `true` for
-    models that accept them, such as `claude-opus-5-5`). With fallbacks on,
-    the refusal-fallback prices `ANTHROPIC_FALLBACK_INPUT_PRICE_MICROS_PER_MTOK`
-    and `ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK` (the highest price
-    among the possible fallback models) are required.
+    `PLANNING_AGENT_CLAUDE_MODEL` (default `claude-haiku-5-5`, issue #169:
+    the Haiku battery passed 75/75 with 0 hard violations at about 1/24 of
+    the Opus cost, #156), `PLANNING_AGENT_CLAUDE_EFFORT` (default `medium`)
+    and `PLANNING_AGENT_CLAUDE_FALLBACKS` (default `false`, because Haiku 5.5
+    rejects server-side refusal fallbacks; set `true` on a model that accepts
+    them, such as `claude-opus-5-5`). With fallbacks on, the refusal-fallback
+    prices `ANTHROPIC_FALLBACK_INPUT_PRICE_MICROS_PER_MTOK` and
+    `ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK` (the highest price
+    among the possible fallback models) are required too. To run the battery
+    on Opus: `PLANNING_AGENT_CLAUDE_MODEL=claude-opus-5-5
+    PLANNING_AGENT_CLAUDE_FALLBACKS=true` plus Opus and fallback prices.
 - The OR-Tools optimizer: `PLANNING_AGENT_MAX_CONCURRENT_OPTIMIZER_RUNS`,
   plus `OPTIMIZER_PYTHON` pointing at a Python with the version pinned in
   `requirements.txt`.

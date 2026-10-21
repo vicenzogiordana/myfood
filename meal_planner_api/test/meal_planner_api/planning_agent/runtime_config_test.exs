@@ -151,6 +151,7 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
     assert {:ok, state} = ClaudeMessages.init(adapter)
     assert state.config.model == "claude-haiku-5-5"
     assert state.config.effort == "medium"
+    assert state.config.fallbacks == false
   end
 
   test "the Claude model, effort and cache prices are read from the environment" do
@@ -170,16 +171,29 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
     assert adapter[:cache_read_price_micros_per_mtok] == 200_000
   end
 
-  test "refusal fallbacks are read from the environment, off when unset" do
-    for {value, expected} <- [{"false", false}, {"true", true}] do
-      config =
-        read_runtime(
-          Map.merge(@valid, @claude)
-          |> Map.put("PLANNING_AGENT_CLAUDE_FALLBACKS", value)
-        )
+  test "Opus with refusal fallbacks is selected through the environment" do
+    config =
+      read_runtime(
+        Map.merge(@valid, @claude)
+        |> Map.put("PLANNING_AGENT_CLAUDE_MODEL", "claude-opus-5-5")
+        |> Map.put("PLANNING_AGENT_CLAUDE_FALLBACKS", "true")
+      )
 
-      assert Keyword.fetch!(config, ClaudeMessages)[:fallbacks] == expected
-    end
+    adapter = Keyword.fetch!(config, ClaudeMessages)
+    assert adapter[:fallbacks] == true
+    assert {:ok, state} = ClaudeMessages.init(adapter)
+    assert state.config.model == "claude-opus-5-5"
+    assert state.config.fallbacks == true
+  end
+
+  test "refusal fallbacks stay off unless explicitly turned on" do
+    off =
+      read_runtime(
+        Map.merge(@valid, @claude)
+        |> Map.put("PLANNING_AGENT_CLAUDE_FALLBACKS", "false")
+      )
+
+    assert Keyword.fetch!(off, ClaudeMessages)[:fallbacks] == false
 
     for unset <- [nil, "maybe"] do
       env = Map.merge(@valid, @claude)
@@ -187,7 +201,6 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
       adapter = Keyword.fetch!(read_runtime(env), ClaudeMessages)
       refute Keyword.has_key?(adapter, :fallbacks)
       assert {:ok, state} = ClaudeMessages.init(adapter)
-      # The default model, Haiku 5.5, rejects refusal fallbacks (issue #156).
       assert state.config.fallbacks == false
     end
   end
@@ -195,7 +208,7 @@ defmodule MealPlannerApi.PlanningAgent.RuntimeConfigTest do
   test "a malformed Claude price leaves paid execution refused" do
     for overrides <- [
           %{"ANTHROPIC_OUTPUT_PRICE_MICROS_PER_MTOK" => "20e6"},
-          # Fallback prices are needed only with refusal fallbacks on.
+          # Fallback prices matter only while fallbacks are on.
           %{
             "PLANNING_AGENT_CLAUDE_FALLBACKS" => "true",
             "ANTHROPIC_FALLBACK_OUTPUT_PRICE_MICROS_PER_MTOK" => "25e6"

@@ -1935,7 +1935,7 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     "question" => ~w(text),
     "proposal" => ~w(proposal_id status meals skipped purchase consumed_cost budget deviations),
     "recipe_draft" =>
-      ~w(recipe_id name origin draft servings slots ingredients steps nutrition cost),
+      ~w(recipe_id name origin draft servings slots ingredients staples steps nutrition cost),
     "optimizer_failed" => ~w(reason),
     "session_brand_changed" => ~w(ingredient brand source previous_brand previous_source),
     "consent_required" => [],
@@ -1956,6 +1956,18 @@ defmodule MealPlannerApi.PlanningAgent.Session do
     "session_recovered" => ~w(interrupted)
   }
   @meal_fields ~w(date slot recipe_id name origin draft diners guests batches)
+
+  @doc """
+  The event allowlist: every event type a subscriber can receive, with the
+  only fields it carries besides `type`. `docs/CHANNELS.md` documents
+  exactly these (checked by the planning channel contract test, issue #169).
+  """
+  @spec event_fields() :: %{String.t() => [String.t()]}
+  def event_fields, do: @event_fields
+
+  @doc "The fields of each meal of a Proposal (or of an event's `meals`)."
+  @spec meal_fields() :: [String.t()]
+  def meal_fields, do: @meal_fields
 
   # Streaming carries progress only: known event types with known fields.
   # Anything else, such as raw tool output or model reasoning, is dropped.

@@ -70,12 +70,13 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
         output_price_micros_per_mtok: 4_000_000,
         cache_write_price_micros_per_mtok: 1_250_000,
         cache_read_price_micros_per_mtok: 100_000,
+        # Most tests exercise the fallback-on path (Opus-style); the default
+        # (Haiku, fallbacks off) is asserted with this key removed.
+        fallbacks: true,
         fallback_input_price_micros_per_mtok: 2_000_000,
         fallback_output_price_micros_per_mtok: 8_000_000,
         max_tokens: 1_000,
         max_concurrent_calls: 100,
-        # Most tests exercise the refusal fallback path, which is off by default.
-        fallbacks: true,
         req_options: [plug: {Req.Test, @stub}]
       ],
       overrides
@@ -208,13 +209,38 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessagesTest do
       assert {:error, :provider_unconfigured} = ClaudeMessages.init(opts(effort: "huge"))
     end
 
-    # Haiku 5.5 rejects the `fallbacks` parameter (issue #156), so its
-    # default runs without server-side refusal fallbacks.
-    test "defaults to Claude Haiku 5.5 at medium effort without refusal fallbacks" do
+    test "defaults to Claude Haiku 5.5 at medium effort with refusal fallbacks off" do
       {:ok, state} = ClaudeMessages.init(Keyword.delete(opts(), :fallbacks))
       assert state.config.model == "claude-haiku-5-5"
       assert state.config.effort == "medium"
       assert state.config.fallbacks == false
+    end
+
+    test "by default neither the fallbacks parameter nor its beta is sent" do
+      stub_response(text_response("ok"))
+      {:ok, state} = ClaudeMessages.init(Keyword.delete(opts(), :fallbacks))
+
+      assert {:ok, _, _} = ClaudeMessages.respond(state, @request)
+      assert_received {:provider_called, conn, body}
+      assert body["model"] == "claude-haiku-5-5"
+      refute Map.has_key?(body, "fallbacks")
+      assert Plug.Conn.get_req_header(conn, "anthropic-beta") == []
+    end
+
+    test "Opus with refusal fallbacks is still available through overrides" do
+      stub_response(text_response("ok"))
+      {:ok, state} = ClaudeMessages.init(opts(model: "claude-opus-5-5", fallbacks: true))
+      assert state.config.model == "claude-opus-5-5"
+      assert state.config.fallbacks == true
+
+      assert {:ok, _, _} = ClaudeMessages.respond(state, @request)
+      assert_received {:provider_called, conn, body}
+      assert body["model"] == "claude-opus-5-5"
+      assert body["fallbacks"] == "default"
+
+      assert Plug.Conn.get_req_header(conn, "anthropic-beta") == [
+               "server-side-fallback-2026-07-01"
+             ]
     end
   end
 

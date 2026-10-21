@@ -2,12 +2,15 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
   @moduledoc """
   Anthropic Messages API adapter for the planning agent (issue #141, spec
   #93), over raw HTTP with `Req` (`POST /v1/messages`). Default model
-  `claude-haiku-5-5` (issue #156: it passes the quality battery at a
-  fraction of the cost of `claude-opus-5-5`).
+  `claude-haiku-5-5` with refusal fallbacks off (issue #169): the Haiku
+  quality battery passed with no hard violations at about 1/24 of the Opus
+  cost (#156). `claude-opus-5-5` remains available through `:model`.
 
   ## Request
 
-  Every request sends adaptive thinking with an explicit `output_config.effort` (default
+  Thinking cannot be disabled on Claude Opus 5.5, so every request (on any
+  model) sends
+  adaptive thinking with an explicit `output_config.effort` (default
   `medium`). It never sends `budget_tokens`, sampling parameters, an
   assistant prefill or a forced `tool_choice`: tool use is `auto`. Neutral
   tools become Claude tool definitions; tool calls and results travel as
@@ -45,12 +48,11 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
   stop that is not a finished turn (`end_turn`, `tool_use`,
   `stop_sequence`) is `:invalid_provider_response`. None is transient.
 
-  Server-side refusal fallback (`fallbacks: "default"`, beta
-  `server-side-fallback-2026-07-01`) is off by default, because Claude
-  Haiku 5.5 rejects the parameter. With `fallbacks: true` (for models that
-  accept it, such as `claude-opus-5-5`) a safety-classifier decline is
-  re-run on the model Anthropic recommends for its category, in the same
-  call.
+  Server-side refusal fallback is off by default, because Claude Haiku 5.5
+  rejects the `fallbacks` parameter. With `fallbacks: true` (e.g. on
+  `claude-opus-5-5`) each request sends `fallbacks: "default"` and the beta
+  `server-side-fallback-2026-07-01`: a safety-classifier decline is re-run
+  on the model Anthropic recommends for its category, in the same call.
 
   ## Spend
 
@@ -95,7 +97,7 @@ defmodule MealPlannerApi.PlanningAgent.Model.ClaudeMessages do
         output_price_micros_per_mtok: nil,
         cache_write_price_micros_per_mtok: nil,      # default 1.25x input
         cache_read_price_micros_per_mtok: nil,       # default 1x input
-        fallbacks: false,                            # true needs the fallback prices
+        fallbacks: false,                            # true only for models that accept it
         max_fallback_attempts: 1,
         fallback_input_price_micros_per_mtok: nil,
         fallback_output_price_micros_per_mtok: nil,
