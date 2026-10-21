@@ -116,6 +116,43 @@ defmodule MealPlannerApi.PlanningAgent.RecipeDraftConfirmTest do
     assert proposal["purchase"]["complete"] == true
   end
 
+  # Staples are assumed at home (issue #162): never in the Purchase.
+  test "a Draft's staples are not in the Purchase", %{household: h} = ctx do
+    args =
+      Map.update!(
+        draft_args(ctx),
+        "ingredients",
+        &(&1 ++
+            [
+              %{"ingredient" => "Water", "quantity" => 400, "unit" => "ml"},
+              %{"ingredient" => "Salt", "quantity" => 4, "unit" => "g"}
+            ])
+      )
+
+    script = [
+      {:tool_calls, [{"create_recipe", args}]},
+      {:tool_calls, [{"run_optimizer", %{}}]},
+      {:tool_calls, [{"present_proposal", %{}}]},
+      {:text, "Here is the plan."}
+    ]
+
+    attrs = session_attrs(h, h.owner, {@monday, @monday})
+
+    {:ok, %{session_id: session_id, pid: pid}} =
+      Session.start(attrs,
+        model: {Scripted, script: script},
+        optimizer: {FakeOptimizer, result: pick(@draft_name)},
+        subscriber: self()
+      )
+
+    :ok = Session.send_message(pid, "Plan Monday with something new")
+
+    assert_receive {:planning_agent_event, ^session_id, %{"type" => "proposal"} = proposal}
+    assert proposal["purchase"]["total_cents"] == 900 + 1_500
+    assert proposal["purchase"]["complete"] == true
+    assert proposal["purchase"]["missing_prices"] == []
+  end
+
   test "confirmation saves the used Draft as a private AI-created Household Recipe",
        %{household: h} = ctx do
     %{proposal: proposal, draft_id: draft_id} = present_draft!(h, ctx)

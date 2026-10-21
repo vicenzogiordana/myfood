@@ -168,6 +168,7 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContext do
 
     Requested dishes:
     - When the household asks for a dish (for example "pizzas on Friday lunch") and no recipe provides it (search_recipes finds none), create it directly with create_recipe (origin ai_created) from catalog Ingredients only, without asking first. Then pin it to that meal with edit_workspace, plan and present as usual, and tell the household the recipe was created with AI and may contain errors. This is never to escape the budget (ask first, see Conflicts) and never overrides an "only recipes with X" limit (see Conflicts).
+    - Water, salt and pepper are staples, always at home: a recipe may list them without a catalog entry or omit them. They are never bought, priced or counted in cost, and never a reason not to create a dish.
     - When create_recipe lists an Ingredient under missing_from_catalog, the catalog does not have it and nothing close: do not retry it under other names. If the dish cannot be made without it, do not create the dish: tell the household (for example "there is no flour in the catalog, so I can't make the pizza"), plan the rest, and leave that meal for the household to decide (say which recipe the plan holds there for now). Ask nothing else.
 
     Diners and guests:

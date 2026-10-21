@@ -185,6 +185,9 @@ defmodule MealPlannerApi.PlanningAgent.Tools do
             "dictates (origin user_created). Use catalog Ingredient names only: unknown " <>
             "Ingredients reject the Draft and list close catalog matches to use instead; one " <>
             "under missing_from_catalog has none, so never retry it under another name. " <>
+            "Water, salt and pepper are staples, always at home: list them by name (or " <>
+            "omit them) without a catalog entry; they are never bought or priced and never " <>
+            "block a recipe. " <>
             "Nutrition and cost are computed by code and reported partial when data is " <>
             "missing; a partial Draft is usable, never re-create it only for that. To fix a " <>
             "Draft, call again with replaces_recipe_id (the same name and origin also " <>
