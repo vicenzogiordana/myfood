@@ -192,6 +192,13 @@ defmodule MealPlannerApi.PlanningAgent.HouseholdContextTest do
       assert dishes =~ "never a reason not to create a dish"
     end
 
+    test "a resolved Ingredient keeps the Draft and is told only when it matters (issue #164)",
+         %{dishes: dishes} do
+      assert dishes =~ "lists an Ingredient under resolved"
+      assert dishes =~ "Keep the Draft"
+      assert dishes =~ "only when it could change the dish"
+    end
+
     test "no rule tells the agent to plan a requested dish with another recipe",
          %{instructions: instructions} do
       refute instructions =~ "plan with the closest recipe and say so"

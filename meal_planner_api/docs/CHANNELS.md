@@ -313,14 +313,26 @@ Ingredients are catalog Ingredients only. Names match the catalog by
 similarity (Postgres `pg_trgm` trigrams over unaccented names, issue #160): a
 spelling variant that is unambiguous (case, accents, a plural ending, e.g.
 "limones" for "Limón") is used under its catalog name and reported to the
-agent; any other unknown one rejects the Draft and the agent gets close
-catalog matches ranked by similarity to retry with ("Muzzarella" for
-"mozzarella", "Harina de trigo" for "harina 000"). `lookup_prices`,
+agent. An unknown name with one clear close match (the only candidate, or a
+top candidate scoring at least 0.2 above the next, issue #164) is used as
+that match and reported under `resolved`, e.g.
+`[{"requested": "Tomate", "used": "Tomate perita"}]`; the agent tells the
+Member only when the meaning could differ. Any other unknown one (two close
+candidates alike, e.g. "harina 000" for "Harina de trigo" and "Harina
+leudante") rejects the Draft and the agent gets close catalog matches ranked
+by similarity to retry with. `lookup_prices`,
 `set_session_brand` and the `search_recipes` ingredient matching use the same
 similarity. One with no close match is
 listed as missing from the catalog, and the agent tells the Member that dish
 cannot be made instead of guessing other names), and its nutrition and cost
-are computed by code. When the Member asks for a dish no recipe provides, the
+are computed by code. Two different requested names that resolve to
+one Ingredient (issue #166, e.g. "Tomate" resolved to "Tomate perita" next to
+an explicit "Tomate perita") are added up into one line when their units
+match and reported under `merged_ingredients`
+(`[{"requested": ["Tomate", "Tomate perita"], "ingredient": "Tomate perita",
+"quantity_milli": 500000, "unit": "g"}]`); in different units the Draft is
+rejected with `duplicate_ingredient`, whose `duplicates` name the requested
+names, the Ingredient and the units. When the Member asks for a dish no recipe provides, the
 agent creates it directly as an AI-created Draft, without asking first, and says
 it was created with AI and may contain errors; it still asks first before
 creating recipes to fit an infeasible budget or a plan limited to "only recipes
@@ -344,6 +356,16 @@ nutrition and cost look like:
   `missing` names the Ingredients without data ("partial nutrition").
 - `cost` is the consumed-ingredient cost at stored prices; missing prices are
   named and left out of the total (`complete: false`), never zero.
+- A missing price with reason `no_matching_presentation` (the Ingredient is
+  sold, but not in the unit asked) names the units it is sold in, e.g.
+  `"sold_in": ["g"]`, with a hint to restate the quantity in that unit
+  (issue #164). Only offers in the household currency (ARS) count toward
+  `sold_in`; when every offer is in another currency there is no `sold_in`
+  (issue #166). Proposal `missing_prices` (in `purchase` and
+  `consumed_cost`) carry the same `sold_in` with an informational hint, not a
+  retry instruction. `lookup_prices` carries no `sold_in`: it already lists
+  each offer with its presentation unit. Code never converts units by
+  guessing weights.
 
 Paid execution requires `PLANNING_AGENT_SPEND_CAP_MICROS`,
 `PLANNING_AGENT_TOKEN_CAP`, `PLANNING_AGENT_MAX_CONCURRENT_PROVIDER_CALLS` and the

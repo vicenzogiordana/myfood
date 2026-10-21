@@ -19,8 +19,16 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
       name (case-insensitive) or, when exactly one close candidate is the
       same name up to case, accents, punctuation and a plural ending, that
       one. A merely similar name ("queso crema" / "Queso cremoso") is never
-      resolved: it stays a close match for the agent and the household to
-      choose
+      resolved here; `lookup_prices` and `set_session_brand` stop at this
+      step and list it with its close matches
+    * `clear_matches/1` — for `create_recipe` only, on the names `resolve/1`
+      left out (issue #164): the one close candidate of each request, when
+      it is the only one or its lead over the next, rounded to #{4}
+      decimals (issue #166), is at least #{0.2}. So "Queso mozzarella" is
+      used as "Muzzarella", its only candidate, and a merely similar name
+      with no rival is used too. A request whose top candidates score
+      alike ("harina 000" / "Harina de trigo", "Harina leudante") is left
+      out, for the agent to choose from `close_matches/1`
   """
 
   import Ecto.Query
@@ -29,6 +37,8 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
   alias MealPlannerApi.Repo
 
   @threshold 0.4
+  @clear_lead 0.2
+  @lead_precision 4
   @max_matches 5
   @max_search_matches 20
   @accented "áàâäéèêëíìîïóòôöúùûüñç"
@@ -39,7 +49,7 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
                      |> Map.new()
 
   @candidates_sql """
-  SELECT q.name, m.id, m.name
+  SELECT q.name, m.id, m.name, m.score::float
   FROM unnest($1::text[]) AS q(name)
   CROSS JOIN LATERAL (
     SELECT i.id, i.name,
@@ -99,11 +109,7 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
         end
       end)
 
-    by_id =
-      case Enum.map(variant_ids, &elem(&1, 1)) do
-        [] -> %{}
-        ids -> from(i in Ingredient, where: i.id in ^ids) |> Repo.all() |> Map.new(&{&1.id, &1})
-      end
+    by_id = by_id(Enum.map(variant_ids, &elem(&1, 1)))
 
     names
     |> Enum.flat_map(fn name ->
@@ -116,7 +122,41 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
     |> Map.new()
   end
 
+  @doc """
+  The catalog Ingredient each of `names` clearly means, by requested name:
+  its only close candidate, or a top candidate scoring at least
+  #{@clear_lead} above the next one. Ambiguous names and names without
+  candidates are left out.
+  """
+  @spec clear_matches([String.t()]) :: %{String.t() => Ingredient.t()}
+  def clear_matches(names) do
+    clear_ids =
+      names
+      |> candidates(@max_matches)
+      |> Enum.flat_map(fn {name, found} ->
+        case found do
+          [only] -> [{name, only.id}]
+          [top, next | _] -> if clear_lead?(top, next), do: [{name, top.id}], else: []
+          [] -> []
+        end
+      end)
+
+    by_id = by_id(Enum.map(clear_ids, &elem(&1, 1)))
+    Map.new(clear_ids, fn {name, id} -> {name, Map.fetch!(by_id, id)} end)
+  end
+
   # ---------------------------------------------------------------------------
+
+  # Scores are float4 similarities read as floats, so a lead of exactly
+  # 0.2 (1.0 against 0.8) subtracts to 0.19999998. The lead is
+  # rounded first so that noise never flips the decision (issue #166).
+  defp clear_lead?(top, next),
+    do: Float.round(top.score - next.score, @lead_precision) >= @clear_lead
+
+  defp by_id([]), do: %{}
+
+  defp by_id(ids),
+    do: from(i in Ingredient, where: i.id in ^ids) |> Repo.all() |> Map.new(&{&1.id, &1})
 
   defp exact([]), do: %{}
 
@@ -152,9 +192,9 @@ defmodule MealPlannerApi.PlanningAgent.IngredientMatch do
             Repo.query!(@candidates_sql, [wanted, limit]).rows
           end)
 
-        Enum.reduce(Enum.reverse(rows), empty, fn [name, id, catalog_name], acc ->
+        Enum.reduce(Enum.reverse(rows), empty, fn [name, id, catalog_name, score], acc ->
           {:ok, id} = Ecto.UUID.load(id)
-          Map.update(acc, name, [], &[%{id: id, name: catalog_name} | &1])
+          Map.update(acc, name, [], &[%{id: id, name: catalog_name, score: score} | &1])
         end)
     end
   end
