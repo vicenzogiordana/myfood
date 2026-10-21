@@ -69,13 +69,19 @@ Out of scope: behavior changes beyond what the contract needs.
   change; fixtures that exercise the fallback path now set `fallbacks: true` explicitly.
   Full suite: 1411 passed, 24 skipped.
 - T2: done (commit 8449843). RED observed (6 new channel tests failing), GREEN after the adapter (30/30).
-- T3: done. RED observed (contract test: `Session.event_fields/0` undefined, the
+- T3: done (commit 906118c). RED observed (contract test: `Session.event_fields/0` undefined, the
   `start_session` reasons and incoming rows mismatched); GREEN after the doc rewrite, the
   allowlist accessors and the `staples` fix. Mutation check: dropping `staples` from the
   allowlist fails "documented fields of recipe_draft drifted from the allowlist". The probe
   also caught a crash (`String.to_existing_atom("diet")` before the atom existed) in the T2
   absence-exception parser, fixed here.
 
+## Verification
+
+- `MYFOOD_TEST_DATABASE=meal_planner_api_test169 mix precommit` (compile with warnings as
+  errors, deps.unlock, format, full test suite): exit 0, 1421 passed, 24 skipped. Remaining
+  warnings are pre-existing, in test files this feature does not touch.
+
 ## Next step
 
-Full suite, `mix precommit`, PR.
+Push and open the PR; review by Jorge el Curioso.
