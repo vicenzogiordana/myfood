@@ -70,7 +70,7 @@ pipeline contract); the work was mapped with bounded searches first.
 
 - No doc or config presents the legacy planner as current.
 - No dead modules remain from the legacy planner.
-- The legacy tables are dropped through a migration.
+- The legacy tables are cleaned up through a migration (issue option one).
 - Each Jorge follow-up has a test through a public interface.
 - `mix precommit` passes.
 
@@ -84,6 +84,7 @@ pipeline contract); the work was mapped with bounded searches first.
 
 Baseline at origin/main 6590112: 1408 passed, 24 skipped.
 `mix precommit` at `d9ff43f`: passed, 1411 passed, 24 skipped.
+Full suite 10 times in a row at `d9ff43f`: 10/10 runs 1411 passed, 24 skipped.
 
 ## Next step
 
